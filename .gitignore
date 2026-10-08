@@ -1,0 +1,6 @@
+.venv/
+.cache/
+__pycache__/
+index/
+logs/
+data/uk_wiki/
