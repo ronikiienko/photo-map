@@ -1,4 +1,4 @@
-"""Split the book into stories, chunk them, embed the chunks, save to index/."""
+"""Split the book into stories, chunk them, embed the chunks, save to index/sherlock/."""
 
 import json
 import re
@@ -40,7 +40,8 @@ for title, text, first_line in read_stories():
         line = first_line + text.count("\n", 0, start)  # line in the book where the chunk starts
         chunks.append({"title": title, "text": c, "line": line})
 
-config.INDEX_DIR.mkdir(exist_ok=True)
-np.save(config.INDEX_DIR / "embeddings.npy", np.concatenate(vectors))
-(config.INDEX_DIR / "chunks.json").write_text(json.dumps(chunks, ensure_ascii=False, indent=1))
+out = config.ROOT / "index" / "sherlock"
+out.mkdir(parents=True, exist_ok=True)
+np.save(out / "embeddings.npy", np.concatenate(vectors))
+(out / "chunks.json").write_text(json.dumps(chunks, ensure_ascii=False, indent=1))
 print(f"saved {len(chunks)} chunks")

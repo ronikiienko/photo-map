@@ -6,8 +6,10 @@ os.environ["HF_HOME"] = str(ROOT / ".cache" / "huggingface")  # keep model downl
 os.environ.setdefault("HF_HUB_OFFLINE", "1")  # use the local copy, don't check huggingface.co (set to 0 to re-download)
 
 MODEL_ID = "google/embeddinggemma-2"
+CORPUS = "simplewiki"  # "sherlock" (build_index.py) or "simplewiki" (build_simplewiki.py)
 BOOK = ROOT / "data" / "sherlock.txt"
-INDEX_DIR = ROOT / "index"
+WIKI = ROOT / "data" / "simplewiki" / "20231101.simple" / "train-00000-of-00001.parquet"
+INDEX_DIR = ROOT / "index" / CORPUS
 
 CHUNK_TOKENS = 512    # chunk size in tokens
 OVERLAP_TOKENS = 64   # tokens shared between neighbouring chunks
@@ -19,14 +21,12 @@ QUERY_PROMPT = "task: search result | query: "
 DOC_PROMPT = "title: {title} | text: "   # model default is "title: none | text: "; we fill in the story title
 
 
-def load_model():
+def load_model(images=False):
     import torch
     from sentence_transformers import SentenceTransformer
 
     # bfloat16 on GPU (fast); float32 on CPU (CPU bfloat16 is ~4x slower). Never float16: it can produce NaN vectors.
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    return SentenceTransformer(
-        MODEL_ID,
-        model_kwargs={"torch_dtype": dtype},
-        config_kwargs={"vision_config": None, "audio_config": None},  # text-only 270M part
-    )
+    # text-only = 270M; images=True also loads the 170M vision encoder
+    parts = {"audio_config": None} if images else {"vision_config": None, "audio_config": None}
+    return SentenceTransformer(MODEL_ID, model_kwargs={"torch_dtype": dtype}, config_kwargs=parts)
