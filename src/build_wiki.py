@@ -1,4 +1,4 @@
-"""Chunk Simple English Wikipedia and embed it, saving progress so it can be stopped and rerun.
+"""Chunk a wiki (config.CORPUS: simplewiki or wikivoyage) and embed it, saving progress so it can be stopped and rerun.
     step 1: chunks.json        all chunks, fewest tokens first (similar lengths batch together = faster)
     step 2: shards/NNNN.npy    vectors for 10k chunks each; finished shards are skipped on rerun
     step 3: embeddings.npy     all shards joined
@@ -10,6 +10,7 @@ import time
 import config
 import numpy as np
 import pyarrow.parquet as pq
+import torch
 
 from chunking import chunk_uniform
 
@@ -31,7 +32,7 @@ def prompt(c):
 if chunks_file.exists():
     chunks = json.loads(chunks_file.read_text())
 else:
-    articles = pq.read_table(config.WIKI).to_pylist()
+    articles = pq.read_table(config.WIKI, columns=["title", "url", "text"]).to_pylist()
     chunks = []
     for n, a in enumerate(articles, start=1):
         for _, c in chunk_uniform(a["text"], model.tokenizer, config.CHUNK_TOKENS, config.OVERLAP_TOKENS):
@@ -61,7 +62,14 @@ for s in range(n_shards):
     if not path.exists():
         longest = len(model.tokenizer(part[-1]).input_ids)  # sorted by tokens: last is longest
         batch = max(8, min(128, TOKENS_PER_BATCH // longest))
-        vectors = model.encode(part, normalize_embeddings=True, batch_size=batch)
+        while True:  # out of GPU memory (e.g. another program holds some): retry with half the batch
+            try:
+                vectors = model.encode(part, normalize_embeddings=True, batch_size=batch)
+                break
+            except torch.OutOfMemoryError:
+                batch = max(1, batch // 2)
+                torch.cuda.empty_cache()
+                print(f"  out of GPU memory, retrying shard {s + 1} with batch {batch}", flush=True)
         np.save(shard_dir / "tmp.npy", vectors)
         (shard_dir / "tmp.npy").rename(path)  # only finished shards get their real name
         done_chars += sum(map(len, part))

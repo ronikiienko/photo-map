@@ -6,9 +6,12 @@ os.environ["HF_HOME"] = str(ROOT / ".cache" / "huggingface")  # keep model downl
 os.environ.setdefault("HF_HUB_OFFLINE", "1")  # use the local copy, don't check huggingface.co (set to 0 to re-download)
 
 MODEL_ID = "google/embeddinggemma-2"
-CORPUS = "simplewiki"  # "sherlock" (build_index.py) or "simplewiki" (build_simplewiki.py)
+CORPUS = "wikivoyage"  # "sherlock" (build_index.py), "simplewiki" or "wikivoyage" (build_wiki.py)
 BOOK = ROOT / "data" / "sherlock.txt"
-WIKI = ROOT / "data" / "simplewiki" / "20231101.simple" / "train-00000-of-00001.parquet"
+WIKI = {  # articles as parquet: title, url, text
+    "simplewiki": ROOT / "data" / "simplewiki" / "20231101.simple" / "train-00000-of-00001.parquet",
+    "wikivoyage": ROOT / "data" / "wikivoyage" / "articles.parquet",  # made by parse_wikivoyage.py
+}.get(CORPUS)
 INDEX_DIR = ROOT / "index" / CORPUS
 
 CHUNK_TOKENS = 512    # chunk size in tokens

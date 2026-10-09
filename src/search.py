@@ -22,13 +22,27 @@ if (config.INDEX_DIR / "custom_embeddings.npy").exists():
     vectors = np.concatenate([vectors, np.load(config.INDEX_DIR / "custom_embeddings.npy")])
     chunks += json.loads((config.INDEX_DIR / "custom_chunks.json").read_text())
 
-# Optional shortening (Matryoshka): keep the first DIM numbers, rescale to length 1.
-vectors = vectors[:, : config.DIM]
-vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+# Photos from embed_images.py, if any: searched as a separate list, because image vectors and text vectors
+# score on different scales (an image query likes every image a bit, a text query likes text a bit more).
+photos, photo_vectors = [], np.zeros((0, vectors.shape[1]), dtype=np.float32)
+if (config.INDEX_DIR / "image_embeddings.npy").exists():
+    photo_vectors = np.load(config.INDEX_DIR / "image_embeddings.npy")
+    photos = json.loads((config.INDEX_DIR / "image_chunks.json").read_text())
+
+
+def shorten(v):
+    """Optional shortening (Matryoshka): keep the first DIM numbers, rescale to length 1."""
+    v = v[:, : config.DIM]
+    return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)  # broken images are all-zero rows
+
+
+vectors, photo_vectors = shorten(vectors), shorten(photo_vectors)
 
 model = config.load_model(images=True)
+model[0].processor.image_processor.max_soft_tokens = 140  # same image budget as embed_images.py
 
-IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+PHOTOS_K = 3  # photo results shown under the text results
+IMAGE_TYPES ={".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
 
 def as_image(query):
@@ -63,6 +77,14 @@ def search(query):
     for i in range(n_wiki, len(chunks)):
         if rank[i] >= config.TOP_K:
             print(f"\n  custom [{chunks[i]['title']}] {chunks[i]['url']}: rank {rank[i] + 1}, score {scores[i]:.3f}")
+    if photos:
+        print("\n--- photos ---")
+        scores = photo_vectors @ q
+        for i in np.argsort(-scores)[:PHOTOS_K]:
+            p = photos[i]
+            more = len(p.get("articles", [])) - 1  # e.g. a flag shown on many pages
+            also = f" (+{more} more articles)" if more > 0 else ""
+            print(f"{scores[i]:.3f}  [{p['title']}]{also} {p['text'][:100]}\n  {config.ROOT / p['image']}")
 
 
 if len(sys.argv) > 1:
