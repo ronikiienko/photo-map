@@ -1,4 +1,4 @@
-//! Reading a photo file the same way everywhere (bake_pages, streaming, side panel): EXIF orientation applied,
+//! Reading a photo file the same way everywhere (baking, streaming): EXIF orientation applied,
 //! transparent parts filled with the viewer's background.
 
 use image::{DynamicImage, ImageDecoder, ImageReader, RgbaImage};

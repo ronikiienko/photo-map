@@ -1,7 +1,7 @@
-//! A map bundle (made by src/make_map.py), plus a spatial grid for "which photo is under the mouse".
+//! A map bundle (made by `photo-map make`, see make/), plus a spatial grid for "which photo is under the mouse".
 
 use memmap2::Mmap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ pub struct Manifest {
     pub photos: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Photo {
     /// Path inside the bundle (originals/NNNNNN.ext).
     pub file: String,
@@ -29,6 +29,24 @@ pub struct Photo {
     pub meta: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A named area of the map (regions.json, made by make/regions.rs).
+#[derive(Deserialize)]
+pub struct Label {
+    pub name: String,
+    /// The region's most central photo.
+    pub x: f32,
+    pub y: f32,
+    /// Root-mean-square distance of its photos from its centre, in world units.
+    pub spread: f32,
+    pub photos: usize,
+}
+
+#[derive(Deserialize, Default)]
+pub struct Regions {
+    /// Coarse first; each level's regions biggest first.
+    pub levels: Vec<Vec<Label>>,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Point {
@@ -41,11 +59,13 @@ pub struct MapData {
     pub manifest: Manifest,
     pub photos: Vec<Photo>,
     pub points: Vec<Point>,
-    /// The always-loaded levels as BC7 pages (bake_pages), uploaded to the GPU as they are.
+    /// The always-loaded levels as BC7 pages (make/bake.rs), uploaded to the GPU as they are.
     pub pages: Mmap,
     /// Lowercased title, metadata and source path, for search.
     pub search_text: Vec<String>,
     pub grid: Grid,
+    /// Empty if the bundle has no regions.json.
+    pub regions: Regions,
 }
 
 impl MapData {
@@ -65,7 +85,11 @@ impl MapData {
             })
             .collect();
         let grid = Grid::new(&points);
-        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, pages, search_text, grid })
+        let mut regions: Regions = read("regions.json").ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        for level in &mut regions.levels {
+            level.sort_by(|a, b| b.photos.cmp(&a.photos));
+        }
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, pages, search_text, grid, regions })
     }
 
     pub fn n(&self) -> usize {

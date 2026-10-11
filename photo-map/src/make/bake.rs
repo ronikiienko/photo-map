@@ -1,40 +1,32 @@
-//! Bakes a map bundle's always-loaded levels (1 px ... 64 px) as BC7 pages. Run by src/make_map.py:
-//!     cargo run --bin bake_pages -- <bundle>   ->  <bundle>/pages_bc7.bin
+//! The always-loaded levels (1 px ... 64 px) as BC7 pages: pages_bc7.bin, uploaded to the GPU as it is.
 //! Every level L holds each photo in a slot of 2^L px (photo fitted into the top-left corner, real shape kept,
 //! small photos enlarged). Slots sit on PAGE x PAGE pages in a grid of PAGE / 2^L per row; slot = photo index.
 //! Pages are written level 0 first, each as BC7 blocks (16 bytes per 4 x 4 pixels).
 
-#[path = "../photo.rs"]
-mod photo;
-
+use super::step;
+use crate::data::Photo;
+use crate::pages::{PAGE as PAGE_U32, STREAMED};
+use crate::photo;
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
 
-// intel_tex_2's precompiled ISPC kernels need the C++ runtime (__gxx_personality_v0)
-#[link(name = "stdc++")]
-unsafe extern "C" {}
-
-const PAGE: usize = 4096;
-const LEVELS: usize = 7; // 1, 2, 4, ... 64 px
+const PAGE: usize = PAGE_U32 as usize;
+const LEVELS: usize = STREAMED; // 1, 2, 4, ... 64 px
 const TOP: usize = 1 << (LEVELS - 1);
 /// Rows compressed per task: a multiple of 4 (a BC7 block row).
 const STRIP: usize = 64;
 
-fn main() {
-    let bundle = PathBuf::from(std::env::args().nth(1).expect("usage: bake_pages <bundle>"));
-    let photos: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(bundle.join("photos.json")).unwrap()).unwrap();
+pub fn bake(bundle: &Path, photos: &[Photo]) -> io::Result<()> {
     let n = photos.len();
-    let started = Instant::now();
+    step("baking the always-loaded levels");
 
     // 1. every photo fitted to 64 px (longer side) in the corner of a 64 x 64 tile
     let done = AtomicUsize::new(0);
     let mut tiles = vec![0u8; n * TOP * TOP * 4];
     tiles.par_chunks_mut(TOP * TOP * 4).enumerate().for_each(|(i, tile)| {
-        if let Some(img) = photo::load(&bundle.join(photos[i]["file"].as_str().unwrap())) {
+        if let Some(img) = photo::load(&bundle.join(&photos[i].file)) {
             let img = photo::fit(&img, TOP as u32, true);
             for (y, row) in img.as_raw().chunks(img.width() as usize * 4).enumerate() {
                 tile[y * TOP * 4..y * TOP * 4 + row.len()].copy_from_slice(row);
@@ -42,7 +34,7 @@ fn main() {
         }
         let d = done.fetch_add(1, Ordering::Relaxed) + 1;
         if d % 10_000 == 0 {
-            eprintln!("decoded {d} / {n} ({:.0}s)", started.elapsed().as_secs_f32());
+            step(format!("decoded {d} / {n}"));
         }
     });
 
@@ -68,14 +60,14 @@ fn main() {
                 }
             }
             let mut blocks = vec![0u8; PAGE * PAGE];
-            blocks.par_chunks_mut(PAGE * STRIP).zip(px.par_chunks(PAGE * 4 * STRIP)).for_each(|(dst, src)| {
+            px.par_chunks(PAGE * STRIP * 4).zip(blocks.par_chunks_mut(PAGE / 4 * STRIP / 4 * 16)).for_each(|(src, dst)| {
                 let surface = intel_tex_2::RgbaSurface { data: src, width: PAGE as u32, height: STRIP as u32, stride: (PAGE * 4) as u32 };
                 intel_tex_2::bc7::compress_blocks_into(&settings, &surface, dst);
             });
             out.extend_from_slice(&blocks);
         }
         levels[level] = out;
-        eprintln!("level {level} ({s} px): {pages} page(s) ({:.0}s)", started.elapsed().as_secs_f32());
+        step(format!("level {level} ({s} px): {pages} page(s)"));
         if level > 0 {
             // average 2 x 2 pixels: tiles of s px -> s/2 px
             let h = s / 2;
@@ -95,10 +87,11 @@ fn main() {
             tiles = next;
         }
     }
-    let mut file = std::io::BufWriter::new(File::create(bundle.join("pages_bc7.bin")).unwrap());
+    let mut file = io::BufWriter::new(std::fs::File::create(bundle.join("pages_bc7.bin"))?);
     for l in &levels {
-        file.write_all(l).unwrap();
+        file.write_all(l)?;
     }
-    file.flush().unwrap();
-    eprintln!("BAKE_DONE in {:.0}s", started.elapsed().as_secs_f32());
+    file.flush()?;
+    step("pages_bc7.bin written");
+    Ok(())
 }

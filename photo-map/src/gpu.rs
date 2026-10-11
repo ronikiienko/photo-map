@@ -209,10 +209,7 @@ impl MapRenderer {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.082, g: 0.09, b: 0.11, a: 1.0 }),
-                    store: wgpu::StoreOp::Store,
-                },
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(BACKGROUND), store: wgpu::StoreOp::Store },
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
@@ -224,4 +221,24 @@ impl MapRenderer {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..6, 0..self.n);
     }
+}
+
+/// The viewer's background (photo.rs fills transparent pixels with the same colour).
+const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.082, g: 0.09, b: 0.11, a: 1.0 };
+
+/// Just the background, when no map is open.
+pub fn clear(encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("clear"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(BACKGROUND), store: wgpu::StoreOp::Store },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
 }

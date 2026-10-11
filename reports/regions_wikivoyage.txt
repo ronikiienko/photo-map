@@ -1,0 +1,172 @@
+level 1 region   0 (14891 photos) -> squares and plazas           | squares and plazas 0.021, buildings 0.018, monuments 0.016, architecture 0.016, city 0.015, streets 0.013
+level 1 region   1 (13232 photos) -> beach                        | beach 0.048, sea 0.046, coast 0.043, beaches and resorts 0.040, lakes 0.035, rivers and lakes 0.034
+level 1 region   2 (11271 photos) -> food                         | food 0.015, music and performance 0.013, traditional dress 0.012, crafts 0.012, dance 0.008, interiors 0.008
+level 1 region   3 (11184 photos) -> mountains                    | mountains 0.049, hiking 0.047, nature 0.045, hills 0.042, landscape 0.040, rock formations 0.040
+level 1 region   4 ( 6590 photos) -> temples                      | temples 0.051, ruins 0.037, monuments 0.033, palaces 0.032, mosques 0.031, castles and fortresses 0.025
+level 1 region   5 ( 4025 photos) -> transport                    | transport 0.056, trains and railways 0.049, vehicles 0.031, stations 0.021, signs and text 0.017, cars 0.015
+level 1 region   6 ( 4581 photos) -> logos and symbols            | logos and symbols 0.044, signs and text 0.030, diagrams 0.022, roads 0.022, transport 0.015, vehicles 0.015
+level 1 region   7 ( 6766 photos) -> buildings                    | buildings 0.038, old town 0.038, offices 0.037, shops 0.035, houses 0.030, restaurants and cafes 0.030
+level 1 region   8 ( 5824 photos) -> castles and fortresses       | castles and fortresses 0.042, old town 0.031, towers 0.025, buildings 0.024, city 0.024, aerial views 0.022
+level 1 region   9 ( 3691 photos) -> underwater                   | underwater 0.064, wildlife 0.061, coral reefs 0.059, animals 0.056, reptiles 0.049, mammals 0.046
+level 1 region  10 ( 6193 photos) -> churches                     | churches 0.046, old town 0.033, buildings 0.029, castles and fortresses 0.027, palaces 0.026, architecture 0.025
+level 1 region  11 ( 4123 photos) -> maps                         | maps 0.054, diagrams 0.031, airports 0.026, roads 0.018, ports 0.017, rivers and lakes 0.016
+level 2 region   0 ( 3164 photos) -> music and performance        | music and performance 0.031, traditional dress 0.028, dance 0.025, festivals 0.025, groups of people 0.014, crowds 0.014
+level 2 region   1 ( 1418 photos) -> signs and text               | traffic sign 0.061, signs and text 0.048, vehicle registration plate 0.042, logos and symbols 0.031, parking meter 0.026, transport 0.026
+level 2 region   2 ( 4123 photos) -> -                            | maps 0.054, diagrams 0.031, airports 0.026, roads 0.018, industrial area 0.017, ports 0.017
+level 2 region   3 ( 3001 photos) -> bus station                  | bus station 0.030, traffic sign 0.029, billboard 0.028, street 0.027, shopping mall 0.024, crosswalk 0.023
+level 2 region   4 ( 3376 photos) -> mountain snowy               | mountain snowy 0.061, mountain 0.056, mountain path 0.055, mountains 0.054, hills 0.049, ski slope 0.048
+level 2 region   5 ( 3623 photos) -> interiors                    | train interior 0.039, interiors 0.039, elevator lobby 0.038, engine room 0.036, airport terminal 0.034, throne room 0.033
+level 2 region   6 ( 3612 photos) -> harbor                       | harbor 0.062, boats and ships 0.061, boat 0.053, watercraft 0.053, boat deck 0.048, sea 0.048
+level 2 region   7 ( 1743 photos) -> crafts                       | crafts 0.028, jewelry shop 0.026, flea market 0.025, market 0.025, gift shop 0.024, candy store 0.023
+level 2 region   8 ( 3859 photos) -> bronze sculpture             | bronze sculpture 0.038, monuments 0.033, statues 0.030, memorials 0.029, formal garden 0.028, sculpture 0.026
+level 2 region   9 ( 3086 photos) -> downtown                     | downtown 0.068, candy store 0.048, shopfront 0.047, auto showroom 0.046, shops 0.046, bookstore 0.045
+level 2 region  10 ( 3291 photos) -> office building              | office building 0.059, building facade 0.053, conference center 0.045, department store 0.041, apartment building 0.040, shopping mall 0.038
+level 2 region  11 ( 2583 photos) -> waterfalls                   | waterfalls 0.073, waterfall 0.071, mountain path 0.062, mountain snowy 0.061, hiking 0.060, nature 0.059
+level 2 region  12 ( 1936 photos) -> ocean deep underwater        | underwater 0.107, ocean deep underwater 0.103, marine invertebrates 0.099, coral reefs 0.099, sea turtle 0.075, marine mammal 0.069
+level 2 region  13 ( 1720 photos) -> airport terminal             | airport terminal 0.061, airports 0.044, bus station 0.040, traffic sign 0.037, airfield 0.035, train station 0.031
+level 2 region  14 ( 3680 photos) -> courthouse                   | courthouse 0.059, schoolhouse 0.059, office building 0.056, fire station 0.048, oast house 0.046, mansion 0.045
+level 2 region  15 ( 2674 photos) -> synagogue                    | church 0.084, churches 0.077, synagogue 0.044, cemetery 0.040, mausoleum 0.038, religion 0.035
+level 2 region  16 ( 2096 photos) -> lake                         | lake 0.078, lakes 0.071, rivers and lakes 0.070, nature 0.055, river 0.050, swimming hole 0.050
+level 2 region  17 ( 3103 photos) -> rivers and lakes             | lake 0.060, rivers and lakes 0.059, river 0.056, lakes 0.054, rivers 0.049, dam 0.044
+level 2 region  18 ( 2416 photos) -> rock formations              | rock formations 0.078, mountain path 0.063, vegetation desert 0.061, canyons 0.058, mountain 0.058, mountains 0.058
+level 2 region  19 ( 3519 photos) -> mansion                      | mansion 0.042, oast house 0.040, building facade 0.039, old town 0.038, palace 0.037, house 0.037
+level 2 region  20 ( 4421 photos) -> beaches and resorts          | beach 0.081, beaches and resorts 0.069, ocean 0.065, sea 0.063, coast 0.062, beach house 0.056
+level 2 region  21 (  829 photos) -> vehicle registration plate   | vehicle registration plate 0.085, traffic sign 0.081, traffic light 0.049, logos and symbols 0.047, highway 0.046, auto part 0.045
+level 2 region  22 ( 1690 photos) -> wildlife                     | wildlife 0.085, animals 0.074, mammals 0.068, animal 0.067, mammal 0.062, reptiles 0.053
+level 2 region  23 (   44 photos) -> -                            | maps 0.065, residential neighborhood 0.044, industrial area 0.038, landfill 0.036, hayfield 0.034, embassy 0.033
+level 2 region  24 ( 3020 photos) -> church                       | church 0.047, churches 0.044, building facade 0.040, squares and plazas 0.036, old town 0.035, plaza 0.032
+level 2 region  25 ( 1752 photos) -> auto part                    | traffic sign 0.060, vehicle registration plate 0.056, logos and symbols 0.046, auto part 0.035, traffic light 0.033, scoreboard 0.031
+level 2 region  26 ( 2260 photos) -> city                         | city 0.042, downtown 0.034, river 0.032, skyscrapers 0.030, bridge 0.030, bridges 0.029
+level 2 region  27 ( 2268 photos) -> asia temple                  | asia temple 0.076, japanese garden 0.054, pagoda 0.052, temples 0.047, zen garden 0.040, bamboo forest 0.032
+level 2 region  28 ( 2809 photos) -> forest path                  | forest path 0.052, forest road 0.046, nature 0.046, broadleaf forest 0.043, forest 0.043, mountain path 0.043
+level 2 region  29 ( 1739 photos) -> highway                      | vehicle registration plate 0.084, traffic sign 0.079, highway 0.044, auto part 0.042, logos and symbols 0.041, bicycle wheel 0.035
+level 2 region  30 ( 1915 photos) -> mosque                       | temples 0.067, asia temple 0.065, mosque 0.052, mosques 0.045, mausoleum 0.043, monuments 0.041
+level 2 region  31 ( 2741 photos) -> restaurant kitchen           | food 0.072, restaurant kitchen 0.056, snack 0.053, dessert 0.050, fast food 0.049, baked goods 0.046
+level 2 region  32 ( 2203 photos) -> kasbah                       | castles and fortresses 0.052, castle 0.051, kasbah 0.042, old town 0.038, ruins 0.033, churches 0.032
+level 2 region  33 ( 2407 photos) -> ruins                        | ruins 0.060, archaelogical excavation 0.057, kasbah 0.047, mausoleum 0.047, catacomb 0.047, castles and fortresses 0.043
+level 2 region  34 ( 2563 photos) -> train interior               | train interior 0.074, transport 0.073, trains and railways 0.068, train 0.064, train station 0.061, bus interior 0.054
+level 2 region  35 ( 1361 photos) -> castle                       | castle 0.073, castles and fortresses 0.073, oast house 0.049, tower 0.039, ruins 0.038, towers 0.036
+level 2 region  36 (  261 photos) -> traffic sign                 | traffic sign 0.081, vehicle registration plate 0.066, highway 0.061, logos and symbols 0.047, roads 0.044, desert road 0.038
+level 2 region  37 (   65 photos) -> -                            | home appliance 0.077, computer keyboard 0.073, microphone 0.071, headphones 0.071, logos and symbols 0.066, mixing bowl 0.065
+level 3 region   0 (   49 photos) -> -                            | home appliance 0.076, computer keyboard 0.072, microphone 0.070, headphones 0.070, logos and symbols 0.065, mixing bowl 0.064
+level 3 region   1 (  116 photos) -> -                            | traffic sign 0.115, vehicle registration plate 0.099, highway 0.097, roads 0.076, desert road 0.056, bicycle wheel 0.056
+level 3 region   2 (   90 photos) -> -                            | traffic sign 0.088, vehicle registration plate 0.080, highway 0.066, transport 0.064, signs and text 0.053, traffic light 0.050
+level 3 region   3 (   48 photos) -> -                            | night 0.059, sky 0.044, earth from space 0.042, stars and galaxies 0.041, tundra 0.040, sunset 0.034
+level 3 region   4 (   29 photos) -> -                            | maps 0.070, residential neighborhood 0.055, hayfield 0.050, landfill 0.045, fire station 0.043, industrial area 0.042
+level 3 region   5 (   15 photos) -> -                            | islands and atolls 0.059, islands 0.056, tundra 0.055, maps 0.054, marine invertebrates 0.045, ice shelf 0.041
+level 3 region   6 (   16 photos) -> -                            | home appliance 0.079, computer keyboard 0.075, microphone 0.074, headphones 0.074, logos and symbols 0.068, mixing bowl 0.068
+level 3 region   7 (   67 photos) -> -                            | vehicle registration plate 0.126, traffic sign 0.105, highway 0.071, traffic light 0.056, roads 0.055, plate 0.046
+level 3 region   8 (  208 photos) -> traffic sign                 | vehicle registration plate 0.128, traffic sign 0.108, highway 0.084, traffic light 0.063, roads 0.062, auto part 0.055
+level 3 region   9 (  174 photos) -> -                            | airport terminal 0.116, airfield 0.114, airports 0.109, runway 0.089, aerial views 0.081, aircraft 0.078
+level 3 region  10 (  470 photos) -> lighthouse                   | lighthouse 0.132, lighthouses 0.123, flashlight 0.063, lantern 0.054, coast 0.050, tower 0.050
+level 3 region  11 (  202 photos) -> marine mammal                | marine mammal 0.101, wildlife 0.081, marine invertebrates 0.078, sea turtle 0.076, animals 0.071, harbor seal 0.068
+level 3 region  12 (  472 photos) -> boat                         | boat 0.084, boats and ships 0.083, boat deck 0.080, watercraft 0.079, barge 0.065, harbor 0.057
+level 3 region  13 (  407 photos) -> caves                        | caves 0.118, rock formations 0.088, grotto 0.085, catacomb 0.084, rock arch 0.071, swimming hole 0.068
+level 3 region  14 (  299 photos) -> harbours                     | old town 0.042, city 0.039, river 0.034, harbours 0.030, rivers and lakes 0.029, harbor 0.029
+level 3 region  15 (  448 photos) -> castle                       | castle 0.067, castles and fortresses 0.056, palace 0.053, mansion 0.052, palaces 0.050, oast house 0.042
+level 3 region  16 (  572 photos) -> roads                        | traffic sign 0.090, vehicle registration plate 0.075, highway 0.068, roads 0.047, desert road 0.036, auto part 0.035
+level 3 region  17 (  408 photos) -> downtown                     | maps 0.063, downtown 0.035, residential neighborhood 0.032, diagrams 0.030, roads 0.029, streets 0.026
+level 3 region  18 (  384 photos) -> billboard                    | traffic sign 0.053, signs and text 0.044, highway 0.035, billboard 0.035, vehicle registration plate 0.029, desert road 0.028
+level 3 region  19 (  931 photos) -> beach house                  | beach 0.101, beaches and resorts 0.095, beach house 0.076, ocean 0.067, sea 0.062, coast 0.057
+level 3 region  20 (  325 photos) -> snack                        | food 0.057, snack 0.047, seafood 0.046, fruit 0.045, vegetable 0.043, cooking spray 0.041
+level 3 region  21 (  309 photos) -> bridge                       | bridge 0.083, bridges 0.078, viaduct 0.073, aqueduct 0.065, rope bridge 0.063, railroad track 0.056
+level 3 region  22 (  479 photos) -> natural history museum       | office building 0.067, courthouse 0.066, building facade 0.051, natural history museum 0.046, legislative chamber 0.045, science museum 0.045
+level 3 region  23 (  303 photos) -> desert                       | hills 0.045, vegetation desert 0.045, desert 0.042, villages 0.042, village 0.041, archaelogical excavation 0.041
+level 3 region  24 (  290 photos) -> windmill                     | windmill 0.081, oast house 0.080, cottage 0.071, wind farm 0.066, barn 0.062, cabin 0.059
+level 3 region  25 (  576 photos) -> formal garden                | formal garden 0.052, mansion 0.051, palace 0.049, botanical garden 0.049, courtyard 0.044, schoolhouse 0.044
+level 3 region  26 (  464 photos) -> baseball stadium             | baseball stadium 0.058, football stadium 0.046, soccer stadium 0.046, baseball field 0.040, amusement park 0.038, athletic field 0.037
+level 3 region  27 (  421 photos) -> mosque                       | mosque 0.090, mosques 0.075, kasbah 0.057, mausoleum 0.050, synagogue 0.041, medina 0.040
+level 3 region  28 ( 1188 photos) -> temples                      | church 0.081, churches 0.074, temples 0.040, synagogue 0.039, religion 0.039, mosque 0.035
+level 3 region  29 (  912 photos) -> throne room                  | throne room 0.029, bedchamber 0.028, paintings 0.028, burial chamber 0.027, art 0.024, portraits 0.023
+level 3 region  30 (  263 photos) -> train interior               | vehicle registration plate 0.048, traffic sign 0.045, signs and text 0.042, transport 0.036, train interior 0.029, logos and symbols 0.028
+level 3 region  31 (  257 photos) -> vehicle registration plate   | vehicle registration plate 0.098, traffic sign 0.097, highway 0.070, logos and symbols 0.055, roads 0.052, auto part 0.049
+level 3 region  32 (  635 photos) -> aerial views                 | aerial views 0.064, residential neighborhood 0.055, city 0.054, hills 0.050, mountains 0.049, mountain 0.049
+level 3 region  33 (  641 photos) -> martial arts gym             | asia temple 0.087, pagoda 0.054, temples 0.050, martial arts gym 0.042, japanese garden 0.039, palace 0.032
+level 3 region  34 (  647 photos) -> swimwear                     | beach 0.094, beaches and resorts 0.087, beach house 0.065, ocean 0.061, sea 0.057, swimwear 0.056
+level 3 region  35 (  399 photos) -> highway                      | traffic sign 0.100, vehicle registration plate 0.094, highway 0.058, signs and text 0.052, logos and symbols 0.050, auto part 0.045
+level 3 region  36 (  418 photos) -> ruins                        | ruins 0.070, archaelogical excavation 0.060, temples 0.058, castles and fortresses 0.055, asia temple 0.048, excavation 0.044
+level 3 region  37 (  624 photos) -> embassy                      | maps 0.049, embassy 0.037, earth from space 0.027, legislative chamber 0.024, diagrams 0.024, groups of people 0.024
+level 3 region  38 (  867 photos) -> bus                          | transport 0.079, bus 0.077, bus interior 0.073, vehicles 0.062, vehicle 0.062, bus station 0.061
+level 3 region  39 (  532 photos) -> river                        | lake 0.077, rivers and lakes 0.074, lakes 0.074, swimming hole 0.071, mountains 0.062, mountain path 0.061
+level 3 region  40 (  398 photos) -> castles and fortresses       | castles and fortresses 0.053, mosque 0.052, kasbah 0.050, ruins 0.045, mausoleum 0.042, castle 0.041
+level 3 region  41 (  483 photos) -> bamboo forest                | forest path 0.088, bamboo forest 0.075, rainforest 0.074, forest road 0.073, forest 0.073, broadleaf forest 0.073
+level 3 region  42 (  849 photos) -> airport terminal             | airport terminal 0.098, elevator lobby 0.071, train interior 0.065, subway station 0.065, shopping mall 0.064, food court 0.061
+level 3 region  43 (  432 photos) -> rock formations              | rock formations 0.052, statues 0.050, bronze sculpture 0.050, asia temple 0.049, archaelogical excavation 0.046, caves 0.045
+level 3 region  44 (  549 photos) -> digital clock                | traffic sign 0.061, vehicle registration plate 0.060, logos and symbols 0.042, auto part 0.038, traffic light 0.035, parking meter 0.031
+level 3 region  45 (  858 photos) -> synagogue                    | church 0.046, building facade 0.044, old town 0.043, churches 0.043, squares and plazas 0.033, synagogue 0.032
+level 3 region  46 (  562 photos) -> building facade              | building facade 0.054, office building 0.053, conference center 0.040, department store 0.039, courthouse 0.038, train station 0.038
+level 3 region  47 (  493 photos) -> pagoda                       | asia temple 0.086, temples 0.072, pagoda 0.062, religion 0.045, monuments 0.039, traditional dress 0.032
+level 3 region  48 (  956 photos) -> festivals                    | music and performance 0.037, festivals 0.033, crowds 0.028, dance 0.024, performance arena 0.023, sports 0.020
+level 3 region  49 (  651 photos) -> campus                       | office building 0.041, bus station 0.037, building facade 0.034, mosque 0.033, campus 0.032, courthouse 0.030
+level 3 region  50 (  654 photos) -> coral reefs                  | underwater 0.128, ocean deep underwater 0.125, coral reefs 0.088, sea turtle 0.080, marine invertebrates 0.078, ocean 0.076
+level 3 region  51 (  971 photos) -> coast                        | beach 0.082, coast 0.072, ocean 0.071, beaches and resorts 0.067, sea 0.067, cliff 0.062
+level 3 region  52 (  444 photos) -> auto showroom                | shopfront 0.041, office building 0.039, auto showroom 0.036, signs and text 0.036, gas station 0.034, building facade 0.034
+level 3 region  53 ( 1192 photos) -> marine invertebrates         | marine invertebrates 0.120, coral reefs 0.115, underwater 0.104, ocean deep underwater 0.100, invertebrate 0.081, starfish 0.080
+level 3 region  54 (  495 photos) -> catacomb                     | ruins 0.072, archaelogical excavation 0.066, catacomb 0.057, amphitheater 0.056, castles and fortresses 0.051, burial chamber 0.051
+level 3 region  55 (  814 photos) -> sea                          | beach 0.084, beaches and resorts 0.072, coast 0.064, sea 0.064, beach house 0.060, ocean 0.059
+level 3 region  56 ( 1049 photos) -> office building              | courthouse 0.082, office building 0.073, fire station 0.069, schoolhouse 0.067, library 0.057, conference center 0.055
+level 3 region  57 (  864 photos) -> traditional dress            | traditional dress 0.059, festivals 0.050, dance 0.047, music and performance 0.046, groups of people 0.024, crowds 0.023
+level 3 region  58 (  481 photos) -> ski slope                    | mountain snowy 0.084, ski slope 0.071, skiing and winter sports 0.066, ski resort 0.062, snowmobile 0.061, snow and ice 0.056
+level 3 region  59 (  684 photos) -> airports                     | maps 0.061, airports 0.030, diagrams 0.028, rivers and lakes 0.028, rivers 0.024, roads 0.024
+level 3 region  60 (  960 photos) -> plaza                        | squares and plazas 0.044, formal garden 0.040, plaza 0.037, courtyard 0.034, parks and gardens 0.031, downtown 0.030
+level 3 region  61 (  914 photos) -> watercraft                   | boats and ships 0.055, boat 0.051, watercraft 0.050, harbor 0.049, boat deck 0.046, sea 0.044
+level 3 region  62 (  687 photos) -> ski resort                   | mountain snowy 0.082, ski resort 0.074, ski slope 0.068, mountain 0.066, mountains 0.061, mountain path 0.060
+level 3 region  63 (  680 photos) -> villages                     | villages 0.056, kasbah 0.051, village 0.050, hills 0.044, old town 0.042, valley 0.038
+level 3 region  64 (  287 photos) -> industrial area              | maps 0.065, industrial area 0.039, legislative chamber 0.029, residential neighborhood 0.028, diagrams 0.027, vehicle registration plate 0.025
+level 3 region  65 ( 1042 photos) -> lake                         | lake 0.086, rivers and lakes 0.079, lakes 0.079, river 0.069, swimming hole 0.066, rivers 0.063
+level 3 region  66 (  621 photos) -> traffic light                | traffic sign 0.072, vehicle registration plate 0.070, logos and symbols 0.048, traffic light 0.045, auto part 0.041, parking meter 0.040
+level 3 region  67 ( 1038 photos) -> hills                        | hills 0.063, landscape 0.057, mountain path 0.056, mountain 0.055, mountains 0.055, countryside 0.054
+level 3 region  68 (  818 photos) -> forest road                  | forest path 0.074, forest road 0.063, forest 0.055, tree farm 0.052, nature 0.051, field road 0.051
+level 3 region  69 (  690 photos) -> subway station               | subway station 0.055, transport 0.052, maps 0.050, bus station 0.047, diagrams 0.042, trains and railways 0.040
+level 3 region  70 ( 1163 photos) -> schoolhouse                  | schoolhouse 0.074, house 0.072, mansion 0.071, oast house 0.064, hunting lodge 0.061, manufactured home 0.061
+level 3 region  71 (  878 photos) -> vegetation desert            | vegetation desert 0.092, rock formations 0.085, desert 0.083, desert road 0.078, sand desert 0.073, badlands 0.070
+level 3 region  72 (  936 photos) -> movie theater                | movie theater 0.052, shopfront 0.051, candy store 0.050, ice cream parlor 0.049, downtown 0.048, auto showroom 0.046
+level 3 region  73 (  500 photos) -> city                         | castles and fortresses 0.049, old town 0.046, castle 0.045, aerial views 0.039, city 0.036, churches 0.029
+level 3 region  74 ( 1051 photos) -> fast food                    | food 0.080, restaurant kitchen 0.062, fast food 0.057, snack 0.054, chopsticks 0.054, chicken 0.051
+level 3 region  75 (  982 photos) -> mountain snowy               | mountain snowy 0.099, mountains 0.086, mountain 0.085, mountain path 0.084, glaciers 0.073, hiking 0.071
+level 3 region  76 (  613 photos) -> aircraft                     | aircraft 0.068, airplane 0.064, airplane cabin 0.058, landing deck 0.055, spacecraft 0.050, airfield 0.048
+level 3 region  77 (  627 photos) -> signs and text               | traffic sign 0.064, signs and text 0.053, billboard 0.042, highway 0.035, vehicle registration plate 0.033, desert road 0.033
+level 3 region  78 ( 1369 photos) -> old town                     | old town 0.054, building facade 0.045, oast house 0.041, courtyard 0.038, buildings 0.036, beer hall 0.036
+level 3 region  79 ( 1069 photos) -> swimming hole                | waterfalls 0.118, waterfall 0.117, swimming hole 0.080, nature 0.065, rainforest 0.062, watering hole 0.060
+level 3 region  80 (  919 photos) -> bus station                  | airport terminal 0.084, bus station 0.059, airports 0.052, office building 0.050, train station 0.048, conference center 0.047
+level 3 region  81 ( 1365 photos) -> dessert                      | food 0.070, restaurant kitchen 0.056, dessert 0.054, snack 0.054, baked goods 0.052, delicatessen 0.049
+level 3 region  82 ( 1134 photos) -> japanese garden              | japanese garden 0.082, asia temple 0.066, zen garden 0.054, pagoda 0.046, bamboo forest 0.043, temples 0.035
+level 3 region  83 (  695 photos) -> cottage                      | cottage 0.065, oast house 0.064, barn 0.059, house 0.058, hunting lodge 0.058, houses 0.054
+level 3 region  84 ( 1247 photos) -> islands and atolls           | maps 0.057, islands and atolls 0.045, coast 0.038, islands 0.037, coral reefs 0.032, rivers and lakes 0.031
+level 3 region  85 ( 1007 photos) -> palace                       | palace 0.058, palaces 0.053, mansion 0.050, formal garden 0.043, building facade 0.043, castle 0.041
+level 3 region  86 (  974 photos) -> courtyard                    | building facade 0.046, squares and plazas 0.044, palace 0.040, palaces 0.039, plaza 0.037, courtyard 0.034
+level 3 region  87 ( 1023 photos) -> mausoleum                    | castles and fortresses 0.063, castle 0.062, kasbah 0.046, ruins 0.045, mausoleum 0.042, churches 0.040
+level 3 region  88 ( 1259 photos) -> department store             | building facade 0.052, office building 0.046, department store 0.040, apartment building 0.040, buildings 0.036, art school 0.036
+level 3 region  89 (  489 photos) -> logos and symbols            | traffic sign 0.089, vehicle registration plate 0.059, signs and text 0.054, logos and symbols 0.047, traffic light 0.040, transport 0.036
+level 3 region  90 (  564 photos) -> drink                        | drink 0.037, convenience store 0.033, beer 0.033, cooking spray 0.030, candy store 0.029, dairy product 0.029
+level 3 region  91 ( 1093 photos) -> archaelogical excavation     | ruins 0.075, archaelogical excavation 0.074, excavation 0.056, catacomb 0.055, temples 0.055, rock formations 0.053
+level 3 region  92 ( 1058 photos) -> ocean                        | ocean 0.065, sea 0.062, coast 0.060, ocean deep underwater 0.058, beach 0.053, islands 0.050
+level 3 region  93 ( 1127 photos) -> nature                       | lake 0.073, rivers and lakes 0.063, lakes 0.063, river 0.052, nature 0.050, swimming hole 0.050
+level 3 region  94 ( 1270 photos) -> hiking                       | mountain path 0.070, mountain 0.062, mountains 0.061, hills 0.059, mountain snowy 0.058, hiking 0.054
+level 3 region  95 (  959 photos) -> boats and ships              | harbor 0.083, boats and ships 0.075, harbours 0.064, watercraft 0.061, boat 0.060, boathouse 0.055
+level 3 region  96 (  960 photos) -> skyscrapers                  | city 0.044, aerial views 0.040, skyscrapers 0.034, downtown 0.033, skyscraper 0.032, viaduct 0.030
+level 3 region  97 ( 1159 photos) -> cemetery                     | church 0.103, churches 0.093, synagogue 0.054, cemetery 0.052, religion 0.043, mausoleum 0.040
+level 3 region  98 ( 1119 photos) -> church                       | church 0.060, throne room 0.056, synagogue 0.049, churches 0.047, catacomb 0.042, interiors 0.042
+level 3 region  99 ( 1001 photos) -> harbor                       | river 0.044, harbor 0.041, harbours 0.040, city 0.040, downtown 0.038, rivers 0.037
+level 3 region 100 (  698 photos) -> dam                          | lake 0.069, rivers and lakes 0.063, lakes 0.061, river 0.059, rivers 0.051, swimming hole 0.049
+level 3 region 101 ( 1131 photos) -> mountain path                | mountain path 0.077, mountain 0.073, mountains 0.072, rock formations 0.070, hiking 0.062, mountain snowy 0.058
+level 3 region 102 (  969 photos) -> rivers and lakes             | lake 0.084, lakes 0.082, rivers and lakes 0.078, mountains 0.061, nature 0.060, mountain snowy 0.055
+level 3 region 103 (  989 photos) -> shopfront                    | shopfront 0.059, butchers shop 0.058, oast house 0.052, shops 0.045, florist shop 0.044, old town 0.043
+level 3 region 104 ( 1696 photos) -> trains and railways          | train interior 0.099, trains and railways 0.096, train station 0.085, train 0.084, transport 0.070, railroad track 0.066
+level 3 region 105 ( 1054 photos) -> rope bridge                  | bridge 0.050, river 0.045, bridges 0.045, rivers and lakes 0.044, lake 0.040, harbor 0.040
+level 3 region 106 ( 1706 photos) -> residential neighborhood     | downtown 0.092, residential neighborhood 0.067, street 0.065, streets 0.065, old town 0.057, shops 0.057
+level 3 region 107 (  666 photos) -> parking meter                | traffic sign 0.046, signs and text 0.046, parking meter 0.033, vehicle registration plate 0.028, phone booth 0.023, billboard 0.023
+level 3 region 108 ( 1219 photos) -> beaches and resorts          | harbor 0.058, sea 0.056, beaches and resorts 0.054, coast 0.053, beach 0.052, boats and ships 0.050
+level 3 region 109 ( 1497 photos) -> asia temple                  | asia temple 0.070, temples 0.070, mosque 0.057, mosques 0.049, pagoda 0.043, mausoleum 0.043
+level 3 region 110 ( 1488 photos) -> animals                      | wildlife 0.086, animals 0.075, mammals 0.068, animal 0.068, mammal 0.063, reptiles 0.055
+level 3 region 111 (  910 photos) -> auto part                    | vehicle registration plate 0.085, traffic sign 0.066, auto part 0.044, logos and symbols 0.044, parking meter 0.039, bicycle wheel 0.038
+level 3 region 112 ( 1071 photos) -> tower                        | castle 0.086, castles and fortresses 0.086, tower 0.045, ruins 0.044, towers 0.041, oast house 0.040
+level 3 region 113 ( 1470 photos) -> conference center            | office building 0.072, conference center 0.062, building facade 0.053, science museum 0.048, auto showroom 0.045, hockey arena 0.045
+level 3 region 114 ( 1515 photos) -> religion                     | church 0.069, churches 0.066, synagogue 0.036, mausoleum 0.036, castle 0.035, temples 0.031
+level 3 region 115 (  974 photos) -> shopping mall                | bus station 0.035, shopping mall 0.028, billboard 0.027, traffic sign 0.027, airport terminal 0.025, auto showroom 0.025
+level 3 region 116 (  804 photos) -> flag                         | logos and symbols 0.047, traffic sign 0.041, vehicle registration plate 0.034, flag 0.033, football helmet 0.032, scoreboard 0.030
+level 3 region 117 ( 1672 photos) -> statues                      | bronze sculpture 0.069, statues 0.048, sculpture 0.046, monuments 0.044, memorials 0.042, mausoleum 0.024
+level 3 region 118 (  261 photos) -> -                            | traffic sign 0.081, vehicle registration plate 0.066, highway 0.061, logos and symbols 0.047, roads 0.044, desert road 0.038
+level 3 region 119 ( 1042 photos) -> elevator lobby               | interiors 0.053, elevator lobby 0.049, beer hall 0.045, dining hall 0.045, throne room 0.045, dining room 0.044
+level 3 region 120 ( 1179 photos) -> street                       | street 0.054, streets 0.051, downtown 0.044, market 0.043, bus station 0.042, shopping mall 0.039
+level 3 region 121 ( 1179 photos) -> flea market                  | crafts 0.036, flea market 0.032, bazaar 0.032, jewelry shop 0.032, textiles 0.030, traditional dress 0.030

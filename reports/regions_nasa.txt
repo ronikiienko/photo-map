@@ -1,0 +1,26 @@
+level 1 region   0 (  216 photos) -> spacecraft                   | spacecraft 0.025, rockets 0.023, astronauts 0.023, spacesuits 0.023, aircraft 0.021, military 0.019
+level 1 region   1 (  433 photos) -> planets                      | planets 0.031, earth from space 0.029, stars and galaxies 0.026, the moon 0.024, the sun 0.023, satellite images 0.022
+level 1 region   2 (  294 photos) -> control rooms                | control rooms 0.045, laboratories 0.026, engineering 0.024, industry 0.024, offices 0.022, interiors 0.022
+level 1 region   3 (   46 photos) -> night                        | night 0.069, nightlife 0.066, city 0.059, satellite images 0.059, maps 0.056, streets 0.054
+level 2 region   0 (  165 photos) -> rocket launch                | rocket launch 0.045, nasa shuttle 0.038, space shuttle 0.038, nasa launches 0.034, mission launching 0.034, shuttle carrier 0.034
+level 2 region   1 (  210 photos) -> jupiter                      | jupiter 0.046, planets 0.046, saturn moon 0.044, planetary 0.043, solar flare 0.040, sun emits 0.039
+level 2 region   2 (  119 photos) -> spiral galaxy                | spiral galaxy 0.080, stars and galaxies 0.077, galaxies 0.074, galaxy ngc 0.070, nasa galaxy 0.068, galaxy evolution 0.060
+level 2 region   3 (  104 photos) -> mars surface                 | mars surface 0.079, moon surface 0.074, surface mars 0.070, mars rover 0.067, mars exploration 0.060, mars odyssey 0.055
+level 2 region   4 (   51 photos) -> crewmember iss               | crewmember iss 0.097, crew iss 0.085, spacewalk iss 0.084, spacesuits 0.083, astronaut 0.082, nasa astronaut 0.079
+level 2 region   5 (  172 photos) -> server room                  | control rooms 0.064, server room 0.059, computer room 0.057, facility interior 0.057, operating room 0.056, clean room 0.051
+level 2 region   6 (  122 photos) -> wind tunnel                  | wind tunnel 0.030, hangar 0.029, mentoring 0.027, mentoring day 0.027, disability mentoring 0.026, conference room 0.026
+level 2 region   7 (   46 photos) -> -                            | city lights 0.109, brighten cities 0.075, cities 0.074, holiday lights 0.074, night 0.069, nightlife 0.066
+level 3 region   0 (  104 photos) -> -                            | mars surface 0.079, moon surface 0.074, surface mars 0.070, mars rover 0.067, mars exploration 0.060, mars odyssey 0.055
+level 3 region   1 (   75 photos) -> launching aurora             | rocket launch 0.072, launching aurora 0.046, prefire launch 0.046, mission launching 0.045, launching 0.044, rocket fair 0.043
+level 3 region   2 (  116 photos) -> solar flare                  | solar flare 0.062, sun emits 0.058, sun 0.053, the sun 0.051, solar 0.038, sunset 0.037
+level 3 region   3 (   73 photos) -> hangar                       | hangar 0.052, wind tunnel 0.047, test flight 0.046, loading dock 0.043, aircraft 0.041, research aircraft 0.040
+level 3 region   4 (   62 photos) -> computer room                | control rooms 0.088, computer room 0.084, server room 0.074, conference room 0.065, office cubicles 0.062, utility room 0.060
+level 3 region   5 (  110 photos) -> clean room                   | clean room 0.061, operating room 0.057, facility interior 0.056, assembly line 0.055, medical equipment 0.054, processing facility 0.052
+level 3 region   6 (   94 photos) -> stars and galaxies           | stars and galaxies 0.105, galaxies 0.097, spiral galaxy 0.093, galaxy ngc 0.091, nasa galaxy 0.085, galaxy evolution 0.078
+level 3 region   7 (   46 photos) -> -                            | city lights 0.109, brighten cities 0.075, cities 0.074, holiday lights 0.074, night 0.069, nightlife 0.066
+level 3 region   8 (   66 photos) -> nasa shuttle                 | nasa shuttle 0.061, test flight 0.059, shuttle carrier 0.059, aircraft flight 0.059, space shuttle 0.057, aircraft 0.057
+level 3 region   9 (   25 photos) -> hurricane                    | hurricane 0.093, storms 0.082, storm 0.079, hurricane edouard 0.076, clouds and weather 0.075, clouds 0.062
+level 3 region  10 (   51 photos) -> -                            | crewmember iss 0.097, crew iss 0.085, spacewalk iss 0.084, spacesuits 0.083, astronaut 0.082, nasa astronaut 0.079
+level 3 region  11 (   49 photos) -> mentoring day                | mentoring day 0.041, conference room 0.040, disability mentoring 0.040, conference center 0.040, gift shop 0.036, science museum 0.035
+level 3 region  12 (   94 photos) -> saturn moon                  | jupiter 0.081, saturn moon 0.072, planets 0.071, planetary 0.062, saturn 0.061, surface saturn 0.055
+level 3 region  13 (   24 photos) -> office building              | office building 0.085, building facade 0.073, buildings 0.065, apartment building 0.062, building 0.062, army base 0.055
