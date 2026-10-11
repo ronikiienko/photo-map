@@ -88,8 +88,8 @@ pub struct MapRenderer {
 impl MapRenderer {
     pub fn new(gpu: &Gpu, data: &MapData, streamer: &Streamer) -> Self {
         let device = &gpu.device;
-        let m = &data.meta;
-        let points: Vec<[f32; 4]> = (0..m.n)
+        let n = data.n();
+        let points: Vec<[f32; 4]> = (0..n)
             .map(|i| {
                 let (p, shape) = (data.points[i], data.shape(i));
                 [p.x, p.y, shape.x, shape.y]
@@ -102,7 +102,7 @@ impl MapRenderer {
         });
         let flags = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("flags"),
-            size: (m.n * 4) as u64,
+            size: (n * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -194,10 +194,10 @@ impl MapRenderer {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, bind_group, camera, flags, n: m.n as u32 }
+        Self { pipeline, bind_group, camera, flags, n: n as u32 }
     }
 
-    /// The whole flags table (search hits, selection), re-sent when anything in it changed.
+    /// The whole flags table (search hits), re-sent when anything in it changed.
     pub fn upload_flags(&self, queue: &wgpu::Queue, flags: &[u32]) {
         queue.write_buffer(&self.flags, 0, bytemuck::cast_slice(flags));
     }

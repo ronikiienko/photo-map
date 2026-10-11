@@ -12,3 +12,4 @@ reports/*.html
 reports/*.zip
 .cargo-home/
 photo-map/target/
+maps/

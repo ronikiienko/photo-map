@@ -1,10 +1,11 @@
-//! Photo map viewer: every Wikivoyage photo as a square at its map position, similar photos close together.
-//! Data comes from src/prep_photo_map.py (data/wikivoyage/photo_map/). Run: cargo run --release
+//! Photo map viewer: every photo of a map bundle (src/make_map.py) at its map position, similar photos close together.
+//! Run: photo-map <bundle>   (default: maps/wikivoyage.photomap in the project folder)
 
 mod camera;
 mod data;
 mod gpu;
 mod pages;
+mod photo;
 mod stream;
 
 use camera::{Camera, Keys};
@@ -12,9 +13,7 @@ use data::{MapData, WORLD};
 use glam::Vec2;
 use gpu::{CameraUniform, Gpu, MapRenderer};
 use stream::Streamer;
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -31,8 +30,6 @@ const PHOTO_WORLD: f32 = 4.0; // about the median distance between neighbouring 
 /// Squares never shrink below this many pixels, so far-out photos don't vanish.
 const MIN_PX: f32 = 1.0;
 const HIT: u32 = 1;
-const SELECTED: u32 = 2;
-const BASE_URL: &str = "https://en.wikivoyage.org/wiki/";
 
 struct Ui {
     ctx: egui::Context,
@@ -50,19 +47,11 @@ struct Viewer {
     camera: Camera,
     keys: Keys,
     cursor: Option<Vec2>,
-    press_at: Option<Vec2>,
     hovered: Option<usize>,
-    selected: Option<usize>,
     flags: Vec<u32>,
     flags_dirty: bool,
     search: String,
     hits: Vec<usize>,
-    /// Full-size photo for the panel, loaded on a thread.
-    photo: Option<(usize, egui::TextureHandle)>,
-    photo_tx: Sender<(usize, egui::ColorImage)>,
-    photo_rx: Receiver<(usize, egui::ColorImage)>,
-    /// 64 px tiles from the atlas, for the look-alike grid.
-    tiles: HashMap<usize, egui::TextureHandle>,
     last_frame: Instant,
     frame_times: Vec<f32>,
 }
@@ -79,8 +68,7 @@ impl Viewer {
         let size = window.inner_size();
         let mut camera = Camera::new(Vec2::new(size.width as f32, size.height as f32));
         camera.jump(camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
-        let (photo_tx, photo_rx) = channel();
-        let n = data.meta.n;
+        let n = data.n();
         Self {
             window,
             gpu,
@@ -91,17 +79,11 @@ impl Viewer {
             camera,
             keys: Keys::default(),
             cursor: None,
-            press_at: None,
             hovered: None,
-            selected: None,
             flags: vec![0; n],
             flags_dirty: true,
             search: String::new(),
             hits: Vec::new(),
-            photo: None,
-            photo_tx,
-            photo_rx,
-            tiles: HashMap::new(),
             last_frame: Instant::now(),
             frame_times: Vec::new(),
         }
@@ -128,35 +110,13 @@ impl Viewer {
         best
     }
 
-    fn select(&mut self, id: Option<usize>) {
-        if let Some(old) = self.selected {
-            self.flags[old] &= !SELECTED;
-        }
-        self.selected = id;
-        if let Some(id) = id {
-            self.flags[id] |= SELECTED;
-            if self.photo.as_ref().is_none_or(|(p, _)| *p != id) {
-                self.photo = None;
-                let (tx, path) = (self.photo_tx.clone(), self.data.root.join(&self.data.meta.img[id]));
-                std::thread::spawn(move || {
-                    if let Ok(img) = image::open(&path) {
-                        let img = img.thumbnail(800, 800).to_rgba8();
-                        let size = [img.width() as usize, img.height() as usize];
-                        let _ = tx.send((id, egui::ColorImage::from_rgba_unmultiplied(size, &img)));
-                    }
-                });
-            }
-        }
-        self.flags_dirty = true;
-    }
-
     fn run_search(&mut self) {
         for &i in &self.hits {
             self.flags[i] &= !HIT;
         }
         let q = self.search.trim().to_lowercase();
         self.hits = if q.chars().count() >= 2 {
-            (0..self.data.meta.n).filter(|&i| self.data.search_text[i].contains(&q)).collect()
+            (0..self.data.n()).filter(|&i| self.data.search_text[i].contains(&q)).collect()
         } else {
             Vec::new()
         };
@@ -178,18 +138,6 @@ impl Viewer {
         }
     }
 
-    fn tile(&mut self, id: usize) -> egui::TextureHandle {
-        let (ctx, data) = (&self.ui.ctx, &self.data);
-        self.tiles
-            .entry(id)
-            .or_insert_with(|| {
-                let (w, h, rgba) = data.tile_rgba(id);
-                let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
-                ctx.load_texture(format!("tile{id}"), image, egui::TextureOptions::LINEAR)
-            })
-            .clone()
-    }
-
     fn key(&mut self, key: &Key, down: bool) {
         let k = &mut self.keys;
         match key {
@@ -197,7 +145,6 @@ impl Viewer {
             Key::Named(NamedKey::ArrowRight) => k.right = down,
             Key::Named(NamedKey::ArrowUp) => k.up = down,
             Key::Named(NamedKey::ArrowDown) => k.down = down,
-            Key::Named(NamedKey::Escape) if down => self.select(None),
             Key::Character(c) => match c.to_lowercase().as_str() {
                 "a" => k.left = down,
                 "d" => k.right = down,
@@ -227,23 +174,9 @@ impl Viewer {
                 self.cursor = Some(pos);
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
-            WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
-                ElementState::Pressed if !over_ui => {
-                    self.camera.press();
-                    self.press_at = self.cursor;
-                }
-                ElementState::Released if self.camera.dragging() => {
-                    let click = matches!((self.press_at, self.cursor), (Some(a), Some(b)) if a.distance(b) < 4.0);
-                    if click {
-                        self.camera.stop_drag();
-                        if button == MouseButton::Left {
-                            let id = self.cursor.and_then(|c| self.pick(c));
-                            self.select(id);
-                        }
-                    } else {
-                        self.camera.release();
-                    }
-                }
+            WindowEvent::MouseInput { state, button: MouseButton::Left | MouseButton::Middle, .. } => match state {
+                ElementState::Pressed if !over_ui => self.camera.press(),
+                ElementState::Released if self.camera.dragging() => self.camera.release(),
                 _ => {}
             },
             WindowEvent::MouseWheel { delta, .. } if !over_ui => match delta {
@@ -273,11 +206,6 @@ impl Viewer {
             self.frame_times.remove(0);
         }
         self.camera.update(dt, self.cursor, self.keys);
-        if let Ok((id, image)) = self.photo_rx.try_recv() {
-            if self.selected == Some(id) {
-                self.photo = Some((id, self.ui.ctx.load_texture("photo", image, egui::TextureOptions::LINEAR)));
-            }
-        }
         let over_ui = self.ui.ctx.is_pointer_over_egui();
         self.hovered = match self.cursor {
             Some(c) if !self.camera.dragging() && !over_ui => self.pick(c),
@@ -335,11 +263,6 @@ impl Viewer {
         if actions.fly_to_hits {
             self.fly_to_hits();
         }
-        if let Some(id) = actions.go_to {
-            let p = self.data.points[id];
-            self.camera.fly_to((Vec2::new(p.x, p.y), self.camera.scale));
-            self.select(Some(id));
-        }
 
         self.ui.state.handle_platform_output(&self.window, output.platform_output);
         let tris = self.ui.ctx.tessellate(output.shapes, output.pixels_per_point);
@@ -378,15 +301,9 @@ impl Viewer {
     fn build_ui(&mut self, ui: &mut egui::Ui, actions: &mut UiActions) {
         let ctx = ui.ctx().clone();
 
-        if let Some(id) = self.selected {
-            egui::Panel::right("details").exact_size(340.0).show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.details(ui, id, actions));
-            });
-        }
-
         egui::Area::new("search".into()).fixed_pos([10.0, 10.0]).show(&ctx, |ui| {
             ui.horizontal(|ui| {
-                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("search captions / articles").desired_width(260.0));
+                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("search titles / metadata / file names").desired_width(260.0));
                 if edit.changed() {
                     actions.search_changed = true;
                 }
@@ -410,7 +327,7 @@ impl Viewer {
             )).monospace().color(egui::Color32::from_rgb(150, 200, 150)));
         });
         egui::Area::new("help".into()).anchor(egui::Align2::LEFT_BOTTOM, [10.0, -8.0]).show(&ctx, |ui| {
-            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw) · click = details · Esc = close").small().weak());
+            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw)").small().weak());
         });
 
         if let (Some(id), Some(c)) = (self.hovered, self.cursor) {
@@ -418,59 +335,10 @@ impl Viewer {
             egui::Area::new("tip".into()).fixed_pos([c.x / ppp + 14.0, c.y / ppp + 14.0]).interactable(false).show(&ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(320.0);
-                    let cap = &self.data.meta.cap[id];
-                    let arts = &self.data.meta.art[id];
-                    let more = if arts.len() > 1 { format!(" +{}", arts.len() - 1) } else { String::new() };
-                    ui.label(format!("{} — {}{more}", if cap.is_empty() { "(no caption)" } else { cap }, arts[0]));
+                    ui.label(&self.data.photos[id].title);
                 });
             });
         }
-    }
-
-    fn details(&mut self, ui: &mut egui::Ui, id: usize, actions: &mut UiActions) {
-        let width = ui.available_width();
-        match &self.photo {
-            Some((p, tex)) if *p == id => {
-                let s = tex.size_vec2();
-                ui.image((tex.id(), s * (width / s.x)));
-            }
-            _ => {
-                let tile = self.tile(id);
-                let s = tile.size_vec2();
-                ui.image((tile.id(), s * (width / s.x)));
-            }
-        }
-        let cap = &self.data.meta.cap[id];
-        ui.label(if cap.is_empty() { "(no caption)" } else { cap });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("In:");
-            for a in &self.data.meta.art[id] {
-                ui.hyperlink_to(a, format!("{BASE_URL}{}", a.replace(' ', "_")));
-            }
-        });
-        let path = self.data.root.join(&self.data.meta.img[id]);
-        if ui.link(egui::RichText::new(self.data.meta.img[id].as_str()).small()).clicked() {
-            let _ = open::that(&path);
-        }
-        ui.separator();
-        ui.strong("Look-alikes");
-        let cell = (width - 12.0) / 3.0;
-        let neighbours: Vec<_> = self.data.neighbours(id).collect();
-        egui::Grid::new("nb").spacing([6.0, 6.0]).show(ui, |ui| {
-            for (j, (n, sim)) in neighbours.into_iter().enumerate() {
-                let tile = self.tile(n);
-                ui.vertical(|ui| {
-                    let s = tile.size_vec2() * (cell / tile.size_vec2().max_elem());  // whole photo, fitted in the cell
-                    if ui.add(egui::Button::image(egui::Image::new((tile.id(), s))).min_size(egui::vec2(cell, cell))).clicked() {
-                        actions.go_to = Some(n);
-                    }
-                    ui.small(format!("{sim:.2}"));
-                });
-                if j % 3 == 2 {
-                    ui.end_row();
-                }
-            }
-        });
     }
 }
 
@@ -478,7 +346,6 @@ impl Viewer {
 struct UiActions {
     search_changed: bool,
     fly_to_hits: bool,
-    go_to: Option<usize>,
 }
 
 struct App {
@@ -491,7 +358,8 @@ impl ApplicationHandler for App {
         if self.viewer.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("Wikivoyage photo map").with_maximized(true);
+        let title = format!("{} — photo map", self.data.as_ref().unwrap().manifest.name);
+        let attrs = Window::default_attributes().with_title(title).with_maximized(true);
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         self.viewer = Some(Viewer::new(window, self.data.take().unwrap()));
     }
@@ -511,10 +379,11 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let bundle = std::env::args().nth(1).map(std::path::PathBuf::from).unwrap_or(project.join("maps/wikivoyage.photomap"));
     let started = Instant::now();
-    let data = MapData::load(&root).expect("map files missing: run python src/prep_photo_map.py first");
-    eprintln!("{} photos loaded in {:.1}s", data.meta.n, started.elapsed().as_secs_f32());
+    let data = MapData::load(&bundle).unwrap_or_else(|e| panic!("can't open map bundle {}: {e} (make one with src/make_map.py)", bundle.display()));
+    eprintln!("{}: {} photos loaded in {:.1}s", data.manifest.name, data.n(), started.elapsed().as_secs_f32());
     let event_loop = EventLoop::new().unwrap();
     event_loop.run_app(&mut App { data: Some(data), viewer: None }).unwrap();
 }

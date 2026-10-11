@@ -6,6 +6,7 @@
 //! so evicting a level also drops the ones above it. The table is re-uploaded whole whenever it changed.
 
 use crate::data::MapData;
+use crate::photo;
 use crate::pages::{LEVELS, Layout, PAGE, STREAMED, slot_size};
 use glam::Vec2;
 use std::path::PathBuf;
@@ -16,8 +17,6 @@ const MAX_IN_FLIGHT: usize = 24;
 /// u32s per photo in the table: loaded level count, original's longer side, 2 unused, then one slot per level.
 pub const ENTRY: usize = 16;
 const NONE: u32 = u32::MAX;
-/// The viewer's background: transparent parts of flags and logos are filled with it, as in the baked levels.
-const BG: [u8; 3] = [21, 23, 28];
 
 /// Slot bookkeeping of one streamed level.
 struct Pool {
@@ -74,7 +73,7 @@ pub struct Streamer {
 
 impl Streamer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, data: &MapData) -> Self {
-        let n = data.meta.n;
+        let n = data.n();
         let layout = Layout::new(n);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pages"),
@@ -253,7 +252,7 @@ impl Streamer {
             if self.in_flight >= MAX_IN_FLIGHT {
                 break;
             }
-            if self.jobs.send(Job { id, path: data.root.join(&data.meta.img[id]), from, to }).is_ok() {
+            if self.jobs.send(Job { id, path: data.path(id), from, to }).is_ok() {
                 self.in_flight += 1;
                 self.loading[id] = true;
             }
@@ -270,23 +269,12 @@ impl Streamer {
 /// whole 4 x 4 blocks by repeating the edge, and BC7-compress.
 fn decode(job: &Job) -> Loaded {
     let mut loaded = Loaded { id: job.id, levels: Vec::new() };
-    let Ok(img) = image::open(&job.path) else { return loaded };
-    let mut rgba = img.to_rgba8();
-    for p in rgba.pixels_mut() {
-        if p[3] < 255 {
-            let a = p[3] as u32;
-            for c in 0..3 {
-                p[c] = ((p[c] as u32 * a + BG[c] as u32 * (255 - a)) / 255) as u8;
-            }
-            p[3] = 255;
-        }
-    }
+    let Some(rgba) = photo::load(&job.path) else { return loaded };
     let long = rgba.width().max(rgba.height());
     let settings = intel_tex_2::bc7::opaque_ultra_fast_settings();
     for level in job.from..=job.to {
-        let s = slot_size(level).min(long) as f32 / long as f32;
-        let (w, h) = (((rgba.width() as f32 * s).round() as u32).max(1), ((rgba.height() as f32 * s).round() as u32).max(1));
-        let fitted = if s < 1.0 { image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle) } else { rgba.clone() };
+        let fitted = photo::fit(&rgba, slot_size(level).min(long), false);
+        let (w, h) = fitted.dimensions();
         let (w4, h4) = (w.div_ceil(4) * 4, h.div_ceil(4) * 4);
         let mut padded = vec![0u8; (w4 * h4 * 4) as usize];
         for y in 0..h4 {

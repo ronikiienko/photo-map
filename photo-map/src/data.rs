@@ -1,4 +1,4 @@
-//! The map files written by src/prep_photo_map.py, plus a spatial grid for "which photo is under the mouse".
+//! A map bundle (made by src/make_map.py), plus a spatial grid for "which photo is under the mouse".
 
 use memmap2::Mmap;
 use serde::Deserialize;
@@ -9,106 +9,82 @@ use std::path::{Path, PathBuf};
 pub const WORLD: f32 = 10000.0;
 
 #[derive(Deserialize)]
-pub struct Meta {
-    pub n: usize,
-    pub k: usize,
-    pub tile: u32,
-    pub side: u32,
-    pub mips: u32,
-    pub cap: Vec<String>,
-    pub img: Vec<String>,
-    pub art: Vec<Vec<String>>,
+pub struct Manifest {
+    pub name: String,
+    pub photos: usize,
+}
+
+#[derive(Deserialize)]
+pub struct Photo {
+    /// Path inside the bundle (originals/NNNNNN.ext).
+    pub file: String,
+    /// Where the photo came from (source folder / path), just a label.
+    #[serde(default)]
+    pub source: String,
+    pub width: u32,
+    pub height: u32,
+    pub title: String,
+    /// Whatever the image file said about itself: description, date taken, camera, location...
+    #[serde(default)]
+    pub meta: serde_json::Map<String, serde_json::Value>,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct RawPoint {
+pub struct Point {
     pub x: f32,
     pub y: f32,
-    pub region: u32,
 }
 
 pub struct MapData {
-    pub root: PathBuf,
-    pub meta: Meta,
-    pub points: Vec<RawPoint>,
-    pub nn: Vec<u32>,
-    pub sim: Vec<u8>,
-    /// Width and height of each photo inside its tile, in pixels (longer side = tile size).
-    pub fill: Vec<[u8; 2]>,
-    /// Width and height of each original file: how sharp it can be streamed.
-    pub native: Vec<[u16; 2]>,
-    /// Raw RGBA tiles: per layer, mip 0 then each smaller mip. Memory-mapped; only read for side-panel thumbnails.
-    pub atlas: Mmap,
+    pub bundle: PathBuf,
+    pub manifest: Manifest,
+    pub photos: Vec<Photo>,
+    pub points: Vec<Point>,
     /// The always-loaded levels as BC7 pages (bake_pages), uploaded to the GPU as they are.
     pub pages: Mmap,
-    /// Lowercased captions + article names, for search.
+    /// Lowercased title, metadata and source path, for search.
     pub search_text: Vec<String>,
     pub grid: Grid,
 }
 
 impl MapData {
-    /// `root` is the EmbeddingTest folder: image paths in meta.json are relative to it.
-    pub fn load(root: &Path) -> std::io::Result<Self> {
-        let dir = root.join("data/wikivoyage/photo_map");
-        let meta: Meta = serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?)?;
-        let points: Vec<RawPoint> = bytemuck::pod_collect_to_vec(&std::fs::read(dir.join("points.bin"))?);
-        let nn: Vec<u32> = bytemuck::pod_collect_to_vec(&std::fs::read(dir.join("nn.bin"))?);
-        let sim = std::fs::read(dir.join("sim.bin"))?;
-        let fill: Vec<[u8; 2]> = bytemuck::pod_collect_to_vec(&std::fs::read(dir.join("fill.bin"))?);
-        let native: Vec<[u16; 2]> = bytemuck::pod_collect_to_vec(&std::fs::read(dir.join("native.bin"))?);
-        let atlas = unsafe { Mmap::map(&File::open(dir.join("atlas.bin"))?)? };
-        let pages = unsafe { Mmap::map(&File::open(dir.join("pages_bc7.bin"))?)? };
-        assert_eq!(points.len(), meta.n);
-        assert_eq!(nn.len(), meta.n * meta.k);
-        let search_text = (0..meta.n)
-            .map(|i| format!("{}\n{}", meta.cap[i], meta.art[i].join("\n")).to_lowercase())
+    pub fn load(bundle: &Path) -> std::io::Result<Self> {
+        let read = |name: &str| std::fs::read(bundle.join(name));
+        let manifest: Manifest = serde_json::from_slice(&read("manifest.json")?)?;
+        let photos: Vec<Photo> = serde_json::from_slice(&read("photos.json")?)?;
+        let points: Vec<Point> = bytemuck::pod_collect_to_vec(&read("layout.bin")?);
+        let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
+        let n = manifest.photos;
+        assert!(photos.len() == n && points.len() == n, "bundle files don't match");
+        let search_text = photos
+            .iter()
+            .map(|p| {
+                let meta: Vec<&str> = p.meta.values().filter_map(|v| v.as_str()).collect();
+                format!("{}\n{}\n{}", p.title, meta.join("\n"), p.source).to_lowercase()
+            })
             .collect();
         let grid = Grid::new(&points);
-        Ok(Self { root: root.to_path_buf(), meta, points, nn, sim, fill, native, atlas, pages, search_text, grid })
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, pages, search_text, grid })
     }
 
-    /// One mip level of one atlas layer: raw RGBA (4 bytes per pixel).
-    pub fn atlas_level(&self, layer: u32, mip: u32) -> &[u8] {
-        self.level(&self.atlas, 4, layer, mip)
+    pub fn n(&self) -> usize {
+        self.photos.len()
     }
 
-    fn level<'a>(&self, file: &'a [u8], bytes_per_pixel: usize, layer: u32, mip: u32) -> &'a [u8] {
-        let side = self.meta.side as usize;
-        let level_bytes = |m: u32| (side >> m) * (side >> m) * bytes_per_pixel;
-        let layer_bytes: usize = (0..self.meta.mips).map(level_bytes).sum();
-        let start = layer as usize * layer_bytes + (0..mip).map(level_bytes).sum::<usize>();
-        &file[start..start + level_bytes(mip)]
+    pub fn path(&self, id: usize) -> PathBuf {
+        self.bundle.join(&self.photos[id].file)
     }
 
-    /// Longer side of the original file, in pixels.
+    /// Longer side of the original, in pixels.
     pub fn native_long(&self, id: usize) -> u32 {
-        self.native[id][0].max(self.native[id][1]) as u32
+        self.photos[id].width.max(self.photos[id].height)
     }
 
-    /// Photo size relative to a square tile: (1, 0.67) for a 3:2 landscape photo.
+    /// Photo size relative to a square: (1, 0.67) for a 3:2 landscape photo.
     pub fn shape(&self, id: usize) -> glam::Vec2 {
-        glam::Vec2::new(self.fill[id][0] as f32, self.fill[id][1] as f32) / self.meta.tile as f32
-    }
-
-    /// One photo's pixels from the atlas (without the tile's empty part), for the side panel: (width, height, RGBA).
-    pub fn tile_rgba(&self, id: usize) -> (usize, usize, Vec<u8>) {
-        let (tile, side) = (self.meta.tile as usize, self.meta.side as usize);
-        let per_row = side / tile;
-        let t = id % (per_row * per_row);
-        let level = self.atlas_level((id / (per_row * per_row)) as u32, 0);
-        let (x0, y0) = ((t % per_row) * tile, (t / per_row) * tile);
-        let (w, h) = (self.fill[id][0] as usize, self.fill[id][1] as usize);
-        let mut out = Vec::with_capacity(w * h * 4);
-        for y in y0..y0 + h {
-            out.extend_from_slice(&level[(y * side + x0) * 4..(y * side + x0 + w) * 4]);
-        }
-        (w, h, out)
-    }
-
-    pub fn neighbours(&self, id: usize) -> impl Iterator<Item = (usize, f32)> + '_ {
-        let k = self.meta.k;
-        (0..k).map(move |j| (self.nn[id * k + j] as usize, self.sim[id * k + j] as f32 / 100.0))
+        let p = &self.photos[id];
+        glam::Vec2::new(p.width as f32, p.height as f32) / self.native_long(id).max(1) as f32
     }
 }
 
@@ -126,9 +102,9 @@ impl Grid {
         (c(x), c(y))
     }
 
-    fn new(points: &[RawPoint]) -> Self {
+    fn new(points: &[Point]) -> Self {
         let mut start = vec![0u32; G * G + 1];
-        let index = |p: &RawPoint| {
+        let index = |p: &Point| {
             let (cx, cy) = Self::cell(p.x, p.y);
             cy * G + cx
         };
@@ -149,7 +125,7 @@ impl Grid {
     }
 
     /// Photos whose centre lies inside the world box.
-    pub fn within(&self, points: &[RawPoint], min: glam::Vec2, max: glam::Vec2, mut f: impl FnMut(usize)) {
+    pub fn within(&self, points: &[Point], min: glam::Vec2, max: glam::Vec2, mut f: impl FnMut(usize)) {
         let (x0, y0) = Self::cell(min.x.max(0.0), min.y.max(0.0));
         let (x1, y1) = Self::cell(max.x.max(0.0), max.y.max(0.0));
         for cy in y0..=y1 {

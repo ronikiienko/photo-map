@@ -121,10 +121,6 @@ impl Camera {
         }
     }
 
-    pub fn stop_drag(&mut self) {
-        self.pan = Pan::Idle;
-    }
-
     pub fn dragging(&self) -> bool {
         matches!(self.pan, Pan::Dragging { .. })
     }
