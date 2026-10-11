@@ -1,6 +1,8 @@
 // Every photo is one instanced quad with its real shape. Its pixels come from the level pools (pages.rs):
 // level L holds each photo in a 2^L px slot. The shader blends the two levels around the on-screen size,
 // using only levels the table says are loaded (always 1 ... 64 px, larger ones when streamed in).
+// Edges are antialiased analytically: the quad reaches AA px past the photo, and each pixel is covered by how much
+// of it lies inside the photo's rect (box filter, per axis), blended with premultiplied alpha.
 
 struct Camera {
     center: vec2f,     // world point at the middle of the screen
@@ -16,6 +18,7 @@ const ENTRY: u32 = 16u;   // table u32s per photo: loaded level count, original'
 const STREAMED: u32 = 7u; // levels from here on are streamed; below are fitted to the slot (small originals enlarged)
 const HIT: u32 = 1u;
 const RED = vec3f(1.0, 0.3, 0.3);
+const AA: f32 = 1.0;  // px the quad reaches past the photo's edge, for the partly covered pixels
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var<storage, read> points: array<vec4f>;  // x, y, shape (1, 0.67 for a 3:2 photo)
@@ -27,7 +30,7 @@ const RED = vec3f(1.0, 0.3, 0.3);
 
 struct VsOut {
     @builtin(position) pos: vec4f,
-    @location(0) uv: vec2f,
+    @location(0) local: vec2f,  // pixels from the photo's centre
     @location(1) @interpolate(flat) id: u32,
     @location(2) @interpolate(flat) flags: u32,
     @location(3) @interpolate(flat) size: vec2f,  // on-screen width, height
@@ -40,10 +43,11 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) id: u32) -> V
     let corner = corners[v];
     let p = points[id];
     let size = max(cam.size_px * p.zw, vec2f(1.0));  // longer side = size_px, the other follows the shape; never under 1 px
-    let px = (p.xy - cam.center) * cam.scale + cam.viewport * 0.5 + (corner - 0.5) * size;
+    let local = (corner - 0.5) * (size + 2.0 * AA);
+    let px = (p.xy - cam.center) * cam.scale + cam.viewport * 0.5 + local;
     var out: VsOut;
     out.pos = vec4f(px.x / cam.viewport.x * 2.0 - 1.0, 1.0 - px.y / cam.viewport.y * 2.0, 0.0, 1.0);
-    out.uv = corner;
+    out.local = local;
     out.id = id;
     out.flags = flags[id];
     out.size = size;
@@ -68,18 +72,21 @@ fn sample_level(id: u32, level: u32, uv: vec2f, shape: vec2f) -> vec3f {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
+    let inside = in.size * 0.5 - abs(in.local);  // px to the nearest edge, per axis (negative: outside)
+    let cover = clamp(inside.x + 0.5, 0.0, 1.0) * clamp(inside.y + 0.5, 0.0, 1.0);
+    if cover <= 0.0 { discard; }
+    let uv = clamp(in.local / in.size + 0.5, vec2f(0.0), vec2f(1.0));
     let hit = (in.flags & HIT) != 0u;
     // a red frame around hits; tiny squares get tinted instead
-    let edge = min(min(in.uv.x, 1.0 - in.uv.x) * in.size.x, min(in.uv.y, 1.0 - in.uv.y) * in.size.y);
-    if hit && (edge < 2.0 || cam.size_px < 6.0) { return vec4f(RED, 1.0); }
+    if hit && (min(inside.x, inside.y) < 2.0 || cam.size_px < 6.0) { return vec4f(RED * cover, cover); }
 
     // ideal level: slot size = on-screen size; blend it with the next one up, within what is loaded
     let top = f32(table[in.id * ENTRY] - 1u);
     let f = clamp(log2(max(cam.size_px, 1.0)), 0.0, top);
     let lo = floor(f);
     let hi = min(lo + 1.0, top);
-    var c = sample_level(in.id, u32(lo), in.uv, in.shape);
-    if hi > lo { c = mix(c, sample_level(in.id, u32(hi), in.uv, in.shape), f - lo); }
+    var c = sample_level(in.id, u32(lo), uv, in.shape);
+    if hi > lo { c = mix(c, sample_level(in.id, u32(hi), uv, in.shape), f - lo); }
     let dim = select(1.0, 0.25, cam.searching == 1u && !hit);
-    return vec4f(c * dim, 1.0);
+    return vec4f(c * dim * cover, cover);
 }

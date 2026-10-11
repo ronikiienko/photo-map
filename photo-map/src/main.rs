@@ -1,14 +1,12 @@
-//! Photo map: every photo of a map bundle at its map position, similar photos close together.
-//!     photo-map [bundle]                         the app: view a bundle (default: the one opened last in maps/),
-//!                                                switch maps, make new ones from a folder
-//!     photo-map make <bundle> <folder>...        make one without the app (see make/)
-//!     photo-map regions <bundle>                 (re)name an existing bundle's regions
+//! Photo map: a fast viewer for map bundles made in Python (see data.rs): every photo at its map position,
+//! similar photos close together, region names as you zoom.
+//!     photo-map [bundle]      default: the one opened last in maps/
 
+mod bake;
 mod camera;
 mod data;
 mod gpu;
 mod library;
-mod make;
 mod pages;
 mod photo;
 mod stream;
@@ -17,8 +15,8 @@ use camera::{Camera, Keys};
 use data::{MapData, WORLD};
 use glam::Vec2;
 use gpu::{CameraUniform, Gpu, MapRenderer};
-use library::{Action, Library};
-use std::path::{Path, PathBuf};
+use library::Library;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -29,7 +27,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-// intel_tex_2's precompiled ISPC kernels (BC7 encoding in stream.rs and make/bake.rs) need the C++ runtime
+// intel_tex_2's precompiled ISPC kernels (BC7 encoding in stream.rs and bake.rs) need the C++ runtime
 #[link(name = "stdc++")]
 unsafe extern "C" {}
 
@@ -65,7 +63,7 @@ struct Viewer {
     ui: Ui,
     map: Option<OpenMap>,
     library: Library,
-    /// A bundle being read from disk on a thread; it becomes `map` when ready.
+    /// A bundle being read from disk (and baked, the first time) on a thread; it becomes `map` when ready.
     opening: Option<(PathBuf, JoinHandle<std::io::Result<MapData>>)>,
     camera: Camera,
     keys: Keys,
@@ -106,7 +104,7 @@ impl Viewer {
         viewer
     }
 
-    /// Start reading a bundle on a thread (photos.json and friends take a moment for big maps).
+    /// Start reading a bundle on a thread (photos.json and friends take a moment for big maps; a new bundle is baked).
     fn open(&mut self, path: PathBuf) {
         let p = path.clone();
         self.opening = Some((path, std::thread::spawn(move || MapData::load(&p))));
@@ -317,13 +315,8 @@ impl Viewer {
         if actions.fly_to_hits {
             self.fly_to_hits();
         }
-        match actions.library {
-            Some(Action::Open(path)) => self.open(path),
-            Some(Action::Making) => {
-                self.map = None; // its GPU memory goes to embedding
-                self.window.set_title("photo map");
-            }
-            None => {}
+        if let Some(path) = actions.open {
+            self.open(path);
         }
 
         self.ui.state.handle_platform_output(&self.window, output.platform_output);
@@ -403,16 +396,17 @@ impl Viewer {
 
     fn build_ui(&mut self, ui: &mut egui::Ui, actions: &mut UiActions) {
         let ctx = ui.ctx().clone();
-        if !self.library.making() {
-            self.draw_labels(&ctx);
-        }
+        self.draw_labels(&ctx);
 
         egui::Area::new("top".into()).fixed_pos([10.0, 10.0]).show(&ctx, |ui| {
             ui.horizontal(|ui| {
                 let current = self.opening.as_ref().map(|(p, _)| p.as_path()).or(self.map.as_ref().map(|m| m.path.as_path()));
-                actions.library = self.library.bar(ui, current);
+                actions.open = self.library.bar(ui, current);
                 if self.opening.is_some() {
                     ui.spinner();
+                    if self.map.is_none() {
+                        ui.weak("opening (a new map is baked first: a minute or two for a big one)");
+                    }
                 }
                 ui.separator();
                 let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("search titles / metadata / file names").desired_width(260.0));
@@ -429,12 +423,9 @@ impl Viewer {
                 }
             });
         });
-        if let Some(a) = self.library.window(&ctx) {
-            actions.library = Some(a);
-        }
-        if self.map.is_none() && self.opening.is_none() && !self.library.making() {
+        if self.map.is_none() && self.opening.is_none() {
             egui::Area::new("empty".into()).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
-                ui.weak(if self.library.maps.is_empty() { "No maps yet: make one with \"New map…\"" } else { "Choose a map above" });
+                ui.weak(if self.library.maps.is_empty() { "No maps in maps/ yet: make one in Python (src/photomap.py)" } else { "Choose a map above" });
             });
         }
 
@@ -470,11 +461,11 @@ impl Viewer {
 struct UiActions {
     search_changed: bool,
     fly_to_hits: bool,
-    library: Option<Action>,
+    open: Option<PathBuf>,
 }
 
 struct App {
-    project: PathBuf,
+    maps: PathBuf,
     /// The bundle to open first (from the command line), else the one opened last.
     first: Option<PathBuf>,
     viewer: Option<Viewer>,
@@ -487,7 +478,7 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes().with_title("photo map").with_maximized(true);
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
-        let library = Library::new(&self.project);
+        let library = Library::new(self.maps.clone());
         let first = self.first.take().or_else(|| library.last());
         self.viewer = Some(Viewer::new(window, library, first));
     }
@@ -507,32 +498,8 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("make") {
-        if args.len() < 3 {
-            eprintln!("usage: photo-map make <bundle> <folder> [<folder> ...]");
-            std::process::exit(2);
-        }
-        let folders: Vec<PathBuf> = args[2..].iter().map(Into::into).collect();
-        if let Err(e) = make::run(&project, Path::new(&args[1]), &folders) {
-            eprintln!("make failed: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if args.first().map(String::as_str) == Some("regions") {
-        let Some(bundle) = args.get(1) else {
-            eprintln!("usage: photo-map regions <bundle>");
-            std::process::exit(2);
-        };
-        if let Err(e) = make::add_regions(&project, Path::new(bundle)) {
-            eprintln!("regions failed: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    let first = args.first().map(PathBuf::from);
+    let maps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("maps");
+    let first = std::env::args().nth(1).map(PathBuf::from);
     let event_loop = EventLoop::new().unwrap();
-    event_loop.run_app(&mut App { project, first, viewer: None }).unwrap();
+    event_loop.run_app(&mut App { maps, first, viewer: None }).unwrap();
 }

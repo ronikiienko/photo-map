@@ -94,7 +94,7 @@ impl Streamer {
         let started = std::time::Instant::now();
         let page_bytes = (PAGE * PAGE) as usize; // BC7: 1 byte per pixel
         let resident: u32 = (0..STREAMED).map(|l| layout.pages[l]).sum();
-        assert_eq!(data.pages.len(), resident as usize * page_bytes, "pages_bc7.bin doesn't match the photos: remake the bundle");
+        assert_eq!(data.pages.len(), resident as usize * page_bytes, "pages_bc7.bin doesn't match the photos: delete it, the viewer bakes it again");
         for page in 0..resident {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: page }, aspect: wgpu::TextureAspect::All },

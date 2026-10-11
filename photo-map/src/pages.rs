@@ -1,6 +1,6 @@
 //! Where every level of every photo lives on the GPU: one BC7 texture array of PAGE x PAGE pages.
 //! Level L holds photos in slots of 2^L px (1 px ... 1024 px), in a grid of PAGE / 2^L slots per row.
-//! Levels below STREAMED are always loaded (slot = photo id, baked by make/bake.rs); the rest are streamed into
+//! Levels below STREAMED are always loaded (slot = photo id, baked by bake.rs); the rest are streamed into
 //! a fixed budget of pages, slots handed out by stream.rs. The shader repeats the same address maths.
 
 pub const PAGE: u32 = 4096;

@@ -1,9 +1,10 @@
 //! The always-loaded levels (1 px ... 64 px) as BC7 pages: pages_bc7.bin, uploaded to the GPU as it is.
+//! Made by the viewer the first time it opens a bundle without one (bundles come from Python, which has no fast
+//! BC7 encoder), then kept in the bundle.
 //! Every level L holds each photo in a slot of 2^L px (photo fitted into the top-left corner, real shape kept,
 //! small photos enlarged). Slots sit on PAGE x PAGE pages in a grid of PAGE / 2^L per row; slot = photo index.
 //! Pages are written level 0 first, each as BC7 blocks (16 bytes per 4 x 4 pixels).
 
-use super::step;
 use crate::data::Photo;
 use crate::pages::{PAGE as PAGE_U32, STREAMED};
 use crate::photo;
@@ -11,6 +12,7 @@ use rayon::prelude::*;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 const PAGE: usize = PAGE_U32 as usize;
 const LEVELS: usize = STREAMED; // 1, 2, 4, ... 64 px
@@ -20,7 +22,9 @@ const STRIP: usize = 64;
 
 pub fn bake(bundle: &Path, photos: &[Photo]) -> io::Result<()> {
     let n = photos.len();
-    step("baking the always-loaded levels");
+    let started = Instant::now();
+    let step = |msg: String| eprintln!("[{:5.0}s] {msg}", started.elapsed().as_secs_f32());
+    step(format!("{}: baking the always-loaded levels of {n} photos", bundle.display()));
 
     // 1. every photo fitted to 64 px (longer side) in the corner of a 64 x 64 tile
     let done = AtomicUsize::new(0);
@@ -87,11 +91,14 @@ pub fn bake(bundle: &Path, photos: &[Photo]) -> io::Result<()> {
             tiles = next;
         }
     }
-    let mut file = io::BufWriter::new(std::fs::File::create(bundle.join("pages_bc7.bin"))?);
+    let tmp = bundle.join("pages_bc7.tmp");
+    let mut file = io::BufWriter::new(std::fs::File::create(&tmp)?);
     for l in &levels {
         file.write_all(l)?;
     }
     file.flush()?;
-    step("pages_bc7.bin written");
+    drop(file);
+    std::fs::rename(tmp, bundle.join("pages_bc7.bin"))?;
+    step("pages_bc7.bin written".into());
     Ok(())
 }

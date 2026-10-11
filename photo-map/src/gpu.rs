@@ -183,7 +183,7 @@ impl MapRenderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: gpu.config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), // antialiased edges (map.wgsl)
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),

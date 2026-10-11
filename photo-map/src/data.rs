@@ -1,7 +1,15 @@
-//! A map bundle (made by `photo-map make`, see make/), plus a spatial grid for "which photo is under the mouse".
+//! A map bundle, plus a spatial grid for "which photo is under the mouse". Bundles are made in Python
+//! (src/photomap.py: maps/<name>.photomap/):
+//!     manifest.json   name, photo count
+//!     photos.json     per photo: file (originals/NNNNNN.ext), source, width, height, title, meta (any strings)
+//!     originals/      the images; photo i = position i in photos.json
+//!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
+//!     regions.json    optional: named regions per zoom level (Label below)
+//!     embeddings.bin  per photo: float16 vector (not used by the viewer)
+//!     pages_bc7.bin   made by the viewer on first open (bake.rs)
 
 use memmap2::Mmap;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +22,7 @@ pub struct Manifest {
     pub photos: usize,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 pub struct Photo {
     /// Path inside the bundle (originals/NNNNNN.ext).
     pub file: String,
@@ -29,7 +37,7 @@ pub struct Photo {
     pub meta: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A named area of the map (regions.json, made by make/regions.rs).
+/// A named area of the map (regions.json).
 #[derive(Deserialize)]
 pub struct Label {
     pub name: String,
@@ -59,7 +67,7 @@ pub struct MapData {
     pub manifest: Manifest,
     pub photos: Vec<Photo>,
     pub points: Vec<Point>,
-    /// The always-loaded levels as BC7 pages (make/bake.rs), uploaded to the GPU as they are.
+    /// The always-loaded levels as BC7 pages (bake.rs), uploaded to the GPU as they are.
     pub pages: Mmap,
     /// Lowercased title, metadata and source path, for search.
     pub search_text: Vec<String>,
@@ -74,9 +82,14 @@ impl MapData {
         let manifest: Manifest = serde_json::from_slice(&read("manifest.json")?)?;
         let photos: Vec<Photo> = serde_json::from_slice(&read("photos.json")?)?;
         let points: Vec<Point> = bytemuck::pod_collect_to_vec(&read("layout.bin")?);
-        let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
         let n = manifest.photos;
-        assert!(photos.len() == n && points.len() == n, "bundle files don't match");
+        if photos.len() != n || points.len() != n {
+            return Err(std::io::Error::other("bundle files don't match"));
+        }
+        if !bundle.join("pages_bc7.bin").exists() {
+            crate::bake::bake(bundle, &photos)?;
+        }
+        let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
         let search_text = photos
             .iter()
             .map(|p| {
