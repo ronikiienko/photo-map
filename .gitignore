@@ -10,3 +10,5 @@ data/history/
 data/budget_test/
 reports/*.html
 reports/*.zip
+.cargo-home/
+photo-map/target/

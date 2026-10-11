@@ -2,7 +2,7 @@
 <html><head><meta charset="utf-8"><title>Wikivoyage photo map</title>
 <style>
   body { margin: 0; overflow: hidden; background: #15171c; color: #ddd; font: 13px system-ui, sans-serif; }
-  canvas { position: fixed; inset: 0; cursor: grab; }
+  canvas { position: fixed; inset: 0; cursor: grab; touch-action: none; }
   #bar { position: fixed; top: 10px; left: 10px; display: flex; gap: 8px; align-items: center; }
   #bar input { width: 260px; padding: 6px 8px; background: #22252c; color: #eee; border: 1px solid #444; border-radius: 6px; }
   #info { color: #999; }
@@ -20,56 +20,127 @@
 <div id="bar"><input id="q" placeholder="search captions / articles, Enter = zoom to matches"><span id="info"></span></div>
 <div id="tip"></div>
 <div id="panel"></div>
-<div id="help">scroll = zoom · drag = move · zoom in to see photos · click a photo for details · Esc closes panel</div>
+<div id="fps" style="position:fixed;bottom:8px;right:10px;color:#9c9;font:12px monospace;z-index:2"></div>
+<div id="help">scroll / Q E = zoom · drag or WASD / arrows = move (flick to throw) · zoom in to see photos · click a photo for details · Esc closes panel</div>
 <script>
 const D = /*DATA*/null;
 const bin = (s, T) => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new T(u.buffer); };
 const X = bin(D.x, Uint16Array), Y = bin(D.y, Uint16Array), R = bin(D.r, Uint8Array), NN = bin(D.nn, Uint32Array), S = bin(D.s, Uint8Array);
 const N = X.length, K = D.k, BASE = "https://en.wikivoyage.org/wiki/";
 const colour = r => `hsl(${(r * 137.5) % 360},65%,60%)`;
+// Region colours as packed pixels (ABGR), pre-mixed 55% over the background like the old translucent dots
+const BG = [0x15, 0x17, 0x1c], BG32 = (255 << 24 | BG[2] << 16 | BG[1] << 8 | BG[0]) >>> 0;
+const DOT32 = Array.from({ length: 256 }, (_, r) => {
+  const hue = (r * 137.5) % 360, f = n => { const kk = (n + hue / 30) % 12; return 0.6 - 0.65 * 0.4 * Math.max(-1, Math.min(kk - 3, 9 - kk, 1)); };
+  const [cr, cg, cb] = [f(0), f(8), f(4)].map((v, j) => Math.round(v * 255 * 0.55 + BG[j] * 0.45));
+  return (255 << 24 | cb << 16 | cg << 8 | cr) >>> 0;
+});
+let pixels = null, px32 = null;
 const cv = document.getElementById("c"), ctx = cv.getContext("2d"), tip = document.getElementById("tip"), panel = document.getElementById("panel");
 let W, H, k, ox, oy, hits = null, sel = -1, queued = false, hitR = 6;  // hitR: hover radius, set by paint()
-const cache = new Map();  // photo index -> Image, loaded only when zoomed in
+const PHOTOS_BELOW = 1500, FADE_IN_MS = 250;  // show photos when fewer are on screen; fade-in after loading
+const cache = new Map();  // photo index -> Image, loaded only when zoomed in; oldest dropped first
+// thumbnails from make_thumbs.py: data/wikivoyage/images/06384.jpg -> data/wikivoyage/thumbs/images/06384.webp
+const thumb = i => "../data/wikivoyage/thumbs/" + D.img[i].split("/").slice(2).join("/").replace(/\.[^.]+$/, ".webp");
+
+// Grid of G x G cells: drawing and hovering only look at points in nearby cells, not all of them
+const G = 64, CELL = 10001 / G, cellOf = i => Math.floor(Y[i] / CELL) * G + Math.floor(X[i] / CELL);
+const start = new Uint32Array(G * G + 1), order = new Uint32Array(N);
+for (let i = 0; i < N; i++) start[cellOf(i) + 1]++;
+for (let c = 0; c < G * G; c++) start[c + 1] += start[c];
+{ const fill = start.slice(0, G * G); for (let i = 0; i < N; i++) order[fill[cellOf(i)]++] = i; }
+function within(x0, y0, x1, y1) {  // photos inside a world-space box
+  const out = [], cx0 = Math.max(0, Math.floor(x0 / CELL)), cx1 = Math.min(G - 1, Math.floor(x1 / CELL));
+  for (let cy = Math.max(0, Math.floor(y0 / CELL)), cy1 = Math.min(G - 1, Math.floor(y1 / CELL)); cy <= cy1; cy++)
+    for (let c = cy * G + cx0, c1 = cy * G + cx1; c <= c1; c++)
+      for (let j = start[c]; j < start[c + 1]; j++) { const i = order[j]; if (X[i] >= x0 && X[i] <= x1 && Y[i] >= y0 && Y[i] <= y1) out.push(i); }
+  return out;
+}
 
 function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; }
-function fit(xs, ys) {  // show the given world box
-  const pad = 200, x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
-  k = Math.min(W / (x1 - x0), H / (y1 - y0)); ox = W / 2 - k * (x0 + x1) / 2; oy = H / 2 - k * (y0 + y1) / 2;
+function fit(xs, ys, glide) {  // show the given world box, instantly or by flying there
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const x of xs) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); }
+  for (const y of ys) { y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const pad = 200, kk = Math.min(W / (x1 - x0 + 2 * pad), H / (y1 - y0 + 2 * pad)), cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  if (glide) return flyTo(cx, cy, kk);
+  k = kk; ox = W / 2 - k * cx; oy = H / 2 - k * cy;
 }
 const sx = i => ox + k * X[i], sy = i => oy + k * Y[i];
 function draw() { if (!queued) { queued = true; requestAnimationFrame(paint); } }
+// Photo loading: fetch, then decode off the main thread (createImageBitmap) so drawing never waits on a decode.
+// At most MAX_LOADS at once, newest request first; requests for photos that left the view are dropped.
+const MAX_LOADS = 24;
+let inflight = 0, wanted = new Set();
+const queue = [];
 function img(i) {
-  let im = cache.get(i);
-  if (!im) { im = new Image(); im.onload = draw; im.src = "../" + D.img[i]; cache.set(i, im);
-    if (cache.size > 4000) cache.delete(cache.keys().next().value); }
-  return im;
+  let e = cache.get(i);
+  if (e) { cache.delete(i); cache.set(i, e); return e; }  // move to the back: recently used
+  e = { bmp: null }; cache.set(i, e); queue.push(i);
+  if (cache.size > 3000) { const [old, oe] = cache.entries().next().value; oe.bmp?.close(); cache.delete(old); }
+  return e;
 }
+function pump() {
+  while (inflight < MAX_LOADS && queue.length) {
+    const i = queue.pop(), e = cache.get(i);
+    if (!e || e.bmp) continue;
+    if (!wanted.has(i)) { cache.delete(i); continue; }  // scrolled away before its turn
+    inflight++;
+    fetch(thumb(i)).then(r => r.ok ? r : fetch("../" + D.img[i]))  // no thumbnail: full photo
+      .then(r => r.blob()).then(b => createImageBitmap(b))
+      .then(bmp => { if (cache.get(i) === e) { e.bmp = bmp; e.loadedAt = performance.now(); draw(); } else bmp.close(); })
+      .catch(() => {}).finally(() => { inflight--; pump(); });
+  }
+}
+// FPS counter: repaints in the last second (0 when idle: the page only draws when something changes) and paint cost
+const frames = [], fpsBox = document.getElementById("fps");
+let paintMs = 0;
+setInterval(() => { const now = performance.now(); while (frames.length && frames[0] < now - 1000) frames.shift();
+  fpsBox.textContent = `${frames.length} fps · paint ${paintMs.toFixed(1)} ms · loading ${inflight}`; }, 250);
 function paint() {
+  const t0 = performance.now(); frames.push(t0);
   queued = false; ctx.clearRect(0, 0, W, H);
-  const vis = [];
-  for (let i = 0; i < N; i++) { const x = sx(i), y = sy(i); if (x > -80 && x < W + 80 && y > -80 && y < H + 80) vis.push(i); }
-  const photos = vis.length < 1500, size = Math.max(14, Math.min(140, k * 70));
+  const m = 80 / k, vis = within(-ox / k - m, -oy / k - m, (W - ox) / k + m, (H - oy) / k + m);
+  const fade = vis.length < PHOTOS_BELOW ? 1 : 0;  // photos when few are on screen, else dots and labels
+  const photos = fade > 0.5, size = Math.max(14, Math.min(140, k * 70)), now = performance.now();
   hitR = photos ? size / 2 : 6;
-  if (photos) {
+  let loading = false;
+  if (fade < 1) {
+    // Dots straight into a pixel buffer: much faster than 92k canvas rectangles
+    if (!pixels || pixels.width !== W || pixels.height !== H) { pixels = ctx.createImageData(W, H); px32 = new Uint32Array(pixels.data.buffer); }
+    px32.fill(BG32);
+    const d = Math.max(1, Math.min(4, Math.round(k * 8))), h = d >> 1;
     for (const i of vis) {
-      const im = img(i), x = sx(i) - size / 2, y = sy(i) - size / 2;
-      if (im.complete && im.naturalWidth) {  // centre-crop to a square
-        const s = Math.min(im.naturalWidth, im.naturalHeight);
-        ctx.drawImage(im, (im.naturalWidth - s) / 2, (im.naturalHeight - s) / 2, s, s, x, y, size, size);
-      } else { ctx.fillStyle = colour(R[i]); ctx.fillRect(x, y, size, size); }
+      const x0 = Math.round(sx(i)) - h, y0 = Math.round(sy(i)) - h, c = DOT32[R[i]];
+      for (let y = Math.max(0, y0), y1 = Math.min(H, y0 + d); y < y1; y++)
+        for (let x = Math.max(0, x0), x1 = Math.min(W, x0 + d); x < x1; x++) px32[y * W + x] = c;
     }
-  } else {
-    const d = Math.max(1.2, Math.min(4, k * 8));
-    for (const i of vis) { ctx.fillStyle = colour(R[i]); ctx.globalAlpha = 0.55; ctx.fillRect(sx(i) - d / 2, sy(i) - d / 2, d, d); }
-    ctx.globalAlpha = 1;
-    ctx.font = "bold 12px system-ui"; ctx.textAlign = "center";
+    ctx.putImageData(pixels, 0, 0);
+  }
+  if (fade > 0) {
+    for (const i of vis) {
+      const e = img(i), im = e.bmp, x = sx(i) - size / 2, y = sy(i) - size / 2;
+      if (im) {  // centre-crop to a square (thumbnails already are); fade in after loading
+        const age = Math.min(1, (now - e.loadedAt) / FADE_IN_MS); if (age < 1) loading = true;
+        const s = Math.min(im.width, im.height);
+        ctx.globalAlpha = fade * age;
+        ctx.drawImage(im, (im.width - s) / 2, (im.height - s) / 2, s, s, x, y, size, size);
+      } else { ctx.globalAlpha = fade * 0.25; ctx.fillStyle = colour(R[i]); ctx.fillRect(x, y, size, size); }
+    }
+  }
+  if (fade < 1) {
+    ctx.globalAlpha = 1 - fade; ctx.font = "bold 12px system-ui"; ctx.textAlign = "center";
     for (const l of D.labels) {
       const x = ox + k * l.x, y = oy + k * l.y;
       ctx.lineWidth = 3; ctx.strokeStyle = "#15171c"; ctx.strokeText(l.text, x, y); ctx.fillStyle = "#fff"; ctx.fillText(l.text, x, y);
     }
   }
+  ctx.globalAlpha = 1;
+  wanted = fade > 0 ? new Set(vis) : new Set(); pump();
+  if (loading) draw();
+  paintMs = paintMs * 0.9 + (performance.now() - t0) * 0.1;  // keep repainting until fresh photos have faded in
   if (hits) { ctx.strokeStyle = "#ff4d4d"; ctx.lineWidth = 2; const r = photos ? size / 2 + 2 : 4;
-    for (const i of hits) ctx.strokeRect(sx(i) - r, sy(i) - r, 2 * r, 2 * r); }
+    ctx.beginPath(); for (const i of hits) ctx.rect(sx(i) - r, sy(i) - r, 2 * r, 2 * r); ctx.stroke(); }
   if (sel >= 0) {
     ctx.strokeStyle = "#ffd84d"; ctx.lineWidth = 1.5;
     for (let j = 0; j < K; j++) { const n = NN[sel * K + j]; ctx.globalAlpha = Math.max(0.1, (S[sel * K + j] / 100 - 0.2) / 0.6) ** 2;
@@ -78,9 +149,9 @@ function paint() {
   }
 }
 function nearest(mx, my) {  // photo under the mouse
-  const r = hitR;
+  const r = hitR, wx = (mx - ox) / k, wy = (my - oy) / k, wr = r / k;
   let best = -1, bd = Infinity;
-  for (let i = 0; i < N; i++) { const dx = Math.abs(sx(i) - mx), dy = Math.abs(sy(i) - my);
+  for (const i of within(wx - wr, wy - wr, wx + wr, wy + wr)) { const dx = Math.abs(sx(i) - mx), dy = Math.abs(sy(i) - my);
     if (dx <= r && dy <= r && dx + dy < bd) { bd = dx + dy; best = i; } }
   return best;
 }
@@ -89,29 +160,104 @@ function show(i) {
   sel = i; draw();
   const arts = D.art[i].map(a => `<a href="${BASE + encodeURIComponent(a.replaceAll(" ", "_"))}" target="_blank">${esc(a)}</a>`).join(", ");
   const nb = Array.from({ length: K }, (_, j) => NN[i * K + j]).map((n, j) =>
-    `<div data-i="${n}"><img src="../${D.img[n]}" loading="lazy">${(S[i * K + j] / 100).toFixed(2)}</div>`).join("");
+    `<div data-i="${n}"><img src="${thumb(n)}" onerror="this.onerror=null;this.src='../${D.img[n]}'">${(S[i * K + j] / 100).toFixed(2)}</div>`).join("");
   panel.innerHTML = `<a href="../${D.img[i]}" target="_blank"><img class="big" src="../${D.img[i]}"></a>
     <p>${esc(D.cap[i] || "(no caption)")}</p><p>In: ${arts}</p><p style="color:#888">${D.img[i]}</p><b>Look-alikes</b><div id="nb">${nb}</div>`;
   panel.style.display = "block";
-  panel.querySelectorAll("#nb div").forEach(d => d.onclick = () => { const n = +d.dataset.i; ox += W / 2 - sx(n); oy += H / 2 - sy(n); show(n); });
+  panel.querySelectorAll("#nb div").forEach(d => d.onclick = () => { const n = +d.dataset.i; flyTo(X[n], Y[n]); show(n); });
 }
 
-let drag = null, moved = false;
-cv.onmousedown = e => { drag = [e.clientX, e.clientY]; moved = false; cv.style.cursor = "grabbing"; };
-onmouseup = e => { if (drag && !moved && e.target === cv) { const i = nearest(e.clientX, e.clientY); if (i >= 0) show(i); }
-  drag = null; cv.style.cursor = "grab"; };
-onmousemove = e => {
-  if (drag) { const dx = e.clientX - drag[0], dy = e.clientY - drag[1]; if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
-    ox += dx; oy += dy; drag = [e.clientX, e.clientY]; draw(); tip.style.display = "none"; return; }
-  if (e.target !== cv) return;
+// Camera, after mote-control's camera_controller: wheel zoom and drag-pan both coast to a stop.
+// Constants are "per frame at 60 Hz"; smooth()/factor() rescale them so any refresh rate feels the same.
+const HZ = 60, factor = (f, dt) => Math.max(f, 0) ** (dt * HZ), smooth = (cur, sample, carry, dt) => { const c = factor(carry, dt); return cur * c + sample * (1 - c); };
+const PAN_FRICTION = 0.9, PAN_SMOOTHING = 0.8, PAN_STOP = 5;  // PAN_STOP: px/s below which a fling ends
+const ZOOM_FRICTION = 0.9, ZOOM_SPEED = 0.0006, ZOOM_STOP = 1e-4;  // ZOOM_SPEED: log zoom per wheel pixel
+const KEY_SPEED = 900, KEY_FRICTION = 0.8, KEY_ZOOM = 0.05;  // keys: px/s, coast, log zoom per frame (Q/E)
+let pan = { mode: "idle", vx: 0, vy: 0 }, frameMove = [0, 0], downAt = null, wheel = 0, zoomVel = 0, cursor = [0, 0];
+let keyVel = [0, 0], fly = null, last = 0, running = false;
+const keys = new Set();
+
+function zoomAt(f, px, py) {  // zoom by f, keeping the world point under (px, py) under it
+  ox = px - (px - ox) * f; oy = py - (py - oy) * f; k *= f;
+}
+function flyTo(cx, cy, kk) {  // glide to world centre (cx, cy) at zoom kk; any input cancels it
+  fly = { cx, cy, lk: Math.log(kk ?? k) }; wake();
+}
+function wake() { if (!running) { running = true; last = performance.now(); requestAnimationFrame(tick); } }
+function tick(now) {
+  const dt = Math.min(Math.max((now - last) / 1000, 1e-6), 0.1); last = now;
+  let active = false;
+  // wheel: a scroll sets the zoom velocity; without scroll it decays, so notches blend into one smooth zoom
+  if (wheel) { zoomVel = -wheel * ZOOM_SPEED; wheel = 0; } else zoomVel = smooth(zoomVel, 0, ZOOM_FRICTION, dt);
+  const kz = (keys.has("e") || keys.has("=") || keys.has("+") ? KEY_ZOOM : 0) - (keys.has("q") || keys.has("-") ? KEY_ZOOM : 0);
+  if (kz) zoomVel = kz;
+  if (Math.abs(zoomVel) < ZOOM_STOP) zoomVel = 0;
+  else { zoomAt(factor(Math.exp(zoomVel), dt), kz ? W / 2 : cursor[0], kz ? H / 2 : cursor[1]); active = true; }
+  // drag: the view already follows the pointer; here we only record a smoothed velocity for the fling
+  if (pan.mode === "drag") {
+    pan.vx = smooth(pan.vx, frameMove[0] / dt, PAN_SMOOTHING, dt); pan.vy = smooth(pan.vy, frameMove[1] / dt, PAN_SMOOTHING, dt);
+    frameMove = [0, 0]; active = true;
+  } else if (pan.mode === "coast") {
+    pan.vx = smooth(pan.vx, 0, PAN_FRICTION, dt); pan.vy = smooth(pan.vy, 0, PAN_FRICTION, dt);
+    if (Math.hypot(pan.vx, pan.vy) < PAN_STOP) pan.mode = "idle"; else { ox += pan.vx * dt; oy += pan.vy * dt; active = true; }
+  }
+  // keys: WASD / arrows move the view at a fixed screen speed, with a short coast on release
+  const dx = (keys.has("a") || keys.has("arrowleft") ? 1 : 0) - (keys.has("d") || keys.has("arrowright") ? 1 : 0);
+  const dy = (keys.has("w") || keys.has("arrowup") ? 1 : 0) - (keys.has("s") || keys.has("arrowdown") ? 1 : 0);
+  if (dx || dy) { const n = Math.hypot(dx, dy); keyVel = [dx / n * KEY_SPEED, dy / n * KEY_SPEED]; }
+  else keyVel = keyVel.map(v => smooth(v, 0, KEY_FRICTION, dt));
+  if (Math.hypot(...keyVel) < PAN_STOP) keyVel = [0, 0]; else { ox += keyVel[0] * dt; oy += keyVel[1] * dt; active = true; }
+  // fly: ease the centre and the log of the zoom toward the target
+  if (fly) {
+    const cx = (W / 2 - ox) / k, cy = (H / 2 - oy) / k, lk = Math.log(k);
+    const ncx = smooth(cx, fly.cx, 0.85, dt), ncy = smooth(cy, fly.cy, 0.85, dt); k = Math.exp(smooth(lk, fly.lk, 0.85, dt));
+    ox = W / 2 - k * ncx; oy = H / 2 - k * ncy;
+    if (Math.hypot(ncx - fly.cx, ncy - fly.cy) * k < 0.5 && Math.abs(Math.log(k) - fly.lk) < 0.002) fly = null;
+    active = true;
+  }
+  if (active) paint();
+  if (active || keys.size) requestAnimationFrame(tick); else running = false;
+}
+
+cv.onpointerdown = e => {
+  if (e.button !== 0 && e.button !== 1) return;
+  e.preventDefault(); cv.setPointerCapture(e.pointerId);
+  downAt = [e.clientX, e.clientY]; fly = null; pan = { mode: "drag", vx: 0, vy: 0 }; frameMove = [0, 0];
+  cv.style.cursor = "grabbing"; wake();
+};
+cv.onpointerup = e => {
+  if (pan.mode !== "drag") return;
+  const click = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) < 4;
+  pan.mode = click ? "idle" : "coast"; cv.style.cursor = "grab";
+  if (click && e.button === 0) { const i = nearest(e.clientX, e.clientY); if (i >= 0) show(i); }
+};
+cv.onpointermove = e => {
+  cursor = [e.clientX, e.clientY];
+  if (pan.mode === "drag") {
+    ox += e.movementX; oy += e.movementY; frameMove[0] += e.movementX; frameMove[1] += e.movementY;
+    tip.style.display = "none"; return;
+  }
   const i = nearest(e.clientX, e.clientY);
   if (i < 0) { tip.style.display = "none"; return; }
   tip.textContent = `${D.cap[i] || "(no caption)"} — ${D.art[i][0]}${D.art[i].length > 1 ? ` +${D.art[i].length - 1}` : ""}`;
   tip.style.display = "block"; tip.style.left = e.clientX + 14 + "px"; tip.style.top = e.clientY + 14 + "px";
 };
-cv.onwheel = e => { e.preventDefault(); const f = Math.exp(-e.deltaY * 0.0015);
-  ox = e.clientX - (e.clientX - ox) * f; oy = e.clientY - (e.clientY - oy) * f; k *= f; draw(); };
-onkeydown = e => { if (e.key === "Escape") { panel.style.display = "none"; sel = -1; draw(); } };
+cv.onpointerleave = () => { tip.style.display = "none"; };
+cv.onwheel = e => {
+  e.preventDefault(); fly = null; cursor = [e.clientX, e.clientY];
+  wheel += e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? H : 1);  // lines / pages -> pixels
+  wake();
+};
+onkeydown = e => {
+  if (e.key === "Escape") { panel.style.display = "none"; sel = -1; draw(); return; }
+  if (e.target.tagName === "INPUT" || e.ctrlKey || e.metaKey || e.altKey) return;
+  const key = e.key.toLowerCase();
+  if (["w", "a", "s", "d", "q", "e", "=", "+", "-", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key)) {
+    e.preventDefault(); keys.add(key); fly = null; wake();
+  }
+};
+onkeyup = e => keys.delete(e.key.toLowerCase());
+onblur = () => keys.clear();
 const q = document.getElementById("q"), info = document.getElementById("info");
 q.oninput = () => {
   const t = q.value.trim().toLowerCase();
@@ -121,7 +267,7 @@ q.oninput = () => {
   info.textContent = `${hits.length} photos`; draw();
 };
 q.onkeydown = e => { if (e.key === "Enter" && hits && hits.length) { const h = hits.slice(0, 5000);
-  fit(h.map(i => X[i]), h.map(i => Y[i])); draw(); } };
+  fit(h.map(i => X[i]), h.map(i => Y[i]), true); } };
 onresize = () => { resize(); draw(); };
 resize(); fit([0, 10000], [0, 10000]); draw();
 </script></body></html>

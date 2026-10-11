@@ -1,0 +1,28 @@
+[package]
+name = "photo-map"
+version = "0.1.0"
+edition = "2024"
+default-run = "photo-map"
+
+[dependencies]
+wgpu = "30.0.1"
+winit = "0.30.13"
+egui = "0.36.2"
+egui-wgpu = "0.36.2"
+egui-winit = "0.36.2"
+glam = { version = "0.30.4", features = ["bytemuck"] }
+bytemuck = { version = "1.23.1", features = ["derive"] }
+pollster = "0.4.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+memmap2 = "0.9"
+image = "0.25.6"
+open = "5.3.3"
+intel_tex_2 = "0.4"
+rayon = "1.11"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

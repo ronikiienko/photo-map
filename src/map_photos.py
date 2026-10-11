@@ -66,6 +66,10 @@ data = {"cap": [p["text"] for p in photos], "img": [p["image"] for p in photos],
         "x": packed(q[:, 0].astype(np.uint16)), "y": packed(q[:, 1].astype(np.uint16)), "r": packed(km.labels_.astype(np.uint8)),
         "nn": packed(nn.ravel().astype(np.uint32)), "s": packed(np.clip(np.round(nn_sim.ravel() * 100), 0, 255).astype(np.uint8)),
         "k": NEIGHBOURS, "labels": labels}
+# Same layout for the desktop viewer (photo-map/): prep_photo_map.py turns this into its files
+np.savez(INDEX / "photo_map.npz", xy=q.astype(np.float32), region=km.labels_.astype(np.uint32), nn=nn.astype(np.uint32),
+         sim=np.clip(np.round(nn_sim * 100), 0, 255).astype(np.uint8), keep=ok.astype(np.uint32),
+         labels=json.dumps(labels, ensure_ascii=False))
 template = (ROOT / "src" / "map_photos_template.html").read_text()
 out = ROOT / "reports" / "wikivoyage_photo_map.html"
 out.write_text(template.replace("/*DATA*/null", json.dumps(data, ensure_ascii=False, separators=(",", ":"))))
