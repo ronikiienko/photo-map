@@ -1,6 +1,7 @@
 """Search the corpus chosen in config.CORPUS.
     python src/search.py "your query"   # one search
     python src/search.py                # keep asking; empty line quits
+    python src/search.py --photos ...   # photos only (skips the text index)
 Drag an image file onto the terminal (or type its path) to search with the picture instead of text.
 """
 
@@ -13,12 +14,17 @@ from pathlib import Path
 import config
 import numpy as np
 
-vectors = np.load(config.INDEX_DIR / "embeddings.npy")
-chunks = json.loads((config.INDEX_DIR / "chunks.json").read_text())
+PHOTOS_ONLY = "--photos" in sys.argv
+if PHOTOS_ONLY:
+    sys.argv.remove("--photos")
+    vectors, chunks = np.zeros((0, 768), dtype=np.float32), []
+else:
+    vectors = np.load(config.INDEX_DIR / "embeddings.npy")
+    chunks = json.loads((config.INDEX_DIR / "chunks.json").read_text())
 n_wiki = len(chunks)  # rows after this are custom articles
 
 # Hand-written articles from add_custom.py, if any: append them to the index.
-if (config.INDEX_DIR / "custom_embeddings.npy").exists():
+if not PHOTOS_ONLY and (config.INDEX_DIR / "custom_embeddings.npy").exists():
     vectors = np.concatenate([vectors, np.load(config.INDEX_DIR / "custom_embeddings.npy")])
     chunks += json.loads((config.INDEX_DIR / "custom_chunks.json").read_text())
 
@@ -41,7 +47,7 @@ vectors, photo_vectors = shorten(vectors), shorten(photo_vectors)
 model = config.load_model(images=True)
 model[0].processor.image_processor.max_soft_tokens = 140  # same image budget as embed_images.py
 
-PHOTOS_K = 3  # photo results shown under the text results
+PHOTOS_K = 10 if PHOTOS_ONLY else 3  # photo results shown under the text results
 IMAGE_TYPES ={".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
 
@@ -78,13 +84,16 @@ def search(query):
         if rank[i] >= config.TOP_K:
             print(f"\n  custom [{chunks[i]['title']}] {chunks[i]['url']}: rank {rank[i] + 1}, score {scores[i]:.3f}")
     if photos:
-        print("\n--- photos ---")
+        if not PHOTOS_ONLY:
+            print("\n--- photos ---")
         scores = photo_vectors @ q
         for i in np.argsort(-scores)[:PHOTOS_K]:
             p = photos[i]
             more = len(p.get("articles", [])) - 1  # e.g. a flag shown on many pages
             also = f" (+{more} more articles)" if more > 0 else ""
-            print(f"{scores[i]:.3f}  [{p['title']}]{also} {p['text'][:100]}\n  {config.ROOT / p['image']}")
+            # plain absolute path and URL: Ctrl-click in the terminal opens the photo in the editor, the article in the browser
+            url = urllib.parse.quote(p["url"], safe=":/")  # brackets and accents would cut the terminal's link short
+            print(f"\n{scores[i]:.3f}  [{p['title']}]{also} {p['text'][:100]}\n  {config.ROOT / p['image']}\n  {url}")
 
 
 if len(sys.argv) > 1:

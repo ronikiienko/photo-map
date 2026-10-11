@@ -7,3 +7,6 @@ data/uk_wiki/
 data/simplewiki/
 data/wikivoyage/
 data/history/
+data/budget_test/
+reports/*.html
+reports/*.zip

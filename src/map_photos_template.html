@@ -1,0 +1,127 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Wikivoyage photo map</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #15171c; color: #ddd; font: 13px system-ui, sans-serif; }
+  canvas { position: fixed; inset: 0; cursor: grab; }
+  #bar { position: fixed; top: 10px; left: 10px; display: flex; gap: 8px; align-items: center; }
+  #bar input { width: 260px; padding: 6px 8px; background: #22252c; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  #info { color: #999; }
+  #tip { position: fixed; pointer-events: none; background: #000c; padding: 4px 6px; border-radius: 4px; display: none; max-width: 320px; }
+  #panel { position: fixed; top: 0; right: 0; width: 340px; height: 100%; background: #1d2026f2; overflow-y: auto; padding: 12px;
+           box-sizing: border-box; display: none; border-left: 1px solid #333; }
+  #panel img.big { width: 100%; border-radius: 6px; }
+  #panel a { color: #8ab4ff; }
+  #nb { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+  #nb div { cursor: pointer; font-size: 11px; color: #aaa; text-align: center; }
+  #nb img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; }
+  #help { position: fixed; bottom: 8px; left: 10px; color: #777; font-size: 12px; }
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="bar"><input id="q" placeholder="search captions / articles, Enter = zoom to matches"><span id="info"></span></div>
+<div id="tip"></div>
+<div id="panel"></div>
+<div id="help">scroll = zoom · drag = move · zoom in to see photos · click a photo for details · Esc closes panel</div>
+<script>
+const D = /*DATA*/null;
+const bin = (s, T) => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new T(u.buffer); };
+const X = bin(D.x, Uint16Array), Y = bin(D.y, Uint16Array), R = bin(D.r, Uint8Array), NN = bin(D.nn, Uint32Array), S = bin(D.s, Uint8Array);
+const N = X.length, K = D.k, BASE = "https://en.wikivoyage.org/wiki/";
+const colour = r => `hsl(${(r * 137.5) % 360},65%,60%)`;
+const cv = document.getElementById("c"), ctx = cv.getContext("2d"), tip = document.getElementById("tip"), panel = document.getElementById("panel");
+let W, H, k, ox, oy, hits = null, sel = -1, queued = false, hitR = 6;  // hitR: hover radius, set by paint()
+const cache = new Map();  // photo index -> Image, loaded only when zoomed in
+
+function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; }
+function fit(xs, ys) {  // show the given world box
+  const pad = 200, x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
+  k = Math.min(W / (x1 - x0), H / (y1 - y0)); ox = W / 2 - k * (x0 + x1) / 2; oy = H / 2 - k * (y0 + y1) / 2;
+}
+const sx = i => ox + k * X[i], sy = i => oy + k * Y[i];
+function draw() { if (!queued) { queued = true; requestAnimationFrame(paint); } }
+function img(i) {
+  let im = cache.get(i);
+  if (!im) { im = new Image(); im.onload = draw; im.src = "../" + D.img[i]; cache.set(i, im);
+    if (cache.size > 4000) cache.delete(cache.keys().next().value); }
+  return im;
+}
+function paint() {
+  queued = false; ctx.clearRect(0, 0, W, H);
+  const vis = [];
+  for (let i = 0; i < N; i++) { const x = sx(i), y = sy(i); if (x > -80 && x < W + 80 && y > -80 && y < H + 80) vis.push(i); }
+  const photos = vis.length < 1500, size = Math.max(14, Math.min(140, k * 70));
+  hitR = photos ? size / 2 : 6;
+  if (photos) {
+    for (const i of vis) {
+      const im = img(i), x = sx(i) - size / 2, y = sy(i) - size / 2;
+      if (im.complete && im.naturalWidth) {  // centre-crop to a square
+        const s = Math.min(im.naturalWidth, im.naturalHeight);
+        ctx.drawImage(im, (im.naturalWidth - s) / 2, (im.naturalHeight - s) / 2, s, s, x, y, size, size);
+      } else { ctx.fillStyle = colour(R[i]); ctx.fillRect(x, y, size, size); }
+    }
+  } else {
+    const d = Math.max(1.2, Math.min(4, k * 8));
+    for (const i of vis) { ctx.fillStyle = colour(R[i]); ctx.globalAlpha = 0.55; ctx.fillRect(sx(i) - d / 2, sy(i) - d / 2, d, d); }
+    ctx.globalAlpha = 1;
+    ctx.font = "bold 12px system-ui"; ctx.textAlign = "center";
+    for (const l of D.labels) {
+      const x = ox + k * l.x, y = oy + k * l.y;
+      ctx.lineWidth = 3; ctx.strokeStyle = "#15171c"; ctx.strokeText(l.text, x, y); ctx.fillStyle = "#fff"; ctx.fillText(l.text, x, y);
+    }
+  }
+  if (hits) { ctx.strokeStyle = "#ff4d4d"; ctx.lineWidth = 2; const r = photos ? size / 2 + 2 : 4;
+    for (const i of hits) ctx.strokeRect(sx(i) - r, sy(i) - r, 2 * r, 2 * r); }
+  if (sel >= 0) {
+    ctx.strokeStyle = "#ffd84d"; ctx.lineWidth = 1.5;
+    for (let j = 0; j < K; j++) { const n = NN[sel * K + j]; ctx.globalAlpha = Math.max(0.1, (S[sel * K + j] / 100 - 0.2) / 0.6) ** 2;
+      ctx.beginPath(); ctx.moveTo(sx(sel), sy(sel)); ctx.lineTo(sx(n), sy(n)); ctx.stroke(); }
+    ctx.globalAlpha = 1; const r = photos ? size / 2 + 3 : 6; ctx.lineWidth = 3; ctx.strokeRect(sx(sel) - r, sy(sel) - r, 2 * r, 2 * r);
+  }
+}
+function nearest(mx, my) {  // photo under the mouse
+  const r = hitR;
+  let best = -1, bd = Infinity;
+  for (let i = 0; i < N; i++) { const dx = Math.abs(sx(i) - mx), dy = Math.abs(sy(i) - my);
+    if (dx <= r && dy <= r && dx + dy < bd) { bd = dx + dy; best = i; } }
+  return best;
+}
+const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function show(i) {
+  sel = i; draw();
+  const arts = D.art[i].map(a => `<a href="${BASE + encodeURIComponent(a.replaceAll(" ", "_"))}" target="_blank">${esc(a)}</a>`).join(", ");
+  const nb = Array.from({ length: K }, (_, j) => NN[i * K + j]).map((n, j) =>
+    `<div data-i="${n}"><img src="../${D.img[n]}" loading="lazy">${(S[i * K + j] / 100).toFixed(2)}</div>`).join("");
+  panel.innerHTML = `<a href="../${D.img[i]}" target="_blank"><img class="big" src="../${D.img[i]}"></a>
+    <p>${esc(D.cap[i] || "(no caption)")}</p><p>In: ${arts}</p><p style="color:#888">${D.img[i]}</p><b>Look-alikes</b><div id="nb">${nb}</div>`;
+  panel.style.display = "block";
+  panel.querySelectorAll("#nb div").forEach(d => d.onclick = () => { const n = +d.dataset.i; ox += W / 2 - sx(n); oy += H / 2 - sy(n); show(n); });
+}
+
+let drag = null, moved = false;
+cv.onmousedown = e => { drag = [e.clientX, e.clientY]; moved = false; cv.style.cursor = "grabbing"; };
+onmouseup = e => { if (drag && !moved && e.target === cv) { const i = nearest(e.clientX, e.clientY); if (i >= 0) show(i); }
+  drag = null; cv.style.cursor = "grab"; };
+onmousemove = e => {
+  if (drag) { const dx = e.clientX - drag[0], dy = e.clientY - drag[1]; if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    ox += dx; oy += dy; drag = [e.clientX, e.clientY]; draw(); tip.style.display = "none"; return; }
+  if (e.target !== cv) return;
+  const i = nearest(e.clientX, e.clientY);
+  if (i < 0) { tip.style.display = "none"; return; }
+  tip.textContent = `${D.cap[i] || "(no caption)"} — ${D.art[i][0]}${D.art[i].length > 1 ? ` +${D.art[i].length - 1}` : ""}`;
+  tip.style.display = "block"; tip.style.left = e.clientX + 14 + "px"; tip.style.top = e.clientY + 14 + "px";
+};
+cv.onwheel = e => { e.preventDefault(); const f = Math.exp(-e.deltaY * 0.0015);
+  ox = e.clientX - (e.clientX - ox) * f; oy = e.clientY - (e.clientY - oy) * f; k *= f; draw(); };
+onkeydown = e => { if (e.key === "Escape") { panel.style.display = "none"; sel = -1; draw(); } };
+const q = document.getElementById("q"), info = document.getElementById("info");
+q.oninput = () => {
+  const t = q.value.trim().toLowerCase();
+  if (t.length < 2) { hits = null; info.textContent = ""; draw(); return; }
+  hits = [];
+  for (let i = 0; i < N; i++) if ((D.cap[i] || "").toLowerCase().includes(t) || D.art[i].some(a => a.toLowerCase().includes(t))) hits.push(i);
+  info.textContent = `${hits.length} photos`; draw();
+};
+q.onkeydown = e => { if (e.key === "Enter" && hits && hits.length) { const h = hits.slice(0, 5000);
+  fit(h.map(i => X[i]), h.map(i => Y[i])); draw(); } };
+onresize = () => { resize(); draw(); };
+resize(); fit([0, 10000], [0, 10000]); draw();
+</script></body></html>
