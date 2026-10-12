@@ -41,6 +41,8 @@ const MIN_PX: f32 = 1.0;
 const SHOW_REGION_NAMES: bool = true;
 /// A photo shows its own caption above it once it is this wide on screen (points), fully from the second size.
 const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
+/// Stepping to a match zooms in until its photo is this wide on screen (points), unless you are already closer.
+const STEP_TO: f32 = 240.0;
 const LABEL_IN: (f32, f32) = (25.0, 50.0);
 const LABEL_OUT: (f32, f32) = (300.0, 500.0);
 
@@ -83,6 +85,9 @@ struct OpenMap {
     photo_world: f32,
     /// The last search's cosines: the image ones, then the caption ones (0 = no caption), as u16.
     sims: Vec<u16>,
+    /// The photos that match the search, best first, and which of them the last next/previous step went to.
+    order: Vec<usize>,
+    at: Option<usize>,
     /// When the bundle's search.json (written by src/map_search.py) was last read.
     search_file: Option<SystemTime>,
 }
@@ -182,7 +187,7 @@ impl Viewer {
         let photo_world = median_neighbour_distance(&data.points);
         let search_file = search_file_time(&path);  // one from before this opening is old news
         self.status.clear();
-        self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, photo_world, sims: Vec::new(), search_file });
+        self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, photo_world, sims: Vec::new(), order: Vec::new(), at: None, search_file });
         self.follow_map();
     }
 
@@ -265,6 +270,8 @@ impl Viewer {
                 m.flags.fill(0);
                 m.flags_dirty = true;
                 m.sims.clear();
+                m.order.clear();
+                m.at = None;
             }
             self.shown.clear();
             self.status.clear();
@@ -327,6 +334,9 @@ impl Viewer {
         for i in 0..n {
             m.flags[i] = if score[i] >= cut && score[i] >= 0.0 { hits += 1; 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
         }
+        m.order = (0..n).filter(|&i| m.flags[i] > 0).collect();
+        m.order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
+        m.at = None;
         self.status = format!("{}: {hits} photos, similarity {cut:.2} to {best:.2}", self.shown);
         m.flags_dirty = true;
         let pts = m.flags.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, _)| Vec2::new(m.data.points[i].x, m.data.points[i].y));
@@ -341,7 +351,32 @@ impl Viewer {
         }
     }
 
+    /// The next (dir 1) or previous (-1) match, best first, wrapping round: the camera flies to it (zooming in if it is small on screen).
+    fn step_match(&mut self, dir: i32) {
+        let Some(m) = &mut self.map else { return };
+        let found = m.order.len();
+        if found == 0 {
+            return;
+        }
+        let k = match m.at {
+            None if dir > 0 => 0,
+            None => found - 1,
+            Some(k) => (k as i32 + dir).rem_euclid(found as i32) as usize,
+        };
+        m.at = Some(k);
+        let p = m.data.points[m.order[k]];
+        let wanted_scale = STEP_TO * self.window.scale_factor() as f32 / m.photo_world;
+        self.camera.fly_to((Vec2::new(p.x, p.y), self.camera.scale.max(wanted_scale)));
+    }
+
     fn key(&mut self, key: &Key, down: bool) {
+        if let (true, Key::Character(c)) = (down, key) {
+            match c.as_str() {
+                "n" | "N" | "]" => return self.step_match(1),
+                "p" | "P" | "[" => return self.step_match(-1),
+                _ => {}
+            }
+        }
         if let Key::Character(c) = key {
             if c.eq_ignore_ascii_case("f") {
                 if let (true, Some(i)) = (down, self.hovered) {
@@ -506,6 +541,9 @@ impl Viewer {
         }
         if actions.reblend {
             self.apply_search();
+        }
+        if actions.step != 0 {
+            self.step_match(actions.step);
         }
         if let Some(path) = actions.open {
             self.open(path);
@@ -721,6 +759,16 @@ impl Viewer {
                 if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
                     actions.reblend = true;
                 }
+                let (found, at) = self.map.as_ref().map_or((0, None), |m| (m.order.len(), m.at));
+                if found > 0 {
+                    if ui.button("prev").on_hover_text("the previous match (P or [)").clicked() {
+                        actions.step = -1;
+                    }
+                    if ui.button("next").on_hover_text("the next match, best first (N or ])").clicked() {
+                        actions.step = 1;
+                    }
+                    ui.label(at.map_or(format!("{found} matches"), |k| format!("{} / {found}", k + 1)));
+                }
                 ui.label(&self.status);
             });
         });
@@ -743,7 +791,7 @@ impl Viewer {
             });
         }
         egui::Area::new("help".into()).anchor(egui::Align2::LEFT_BOTTOM, [10.0, -8.0]).show(&ctx, |ui| {
-            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw) · F = photos like the one under the mouse").small().weak());
+            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw) · F = photos like the one under the mouse · N / P = next / previous match").small().weak());
         });
 
         if let (Some(id), Some(c), Some(m)) = (self.hovered, self.cursor, &self.map) {
@@ -763,6 +811,8 @@ impl Viewer {
 struct UiActions {
     ask: bool,
     reblend: bool,
+    /// A prev / next button was pressed: -1 / 1.
+    step: i32,
     clear_photo: bool,
     open: Option<PathBuf>,
 }
