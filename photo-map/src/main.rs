@@ -108,6 +108,8 @@ struct Viewer {
     hovered: Option<usize>,
     /// The window with every match together.
     gallery: Gallery,
+    /// The region names drawn last frame, where on screen (points) and which (level, number in the level): a click on one zooms to its region.
+    label_rects: Vec<(egui::Rect, usize, usize)>,
     search: String,
     /// The search helper this viewer started: one for the whole session, it follows the open map.
     helper: Option<Helper>,
@@ -151,6 +153,7 @@ impl Viewer {
             cursor: None,
             hovered: None,
             gallery: Gallery::new(),
+            label_rects: Vec::new(),
             search: String::new(),
             helper: None,
             ask_when_ready: false,
@@ -437,9 +440,15 @@ impl Viewer {
                 self.cursor = Some(pos);
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
-            WindowEvent::MouseInput { state, button: MouseButton::Left | MouseButton::Middle, .. } => match state {
+            WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
                 ElementState::Pressed if !over_ui => self.camera.press(),
-                ElementState::Released if self.camera.dragging() => self.camera.release(),
+                ElementState::Released if self.camera.dragging() => {
+                    let click = self.camera.drag_distance() < 4.0;
+                    self.camera.release();
+                    if click && button == MouseButton::Left {  // the middle button only pans
+                        self.click_at();
+                    }
+                }
                 _ => {}
             },
             WindowEvent::MouseWheel { delta, .. } if !over_ui => match delta {
@@ -605,8 +614,10 @@ impl Viewer {
 
     /// Region names over the map: each shows while its region is a sensible size on screen (coarse names zoomed out,
     /// finer ones as you zoom in), coarser and bigger regions first, skipping names that would overlap one already shown.
-    fn draw_labels(&self, ctx: &egui::Context) {
+    fn draw_labels(&mut self, ctx: &egui::Context) {
+        self.label_rects.clear();
         let Some(m) = &self.map else { return };
+        let mut shown: Vec<(egui::Rect, usize, usize)> = Vec::new();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "region names".into()));
         let ppp = ctx.pixels_per_point();
         let screen = ctx.content_rect();
@@ -622,7 +633,7 @@ impl Viewer {
                     egui::Color32::from_rgb(g, g, g.saturating_add(8))
                 }
             };
-            for l in labels {
+            for (index, l) in labels.iter().enumerate() {
                 let on_screen = l.spread * self.camera.scale / ppp;
                 let alpha = smooth(LABEL_IN, on_screen) * (1.0 - smooth(LABEL_OUT, on_screen));
                 if alpha < 0.02 {
@@ -635,12 +646,39 @@ impl Viewer {
                     continue;
                 }
                 taken.push(rect);
+                if alpha > 0.3 {
+                    shown.push((rect, level, index));
+                }
+                // the name under the mouse is a button: it goes white and underlined
+                let under_mouse = alpha > 0.3 && self.cursor.is_some_and(|c| rect.contains(egui::pos2(c.x / ppp, c.y / ppp)));
+                let colour = if under_mouse { egui::Color32::WHITE } else { colour };
                 let outline = egui::Color32::from_black_alpha((220.0 * alpha) as u8);
                 for (dx, dy) in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)] {
                     painter.galley_with_override_text_color(rect.min + egui::vec2(dx, dy), galley.clone(), outline);
                 }
                 painter.galley_with_override_text_color(rect.min, galley, colour.gamma_multiply(alpha));
+                if under_mouse {
+                    painter.line_segment([rect.left_bottom(), rect.right_bottom()], egui::Stroke::new(2.0, colour));
+                }
             }
+        }
+        self.label_rects = shown;
+    }
+
+    /// Fly to a region so that it fills the screen.
+    fn go_to_region(&mut self, level: usize, index: usize) {
+        let Some(l) = self.map.as_ref().and_then(|m| m.data.regions.levels.get(level)?.get(index)) else { return };
+        let scale = self.camera.viewport.min_element() / (l.spread * 4.4).max(1.0);
+        self.camera.fly_to((Vec2::new(l.x, l.y), scale));
+    }
+
+    /// A click on the map (a press that hardly moved): on a region name, it zooms to the region.
+    fn click_at(&mut self) {
+        let Some(c) = self.cursor else { return };
+        let ppp = self.window.scale_factor() as f32;
+        let at = egui::pos2(c.x / ppp, c.y / ppp);
+        if let Some(&(_, level, index)) = self.label_rects.iter().find(|(rect, _, _)| rect.contains(at)) {
+            self.go_to_region(level, index);
         }
     }
 

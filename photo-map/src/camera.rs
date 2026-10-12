@@ -121,6 +121,11 @@ impl Camera {
         }
     }
 
+    /// How far (screen pixels) the pointer has moved since the press: a click is a press that hardly moved.
+    pub fn drag_distance(&self) -> f32 {
+        self.drag_moved.length()
+    }
+
     pub fn dragging(&self) -> bool {
         matches!(self.pan, Pan::Dragging { .. })
     }
