@@ -26,14 +26,16 @@ pub struct Manifest {
 pub struct Photo {
     /// Path inside the bundle (originals/NNNNNN.ext).
     pub file: String,
-    /// Where the photo came from (source folder / path), just a label.
+    /// Where the photo came from (source folder / path), just a label (not shown yet).
     #[serde(default)]
+    #[allow(dead_code)]
     pub source: String,
     pub width: u32,
     pub height: u32,
     pub title: String,
     /// Whatever the image file said about itself: description, date taken, camera, location...
     #[serde(default)]
+    #[allow(dead_code)] // not shown yet
     pub meta: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -69,8 +71,6 @@ pub struct MapData {
     pub points: Vec<Point>,
     /// The always-loaded levels as BC7 pages (bake.rs), uploaded to the GPU as they are.
     pub pages: Mmap,
-    /// Lowercased title, metadata and source path, for search.
-    pub search_text: Vec<String>,
     pub grid: Grid,
     /// Empty if the bundle has no regions.json.
     pub regions: Regions,
@@ -90,19 +90,12 @@ impl MapData {
             crate::bake::bake(bundle, &photos)?;
         }
         let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
-        let search_text = photos
-            .iter()
-            .map(|p| {
-                let meta: Vec<&str> = p.meta.values().filter_map(|v| v.as_str()).collect();
-                format!("{}\n{}\n{}", p.title, meta.join("\n"), p.source).to_lowercase()
-            })
-            .collect();
         let grid = Grid::new(&points);
         let mut regions: Regions = read("regions.json").ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for level in &mut regions.levels {
             level.sort_by(|a, b| b.photos.cmp(&a.photos));
         }
-        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, pages, search_text, grid, regions })
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, pages, grid, regions })
     }
 
     pub fn n(&self) -> usize {

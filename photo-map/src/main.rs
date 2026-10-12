@@ -19,7 +19,7 @@ use library::Library;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use stream::Streamer;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -35,7 +35,6 @@ unsafe extern "C" {}
 const PHOTO_WORLD: f32 = 4.0; // about the median distance between neighbouring photos
 /// Squares never shrink below this many pixels, so far-out photos don't vanish.
 const MIN_PX: f32 = 1.0;
-const HIT: u32 = 1;
 /// Region names show while their region's spread is between these sizes on screen (points), fading in and out.
 const LABEL_IN: (f32, f32) = (25.0, 50.0);
 const LABEL_OUT: (f32, f32) = (300.0, 500.0);
@@ -54,7 +53,10 @@ struct OpenMap {
     streamer: Streamer,
     flags: Vec<u32>,
     flags_dirty: bool,
-    hits: Vec<usize>,
+    /// The last search's cosines: the image ones, then the caption ones (0 = no caption), as u16.
+    sims: Vec<u16>,
+    /// When the bundle's search.json (written by src/map_search.py) was last read.
+    search_file: Option<SystemTime>,
 }
 
 struct Viewer {
@@ -70,8 +72,13 @@ struct Viewer {
     cursor: Option<Vec2>,
     hovered: Option<usize>,
     search: String,
+    /// What the last search did, next to the box.
+    status: String,
+    /// Matches start at this cosine similarity (the strongest colour is WIDTH above).
+    cutoff: f32,
     last_frame: Instant,
     frame_times: Vec<f32>,
+    frames: u64,
 }
 
 impl Viewer {
@@ -95,8 +102,11 @@ impl Viewer {
             cursor: None,
             hovered: None,
             search: String::new(),
+            status: String::new(),
+            cutoff: 0.72,
             last_frame: Instant::now(),
             frame_times: Vec::new(),
+            frames: 0,
         };
         if let Some(path) = first {
             viewer.open(path);
@@ -121,8 +131,9 @@ impl Viewer {
         self.library.remember(&path);
         self.camera.jump(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
         let n = data.n();
-        self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, hits: Vec::new() });
-        self.run_search();
+        let search_file = search_file_time(&path);  // one from before this opening is old news
+        self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, sims: Vec::new(), search_file });
+        self.status.clear();
     }
 
     fn size_px(&self) -> f32 {
@@ -147,34 +158,66 @@ impl Viewer {
         best
     }
 
-    fn run_search(&mut self) {
+    /// Enter in the search box: ask the helper (src/map_search.py) for the best photos for the text; its answer
+    /// comes back in search.json (poll_search_file). Empty text clears the last search.
+    fn ask(&mut self) {
+        let query = self.search.trim().to_string();
         let Some(m) = &mut self.map else { return };
-        for &i in &m.hits {
-            m.flags[i] &= !HIT;
-        }
-        let q = self.search.trim().to_lowercase();
-        m.hits = if q.chars().count() >= 2 {
-            (0..m.data.n()).filter(|&i| m.data.search_text[i].contains(&q)).collect()
+        if query.is_empty() {
+                    self.status.clear();
+        } else if helper_alive(&m.path) {
+            let _ = std::fs::write(m.path.join("query.txt"), &query);
+            self.status = "searching…".into();
         } else {
-            Vec::new()
-        };
-        for &i in &m.hits {
-            m.flags[i] |= HIT;
+            self.status = "the search helper isn't running: python src/map_search.py".into();
         }
-        m.flags_dirty = true;
     }
 
-    fn fly_to_hits(&mut self) {
-        let Some(m) = &self.map else { return };
-        let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
-        for &i in &m.hits {
-            let p = Vec2::new(m.data.points[i].x, m.data.points[i].y);
-            min = min.min(p);
-            max = max.max(p);
+    /// The answer of src/map_search.py ({"query", "file"}: two u16 cosines per photo): shown (apply_search) and the
+    /// camera pulls back to show the matches.
+    fn poll_search_file(&mut self) {
+        let Some(m) = &mut self.map else { return };
+        let time = search_file_time(&m.path);
+        if time.is_none() || time == m.search_file {
+            return;
         }
-        if !m.hits.is_empty() {
+        m.search_file = time;
+        let Ok(text) = std::fs::read_to_string(m.path.join("search.json")) else { return };
+        let Ok(found) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+        let Some(bytes) = found["file"].as_str().and_then(|f| std::fs::read(m.path.join(f)).ok()).filter(|r| r.len() == 4 * m.flags.len()) else { return };
+        m.sims = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        if let Some((min, max)) = self.apply_search() {
             self.camera.fly_to(self.camera.fit(min, max));
         }
+    }
+
+    /// Turn the last search's cosines into the photos' match bytes (0 = no match, 1..=255 from the cutoff up): a photo's
+    /// score is the better of its image and caption cosines. The box the matches span, if there are enough of them.
+    fn apply_search(&mut self) -> Option<(Vec2, Vec2)> {
+        const WIDTH: f32 = 0.06; // the strongest colour is this far above the cutoff
+        let (cut, top) = (self.cutoff, self.cutoff + WIDTH);
+        const MIN_HITS: usize = 8; // fewer matches than this: nothing matches well
+        let m = self.map.as_mut()?;
+        let n = m.flags.len();
+        if m.sims.len() != 2 * n {
+            return None;
+        }
+        let mut hits = 0;
+        for i in 0..n {
+            let (a, b) = (m.sims[i] as f32 / 65535.0, m.sims[n + i] as f32 / 65535.0);
+            let s = if m.sims[n + i] > 0 { a.max(b) } else { a };
+            m.flags[i] = if s >= cut { hits += 1; 1 + ((s - cut) / (top - cut)).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
+        }
+        if hits < MIN_HITS {
+            m.flags.fill(0);
+            self.status = "nothing matches well".into();
+            m.flags_dirty = true;
+            return None;
+        }
+        self.status = format!("{hits} matches");
+        m.flags_dirty = true;
+        let pts = m.flags.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, _)| Vec2::new(m.data.points[i].x, m.data.points[i].y));
+        Some(pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p))))
     }
 
     fn key(&mut self, key: &Key, down: bool) {
@@ -245,6 +288,10 @@ impl Viewer {
             self.frame_times.remove(0);
         }
         self.camera.update(dt, self.cursor, self.keys);
+        self.frames += 1;
+        if self.frames % 30 == 0 {
+            self.poll_search_file();
+        }
         if self.opening.as_ref().is_some_and(|(_, job)| job.is_finished()) {
             let (path, job) = self.opening.take().unwrap();
             match job.join() {
@@ -283,8 +330,7 @@ impl Viewer {
             viewport: self.camera.viewport.into(),
             scale: self.camera.scale,
             size_px,
-            searching: (self.search.trim().chars().count() >= 2) as u32,
-            _pad: 0,
+            _pad: [0; 2],
         };
         match &mut self.map {
             Some(m) => {
@@ -309,11 +355,11 @@ impl Viewer {
         let mut actions = UiActions::default();
         let ctx = self.ui.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| self.build_ui(ui, &mut actions));
-        if actions.search_changed {
-            self.run_search();
+        if actions.ask {
+            self.ask();
         }
-        if actions.fly_to_hits {
-            self.fly_to_hits();
+        if actions.reblend {
+            self.apply_search();
         }
         if let Some(path) = actions.open {
             self.open(path);
@@ -409,18 +455,15 @@ impl Viewer {
                     }
                 }
                 ui.separator();
-                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("search titles / metadata / file names").desired_width(260.0));
-                if edit.changed() {
-                    actions.search_changed = true;
-                }
+                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("search by meaning, then Enter").desired_width(260.0));
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    actions.fly_to_hits = true;
+                    actions.ask = true;
                 }
-                if let Some(m) = &self.map
-                    && self.search.trim().chars().count() >= 2
-                {
-                    ui.label(format!("{} photos", m.hits.len()));
+                ui.label("cutoff");
+                if ui.add(egui::Slider::new(&mut self.cutoff, 0.5..=0.85).fixed_decimals(2)).changed() {
+                    actions.reblend = true;
                 }
+                ui.label(&self.status);
             });
         });
         if self.map.is_none() && self.opening.is_none() {
@@ -459,8 +502,8 @@ impl Viewer {
 
 #[derive(Default)]
 struct UiActions {
-    search_changed: bool,
-    fly_to_hits: bool,
+    ask: bool,
+    reblend: bool,
     open: Option<PathBuf>,
 }
 
@@ -495,6 +538,16 @@ impl ApplicationHandler for App {
             v.event(event);
         }
     }
+}
+
+/// Is src/map_search.py running for this bundle? It keeps query.ready fresh.
+fn helper_alive(bundle: &std::path::Path) -> bool {
+    std::fs::metadata(bundle.join("query.ready")).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs_f32() < 3.0)
+}
+
+/// When a bundle's search.json was last written, if it has one.
+fn search_file_time(bundle: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(bundle.join("search.json")).and_then(|m| m.modified()).ok()
 }
 
 fn main() {

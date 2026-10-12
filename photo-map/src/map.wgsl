@@ -9,15 +9,18 @@ struct Camera {
     viewport: vec2f,   // screen size in pixels
     scale: f32,        // pixels per world unit
     size_px: f32,      // a photo's longer side on screen
-    searching: u32,    // 1 = a search is active: dim everything that isn't a hit
-    _pad: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 const PAGE: f32 = 4096.0;
 const ENTRY: u32 = 16u;   // table u32s per photo: loaded level count, original's longer side, 2 unused, slot per level
 const STREAMED: u32 = 7u; // levels from here on are streamed; below are fitted to the slot (small originals enlarged)
-const HIT: u32 = 1u;
-const RED = vec3f(1.0, 0.3, 0.3);
+const COLD = vec3f(0.9, 0.15, 0.15);  // a match just above the cutoff ...
+const HOT = vec3f(1.0, 0.92, 0.25);   // ... the strongest ones (flags 1 ... 255)
+const TINT_FROM: f32 = 24.0;  // a match is tinted solid while it is smaller than this on screen (px) ...
+const TINT_UNTIL: f32 = 96.0; // ... and shows its own picture by this size
+const GROW: f32 = 3.0;        // a match is drawn this much bigger while it is small, real size by TINT_UNTIL
 const AA: f32 = 1.0;  // px the quad reaches past the photo's edge, for the partly covered pixels
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -42,7 +45,8 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) id: u32) -> V
     var corners = array(vec2f(0., 0.), vec2f(1., 0.), vec2f(0., 1.), vec2f(0., 1.), vec2f(1., 0.), vec2f(1., 1.));
     let corner = corners[v];
     let p = points[id];
-    let size = max(cam.size_px * p.zw, vec2f(1.0));  // longer side = size_px, the other follows the shape; never under 1 px
+    let grow = 1.0 + select(0.0, GROW - 1.0, flags[id] != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
+    let size = max(cam.size_px * p.zw, vec2f(1.0)) * grow;  // longer side = size_px, the other follows the shape; never under 1 px
     let local = (corner - 0.5) * (size + 2.0 * AA);
     let px = (p.xy - cam.center) * cam.scale + cam.viewport * 0.5 + local;
     var out: VsOut;
@@ -76,9 +80,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let cover = clamp(inside.x + 0.5, 0.0, 1.0) * clamp(inside.y + 0.5, 0.0, 1.0);
     if cover <= 0.0 { discard; }
     let uv = clamp(in.local / in.size + 0.5, vec2f(0.0), vec2f(1.0));
-    let hit = (in.flags & HIT) != 0u;
-    // a red frame around hits; tiny squares get tinted instead
-    if hit && (min(inside.x, inside.y) < 2.0 || cam.size_px < 6.0) { return vec4f(RED * cover, cover); }
 
     // ideal level: slot size = on-screen size; blend it with the next one up, within what is loaded
     let top = f32(table[in.id * ENTRY] - 1u);
@@ -87,6 +88,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let hi = min(lo + 1.0, top);
     var c = sample_level(in.id, u32(lo), uv, in.shape);
     if hi > lo { c = mix(c, sample_level(in.id, u32(hi), uv, in.shape), f - lo); }
-    let dim = select(1.0, 0.25, cam.searching == 1u && !hit);
-    return vec4f(c * dim * cover, cover);
+    if in.flags != 0u {  // a match: tinted from afar (red to yellow with the match), its picture up close
+        let tint = mix(COLD, HOT, f32(in.flags - 1u) / 254.0);
+        c = mix(c, tint, 1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
+    }
+    return vec4f(c * cover, cover);
 }

@@ -73,8 +73,7 @@ pub struct CameraUniform {
     pub viewport: [f32; 2],
     pub scale: f32,
     pub size_px: f32,
-    pub searching: u32,
-    pub _pad: u32,
+    pub _pad: [u32; 2],
 }
 
 pub struct MapRenderer {
@@ -197,7 +196,7 @@ impl MapRenderer {
         Self { pipeline, bind_group, camera, flags, n: n as u32 }
     }
 
-    /// The whole flags table (search hits), re-sent when anything in it changed.
+    /// The whole flags table (per photo: how red the search makes it, 0..255), re-sent when anything in it changed.
     pub fn upload_flags(&self, queue: &wgpu::Queue, flags: &[u32]) {
         queue.write_buffer(&self.flags, 0, bytemuck::cast_slice(flags));
     }
