@@ -16,6 +16,7 @@ import torch
 from PIL import Image
 
 import config
+import name_regions
 import photomap
 
 DATA = config.ROOT / "data/rare-species"
@@ -85,3 +86,4 @@ if __name__ == "__main__":
         meta = {k: r[k] for k in (*RANK, "sciName", "common") if r[k]}
         photos.append({"title": r["common"] or r["sciName"], "source": f"images/{r['file'].name}", "meta": meta})
     photomap.make(config.ROOT / "maps/rare-species.photomap", photos, [r["file"] for r in records], vectors)
+    name_regions.name(config.ROOT / "maps/rare-species.photomap")  # region_names.json: names from the plain-label vocabulary

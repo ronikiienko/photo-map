@@ -4,7 +4,7 @@
 //!     photos.json     per photo: file (originals/NNNNNN.ext), source, width, height, title, meta (any strings)
 //!     originals/      the images; photo i = position i in photos.json
 //!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
-//!     regions.json    optional: named regions per zoom level (Label below)
+//!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
 //!     embeddings.bin  per photo: float16 vector (not used by the viewer)
 //!     pages_bc7.bin   made by the viewer on first open (bake.rs)
 
@@ -122,7 +122,7 @@ impl MapData {
         }
         let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
         let grid = Grid::new(&points);
-        let mut regions: Regions = read("regions.json").ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut regions: Regions = read("region_names.json").or_else(|_| read("regions.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for level in &mut regions.levels {
             level.sort_by(|a, b| b.photos.cmp(&a.photos));
         }

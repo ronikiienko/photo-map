@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 import config
+import name_regions
 import photomap
 
 ICON = 100  # px, longer side: uncaptioned images up to this size are inline icons (route shields, line badges)
@@ -40,3 +41,4 @@ if __name__ == "__main__":
     photos, files, vectors, chunks = gather()
     photomap.step(f"{len(photos):,} Wikivoyage photos, {sum(bool(c['text']) for c in chunks):,} with a caption")
     photomap.make(config.ROOT / "maps/wikivoyage.photomap", photos, files, vectors)
+    name_regions.name(config.ROOT / "maps/wikivoyage.photomap")  # region_names.json: names from the plain-label vocabulary

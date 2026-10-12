@@ -31,11 +31,20 @@ Captions:
 {captions}"""
 
 
-def prompt_for(texts, idx):
+# the prompt regions are named with (name_finest.py): the main subject as a short general label. (A prompt asking for specific labels with a
+# distinguishing word made the model list the first things it saw: "leopard tiger" for a region of zoo animals; examples get copied into answers.)
+LABEL_PROMPT = """What is the main subject that most of these picture captions are about? Answer with a short general label of one to three plain words that covers most of the pictures (the kind of animal, building, landscape, food or transport), in lowercase, and nothing else. Do not list several items and do not repeat a word. If there is no main subject, answer: none
+
+Captions:
+{captions}"""
+
+
+def prompt_for(texts, idx, template=PROMPT):
     count = Counter(t.strip() for t in (texts[i] for i in idx) if t)
-    return PROMPT.format(captions="\n".join(c[:WIDTH] for c, _ in count.most_common(CAPTIONS)))
+    return template.format(captions="\n".join(c[:WIDTH] for c, _ in count.most_common(CAPTIONS)))
 
 
+# --cache-ram 0: llama-server keeps up to 8 GB of finished prompts in RAM by default, and that filled the machine
 class Server:
     """llama-server for one GGUF, started on entering and always stopped on leaving."""
 
@@ -45,7 +54,7 @@ class Server:
     def __enter__(self):
         env = {**os.environ, "LD_LIBRARY_PATH": LIBS}
         self.proc = subprocess.Popen([str(BIN), "-m", str(LLAMA / "models" / f"{self.gguf}.gguf"), "-ngl", "99", "-c", "4096", "--host", "127.0.0.1",
-                                      "--port", str(PORT), "--jinja"], env=env, stdout=open(config.ROOT / "logs/llama_server.log", "w"), stderr=subprocess.STDOUT)
+                                      "--port", str(PORT), "--jinja", "--parallel", "1", "--cache-ram", "0", "--ctx-checkpoints", "0"], env=env, stdout=open(config.ROOT / "logs/llama_server.log", "w"), stderr=subprocess.STDOUT)
         for _ in range(120):
             try:
                 if json.load(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health")).get("status") == "ok":
@@ -64,12 +73,12 @@ class Server:
         except subprocess.TimeoutExpired:
             self.proc.kill()
 
-    def ask(self, prompt):
-        body = json.dumps({"messages": [{"role": "user", "content": prompt}], "max_tokens": 8, "temperature": 0, "cache_prompt": False,
+    def ask(self, prompt, max_tokens=8, temperature=0, seed=0, drop_bad=True):
+        body = json.dumps({"messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens, "temperature": temperature, "seed": seed, "cache_prompt": False,
                            "chat_template_kwargs": {"enable_thinking": False}}).encode()
         r = json.load(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/chat/completions", body, {"Content-Type": "application/json"})))
         answer = r["choices"][0]["message"]["content"].strip().lower().strip(".")
-        return "none" if set(answer.split()) & BAD else answer
+        return "none" if drop_bad and set(answer.split()) & BAD else answer
 
 
 if __name__ == "__main__":

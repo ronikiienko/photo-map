@@ -37,8 +37,8 @@ const PHOTO_WORLD_DEFAULT: f32 = 4.0; // before a map is open
 /// Squares never shrink below this many pixels, so far-out photos don't vanish.
 const MIN_PX: f32 = 1.0;
 /// Region names show while their region's spread is between these sizes on screen (points), fading in and out.
-/// Region names on the map are switched off until they are put back carefully (the names stay in each map's regions.json).
-const SHOW_REGION_NAMES: bool = false;
+/// Region names on the map (region_names.json, else regions.json).
+const SHOW_REGION_NAMES: bool = true;
 /// A photo shows its own caption above it once it is this wide on screen (points), fully from the second size.
 const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
 const LABEL_IN: (f32, f32) = (25.0, 50.0);

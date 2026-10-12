@@ -12,6 +12,7 @@ A bundle, maps/<name>.photomap/:
     embeddings.bin    per photo: vector, float16
     layout.bin        per photo: x, y (float32, 0 ... 10000); similar photos close together
     regions.json      named regions per zoom level, coarse first: {"levels": [[{name, x, y, spread, photos}]]}
+    region_names.json same format, from src/name_regions.py (plain-label vocabulary); the viewer prefers it to regions.json
     pages_bc7.bin     baked by the viewer the first time it opens the bundle
 """
 
