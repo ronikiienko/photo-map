@@ -24,12 +24,16 @@ QUERY_PROMPT = "task: search result | query: "
 DOC_PROMPT = "title: {title} | text: "   # model default is "title: none | text: "; we fill in the story title
 
 
-def load_model(images=False):
+def load_model(images=False, audio=False):
     import torch
     from sentence_transformers import SentenceTransformer
 
     # bfloat16 on GPU (fast); float32 on CPU (CPU bfloat16 is ~4x slower). Never float16: it can produce NaN vectors.
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    # text-only = 270M; images=True also loads the 170M vision encoder
-    parts = {"audio_config": None} if images else {"vision_config": None, "audio_config": None}
+    # text-only = 270M; images=True also loads the 170M vision encoder, audio=True the 300M audio encoder
+    parts = {}
+    if not images:
+        parts["vision_config"] = None
+    if not audio:
+        parts["audio_config"] = None
     return SentenceTransformer(MODEL_ID, model_kwargs={"torch_dtype": dtype}, config_kwargs=parts)
