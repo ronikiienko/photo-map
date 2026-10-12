@@ -2,7 +2,6 @@
 //! similar photos close together, region names as you zoom.
 //!     photo-map [bundle]      default: the one opened last in maps/
 
-mod audio;
 mod bake;
 mod camera;
 mod data;
@@ -42,8 +41,6 @@ const MIN_PX: f32 = 1.0;
 const SHOW_REGION_NAMES: bool = true;
 /// A photo shows its own caption above it once it is this wide on screen (points), fully from the second size.
 const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
-/// A photo with a sound gets its play button once it is this wide on screen (points); smaller, or out of view: the sound stops.
-const AUDIO_FROM: f32 = 130.0;
 const LABEL_IN: (f32, f32) = (25.0, 50.0);
 const LABEL_OUT: (f32, f32) = (300.0, 500.0);
 
@@ -81,10 +78,6 @@ struct Viewer {
     keys: Keys,
     cursor: Option<Vec2>,
     hovered: Option<usize>,
-    /// The sound being played (or paused), if any.
-    audio: audio::Audio,
-    /// The mouse is over a sound's controls (last frame): the wheel still zooms the map there.
-    over_audio: bool,
     search: String,
     /// The search helper this viewer started: one for the whole session, it follows the open map.
     helper: Option<Helper>,
@@ -125,8 +118,6 @@ impl Viewer {
             keys: Keys::default(),
             cursor: None,
             hovered: None,
-            audio: Default::default(),
-            over_audio: false,
             search: String::new(),
             helper: None,
             ask_when_ready: false,
@@ -155,7 +146,6 @@ impl Viewer {
 
     /// The bundle has been read: let go of the old map, put the new one on the GPU and show all of it.
     fn opened(&mut self, path: PathBuf, data: MapData) {
-        self.audio.stop();
         self.map = None; // free the old map's GPU memory first
         let started = Instant::now();
         let streamer = Streamer::new(&self.gpu.device, &self.gpu.queue, &data);
@@ -365,7 +355,7 @@ impl Viewer {
                 ElementState::Released if self.camera.dragging() => self.camera.release(),
                 _ => {}
             },
-            WindowEvent::MouseWheel { delta, .. } if !over_ui || self.over_audio => match delta {
+            WindowEvent::MouseWheel { delta, .. } if !over_ui => match delta {
                 MouseScrollDelta::LineDelta(_, y) => self.camera.scroll_lines(y),
                 MouseScrollDelta::PixelDelta(p) => self.camera.scroll_pixels(p.y as f32),
             },
@@ -634,102 +624,12 @@ impl Viewer {
         }
     }
 
-    /// Photos with a sound (meta "audio") get a play button under them once they are big on screen, and the one that is
-    /// loaded a seek bar too. Its sound stops, and the decoder and output device are freed, when its photo gets small or leaves the view.
-    fn audio_controls(&mut self, ctx: &egui::Context) {
-        self.over_audio = false;
-        let Some(m) = &self.map else {
-            self.audio.stop();
-            return;
-        };
-        let ppp = ctx.pixels_per_point();
-        let long = self.size_px() / ppp;
-        let near = long >= AUDIO_FROM;
-        let (a, b) = (self.camera.to_world(Vec2::ZERO), self.camera.to_world(self.camera.viewport));
-        let (view_min, view_max) = (a.min(b), a.max(b));
-        if let Some(i) = self.audio.loaded() {
-            let p = m.data.points[i];
-            if !near || p.x < view_min.x || p.x > view_max.x || p.y < view_min.y || p.y > view_max.y {
-                self.audio.stop();
-            }
-        }
-        if !near {
-            return;
-        }
-        let centre = (view_min + view_max) * 0.5;
-        let mut visible = Vec::new();
-        m.data.grid.within(&m.data.points, view_min, view_max, |i| {
-            if m.data.photos[i].meta.contains_key("audio") {
-                visible.push(i);
-            }
-        });
-        visible.sort_by(|&p, &q| {
-            let d = |i: usize| (Vec2::new(m.data.points[i].x, m.data.points[i].y) - centre).length_squared();
-            d(p).total_cmp(&d(q))
-        });
-        let loaded = self.audio.loaded();
-        let position = self.audio.position();
-        let (mut toggle, mut seek) = (None, None);
-        let mouse = self.cursor.map(|c| egui::pos2(c.x, c.y) / ppp);
-        let mut over = false;
-        for i in visible.into_iter().take(40) {
-            let shape = m.data.shape(i);
-            let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
-            let image = egui::Rect::from_center_size(egui::pos2(at.x, at.y), egui::vec2(shape.x * long, shape.y * long));
-            let button = egui::Rect::from_center_size(image.left_bottom() + egui::vec2(24.0, -24.0), egui::vec2(32.0, 32.0));
-            let this = if loaded == Some(i) { position.as_ref() } else { None };
-            over |= mouse.is_some_and(|c| if this.is_some() { image } else { button }.contains(c));
-            // loaded: the area is the whole picture (the playhead is dragged on it); otherwise just the button
-            egui::Area::new(egui::Id::new(("audio", i))).fixed_pos(if this.is_some() { image.min } else { button.min }).show(ctx, |ui| {
-                let scrub = if this.is_some() { Some(ui.allocate_rect(image, egui::Sense::click_and_drag())) } else { ui.allocate_rect(button, egui::Sense::hover()); None };
-                let press = ui.interact(button, ui.id().with("play"), egui::Sense::click()); // added last: wins where it overlaps the picture
-                let painter = ui.painter();
-                if let (Some(p), Some(scrub)) = (this, &scrub) {
-                    if let (true, Some(at)) = (scrub.clicked() || scrub.dragged(), scrub.interact_pointer_pos()) {
-                        seek = Some(((at.x - image.left()) / image.width()).clamp(0.0, 1.0) * p.length);
-                    }
-                    let x = image.left() + image.width() * (seek.unwrap_or(p.now) / p.length.max(0.01)).clamp(0.0, 1.0);
-                    painter.line_segment([egui::pos2(x, image.top()), egui::pos2(x, image.bottom())], egui::Stroke::new(4.0, egui::Color32::from_black_alpha(140)));
-                    painter.line_segment([egui::pos2(x, image.top()), egui::pos2(x, image.bottom())], egui::Stroke::new(2.0, egui::Color32::WHITE));
-                    let time = format!("{:.1} / {:.1} s", p.now, p.length);
-                    let font = egui::FontId::monospace(14.0);
-                    let at = button.right_center() + egui::vec2(6.0, 0.0);
-                    painter.text(at + egui::vec2(1.0, 1.0), egui::Align2::LEFT_CENTER, &time, font.clone(), egui::Color32::BLACK);
-                    painter.text(at, egui::Align2::LEFT_CENTER, &time, font, egui::Color32::WHITE);
-                }
-                let c = button.center();
-                painter.circle(c, 15.0, egui::Color32::from_black_alpha(if press.hovered() { 210 } else { 160 }), egui::Stroke::new(1.5, egui::Color32::WHITE));
-                if this.is_some_and(|p| !p.paused) {
-                    for dx in [-4.5, 1.5] {
-                        painter.rect_filled(egui::Rect::from_min_size(c + egui::vec2(dx, -6.0), egui::vec2(3.0, 12.0)), 0.0, egui::Color32::WHITE);
-                    }
-                } else {
-                    painter.add(egui::Shape::convex_polygon(vec![c + egui::vec2(-4.0, -7.0), c + egui::vec2(-4.0, 7.0), c + egui::vec2(7.0, 0.0)], egui::Color32::WHITE, egui::Stroke::NONE));
-                }
-                if press.clicked() {
-                    toggle = Some(i);
-                }
-            });
-        }
-        self.over_audio = over;
-        if let Some(i) = toggle {
-            let file = m.path.join(m.data.photos[i].meta.get("audio").and_then(|a| a.as_str()).unwrap_or_default());
-            if let Err(e) = self.audio.toggle(i, &file) {
-                self.status = e;
-            }
-        }
-        if let Some(t) = seek {
-            self.audio.seek(t);
-        }
-    }
-
     fn build_ui(&mut self, ui: &mut egui::Ui, actions: &mut UiActions) {
         let ctx = ui.ctx().clone();
         if SHOW_REGION_NAMES {
             self.draw_labels(&ctx);
         }
         self.draw_photo_captions(&ctx);
-        self.audio_controls(&ctx);
 
         egui::Area::new("top".into()).fixed_pos([10.0, 10.0]).show(&ctx, |ui| {
             ui.horizontal(|ui| {
