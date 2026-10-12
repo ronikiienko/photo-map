@@ -588,7 +588,7 @@ impl Viewer {
                     }
                 }
                 ui.label("cutoff");
-                if ui.add(egui::Slider::new(&mut self.cutoff, 0.5..=0.95).fixed_decimals(2)).changed() {
+                if ui.add(egui::Slider::new(&mut self.cutoff, 0.1..=0.95).fixed_decimals(2)).changed() {
                     actions.reblend = true;
                 }
                 ui.label(&self.status);

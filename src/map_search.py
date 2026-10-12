@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image
 
 import config
@@ -46,16 +47,55 @@ def load(bundle):
     return {"img": img, "cap": cap, "has": has}
 
 
-if __name__ == "__main__":
-    first = Path(sys.argv[1] if len(sys.argv) > 1 else config.ROOT / "maps/wikivoyage.photomap").resolve()
+BIOCLIP = "imageomics/bioclip-2"
+models = {}  # name -> (text(query), photo(PIL image)) -> vector: each model is loaded when a map made with it is opened
+
+
+def gemma():
     model = config.load_model(images=True)
     model[0].processor.image_processor.max_soft_tokens = 140  # as when the photos were embedded
+    return (
+        lambda text: model.encode([text], prompt=config.QUERY_PROMPT, normalize_embeddings=True)[0],
+        lambda im: model.encode([{"image": im}], normalize_embeddings=True)[0],
+    )
+
+
+def bioclip():
+    import open_clip
+
+    net, _, preprocess = open_clip.create_model_and_transforms("hf-hub:" + BIOCLIP)
+    net = net.half().cuda().eval()  # as when the photos were embedded
+    tokenizer = open_clip.get_tokenizer("hf-hub:" + BIOCLIP)
+
+    def text(t):
+        with torch.no_grad():
+            return net.encode_text(tokenizer([t]).cuda(), normalize=True)[0].float().cpu().numpy()
+
+    def photo(im):
+        with torch.no_grad():
+            return net.encode_image(preprocess(im)[None].half().cuda(), normalize=True)[0].float().cpu().numpy()
+
+    return text, photo
+
+
+def model_for(bundle):
+    """The query encoders of the model the map's photos were embedded with (its manifest says which)."""
+    name = json.loads((bundle / "manifest.json").read_text())["embedding"]["model"]
+    key = BIOCLIP if name == BIOCLIP else "gemma"
+    if key not in models:
+        print(f"loading {key} for {bundle.name}", flush=True)
+        models[key] = bioclip() if key == BIOCLIP else gemma()
+    return models[key]
+
+
+if __name__ == "__main__":
+    first = Path(sys.argv[1] if len(sys.argv) > 1 else config.ROOT / "maps/wikivoyage.photomap").resolve()
     loaded = {}  # bundle -> load(bundle), the KEEP most recently used
     now = {"bundle": None, "seen": 0}  # the map being served; its query.txt time when it was taken up (older: old news)
 
     def take_up(bundle):
         if bundle not in loaded:
-            loaded[bundle] = load(bundle)
+            loaded[bundle] = {**load(bundle), "model": model_for(bundle)}
         loaded[bundle] = loaded.pop(bundle)  # most recent last
         while len(loaded) > KEEP:
             del loaded[next(iter(loaded))]
@@ -92,6 +132,7 @@ if __name__ == "__main__":
         bundle = now["bundle"]
         data = loaded[bundle]
         img, cap, has = data["img"], data["cap"], data["has"]
+        embed_text, embed_photo = data["model"]
         ask = bundle / "query.txt"
         if not ask.exists() or ask.stat().st_mtime_ns == now["seen"]:
             continue
@@ -107,10 +148,10 @@ if __name__ == "__main__":
         try:
             parts = []
             if text:
-                parts.append(model.encode([text], prompt=config.QUERY_PROMPT, normalize_embeddings=True)[0])
+                parts.append(embed_text(text))
             if image:  # a photo is embedded like the map's photos: no prompt
                 with Image.open(image) as im:
-                    parts.append(model.encode([{"image": im.convert("RGB")}], normalize_embeddings=True)[0])
+                    parts.append(embed_photo(im.convert("RGB")))
         except Exception as e:  # unreadable photo etc.: tell the viewer, keep running
             print(f"{asked}: {e}", flush=True)
             tmp = bundle / "search.json.tmp"

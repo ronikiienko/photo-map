@@ -47,7 +47,7 @@ def size(path):
         return None
 
 
-def make(bundle, photos, files, vectors):
+def make(bundle, photos, files, vectors, model=config.MODEL_ID):
     """photos: per photo {title, source, meta}; files: the image files; vectors: n x dim (normalized).
     Unreadable images are left out. Writes a new bundle (an old one at the same path is replaced)."""
     bundle = Path(bundle)
@@ -80,7 +80,7 @@ def make(bundle, photos, files, vectors):
     xy.tofile(new / "layout.bin")
     regions(new, vectors, xy, [p["meta"].get("caption", "") for p in out])
     manifest = {"format": 1, "name": bundle.name.removesuffix(".photomap"), "created": time.strftime("%Y-%m-%d %H:%M"),
-                "photos": len(out), "world": WORLD, "embedding": {"model": config.MODEL_ID, "dim": vectors.shape[1], "dtype": "float16"}}
+                "photos": len(out), "world": WORLD, "embedding": {"model": model, "dim": vectors.shape[1], "dtype": "float16"}}
     (new / "manifest.json").write_text(json.dumps(manifest, indent=2))
     shutil.rmtree(bundle, ignore_errors=True)
     new.rename(bundle)
