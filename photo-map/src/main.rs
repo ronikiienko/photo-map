@@ -12,7 +12,7 @@ mod photo;
 mod stream;
 
 use camera::{Camera, Keys};
-use data::{MapData, WORLD};
+use data::{MapData, Progress, WORLD};
 use glam::Vec2;
 use gpu::{CameraUniform, Gpu, MapRenderer};
 use library::Library;
@@ -37,6 +37,8 @@ const PHOTO_WORLD_DEFAULT: f32 = 4.0; // before a map is open
 /// Squares never shrink below this many pixels, so far-out photos don't vanish.
 const MIN_PX: f32 = 1.0;
 /// Region names show while their region's spread is between these sizes on screen (points), fading in and out.
+/// Region names on the map are switched off until they are put back carefully (the names stay in each map's regions.json).
+const SHOW_REGION_NAMES: bool = false;
 const LABEL_IN: (f32, f32) = (25.0, 50.0);
 const LABEL_OUT: (f32, f32) = (300.0, 500.0);
 
@@ -69,7 +71,7 @@ struct Viewer {
     map: Option<OpenMap>,
     library: Library,
     /// A bundle being read from disk (and baked, the first time) on a thread; it becomes `map` when ready.
-    opening: Option<(PathBuf, JoinHandle<std::io::Result<MapData>>)>,
+    opening: Option<(PathBuf, JoinHandle<std::io::Result<MapData>>, Arc<Progress>)>,
     camera: Camera,
     keys: Keys,
     cursor: Option<Vec2>,
@@ -135,7 +137,9 @@ impl Viewer {
     /// Start reading a bundle on a thread (photos.json and friends take a moment for big maps; a new bundle is baked).
     fn open(&mut self, path: PathBuf) {
         let p = path.clone();
-        self.opening = Some((path, std::thread::spawn(move || MapData::load(&p))));
+        let progress = Arc::new(Progress::default());
+        let shared = progress.clone();
+        self.opening = Some((path, std::thread::spawn(move || MapData::load(&p, &shared)), progress));
     }
 
     /// The bundle has been read: let go of the old map, put the new one on the GPU and show all of it.
@@ -391,8 +395,8 @@ impl Viewer {
                 self.ask();
             }
         }
-        if self.opening.as_ref().is_some_and(|(_, job)| job.is_finished()) {
-            let (path, job) = self.opening.take().unwrap();
+        if self.opening.as_ref().is_some_and(|(_, job, _)| job.is_finished()) {
+            let (path, job, _) = self.opening.take().unwrap();
             match job.join() {
                 Ok(Ok(data)) => self.opened(path, data),
                 Ok(Err(e)) => eprintln!("can't open {}: {e}", path.display()),
@@ -546,16 +550,21 @@ impl Viewer {
 
     fn build_ui(&mut self, ui: &mut egui::Ui, actions: &mut UiActions) {
         let ctx = ui.ctx().clone();
-        self.draw_labels(&ctx);
+        if SHOW_REGION_NAMES {
+            self.draw_labels(&ctx);
+        }
 
         egui::Area::new("top".into()).fixed_pos([10.0, 10.0]).show(&ctx, |ui| {
             ui.horizontal(|ui| {
-                let current = self.opening.as_ref().map(|(p, _)| p.as_path()).or(self.map.as_ref().map(|m| m.path.as_path()));
+                let current = self.opening.as_ref().map(|(p, _, _)| p.as_path()).or(self.map.as_ref().map(|m| m.path.as_path()));
                 actions.open = self.library.bar(ui, current);
-                if self.opening.is_some() {
+                if let Some((path, _, progress)) = &self.opening {
+                    let (text, fraction) = progress.now();
                     ui.spinner();
-                    if self.map.is_none() {
-                        ui.weak("opening (a new map is baked first: a minute or two for a big one)");
+                    let name = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
+                    ui.colored_label(egui::Color32::from_rgb(240, 190, 90), format!("opening {name}: {text}"));
+                    if let Some(f) = fraction {
+                        ui.add(egui::ProgressBar::new(f).desired_width(160.0).show_percentage());
                     }
                 }
                 ui.separator();

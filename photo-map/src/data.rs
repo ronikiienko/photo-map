@@ -12,6 +12,36 @@ use memmap2::Mmap;
 use serde::Deserialize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+/// What opening a map is doing, for the window to show (the thread opening it writes, the window reads).
+#[derive(Default)]
+pub struct Progress {
+    text: Mutex<String>,
+    done: AtomicUsize,
+    total: AtomicUsize,
+}
+
+impl Progress {
+    /// Starting a stage of `total` steps (0 = not countable).
+    pub fn stage(&self, text: impl Into<String>, total: usize) {
+        *self.text.lock().unwrap() = text.into();
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+    }
+
+    pub fn set_done(&self, done: usize) {
+        self.done.store(done, Ordering::Relaxed);
+    }
+
+    /// The stage's text and how far along it is (0..1, None if not countable).
+    pub fn now(&self) -> (String, Option<f32>) {
+        let total = self.total.load(Ordering::Relaxed);
+        let fraction = (total > 0).then(|| self.done.load(Ordering::Relaxed) as f32 / total as f32);
+        (self.text.lock().unwrap().clone(), fraction)
+    }
+}
 
 /// World coordinates run 0..WORLD on both axes.
 pub const WORLD: f32 = 10000.0;
@@ -77,7 +107,8 @@ pub struct MapData {
 }
 
 impl MapData {
-    pub fn load(bundle: &Path) -> std::io::Result<Self> {
+    pub fn load(bundle: &Path, progress: &Progress) -> std::io::Result<Self> {
+        progress.stage("reading the map's files", 0);
         let read = |name: &str| std::fs::read(bundle.join(name));
         let manifest: Manifest = serde_json::from_slice(&read("manifest.json")?)?;
         let photos: Vec<Photo> = serde_json::from_slice(&read("photos.json")?)?;
@@ -87,7 +118,7 @@ impl MapData {
             return Err(std::io::Error::other("bundle files don't match"));
         }
         if !bundle.join("pages_bc7.bin").exists() {
-            crate::bake::bake(bundle, &photos)?;
+            crate::bake::bake(bundle, &photos, progress)?;
         }
         let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
         let grid = Grid::new(&points);

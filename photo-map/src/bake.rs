@@ -5,7 +5,7 @@
 //! small photos enlarged). Slots sit on PAGE x PAGE pages in a grid of PAGE / 2^L per row; slot = photo index.
 //! Pages are written level 0 first, each as BC7 blocks (16 bytes per 4 x 4 pixels).
 
-use crate::data::Photo;
+use crate::data::{Photo, Progress};
 use crate::pages::{PAGE as PAGE_U32, STREAMED};
 use crate::photo;
 use rayon::prelude::*;
@@ -20,12 +20,13 @@ const TOP: usize = 1 << (LEVELS - 1);
 /// Rows compressed per task: a multiple of 4 (a BC7 block row).
 const STRIP: usize = 64;
 
-pub fn bake(bundle: &Path, photos: &[Photo]) -> io::Result<()> {
+pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<()> {
     let n = photos.len();
     let started = Instant::now();
     let step = |msg: String| eprintln!("[{:5.0}s] {msg}", started.elapsed().as_secs_f32());
     step(format!("{}: baking the always-loaded levels of {n} photos", bundle.display()));
 
+    progress.stage("first time this map is opened: baking its small pictures (step 1 of 2, reading every photo)", n);
     // 1. every photo fitted to 64 px (longer side) in the corner of a 64 x 64 tile
     let done = AtomicUsize::new(0);
     let mut tiles = vec![0u8; n * TOP * TOP * 4];
@@ -37,6 +38,9 @@ pub fn bake(bundle: &Path, photos: &[Photo]) -> io::Result<()> {
             }
         }
         let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+        if d % 64 == 0 {
+            progress.set_done(d);
+        }
         if d % 10_000 == 0 {
             step(format!("decoded {d} / {n}"));
         }
@@ -46,6 +50,8 @@ pub fn bake(bundle: &Path, photos: &[Photo]) -> io::Result<()> {
     let settings = intel_tex_2::bc7::opaque_basic_settings();
     let mut levels: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
     for level in (0..LEVELS).rev() {
+        progress.stage("first time this map is opened: baking its small pictures (step 2 of 2, compressing them)", LEVELS);
+        progress.set_done(LEVELS - 1 - level);
         let s = 1 << level;
         let per_row = PAGE / s;
         let per_page = per_row * per_row;
