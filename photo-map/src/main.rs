@@ -31,8 +31,9 @@ use winit::window::{Window, WindowId};
 #[link(name = "stdc++")]
 unsafe extern "C" {}
 
-/// Side of a photo square in world units: zoom changes it on screen, nothing else does.
-const PHOTO_WORLD: f32 = 4.0; // about the median distance between neighbouring photos
+/// Side of a photo square in world units is the median distance between nearest neighbours: a map of 12,000 photos
+/// gets bigger squares than one of 88,000 in the same world (zoom changes the size on screen, nothing else does).
+const PHOTO_WORLD_DEFAULT: f32 = 4.0; // before a map is open
 /// Squares never shrink below this many pixels, so far-out photos don't vanish.
 const MIN_PX: f32 = 1.0;
 /// Region names show while their region's spread is between these sizes on screen (points), fading in and out.
@@ -53,6 +54,8 @@ struct OpenMap {
     streamer: Streamer,
     flags: Vec<u32>,
     flags_dirty: bool,
+    /// A photo's side in world units (see PHOTO_WORLD_DEFAULT).
+    photo_world: f32,
     /// The last search's cosines: the image ones, then the caption ones (0 = no caption), as u16.
     sims: Vec<u16>,
     /// When the bundle's search.json (written by src/map_search.py) was last read.
@@ -72,10 +75,20 @@ struct Viewer {
     cursor: Option<Vec2>,
     hovered: Option<usize>,
     search: String,
+    /// The search helper this viewer started: one for the whole session, it follows the open map.
+    helper: Option<Helper>,
+    /// Enter was pressed while the helper was still starting: search as soon as it is up.
+    ask_when_ready: bool,
+    /// A photo dropped on the window: searched for together with the text.
+    photo: Option<PathBuf>,
     /// What the last search did, next to the box.
     status: String,
     /// Matches start at this cosine similarity (the strongest colour is WIDTH above).
     cutoff: f32,
+    /// What the shown search was for (words and/or a photo's name), from the helper's answer.
+    shown: String,
+    /// The photo in the box, as a small picture.
+    photo_tex: Option<egui::TextureHandle>,
     last_frame: Instant,
     frame_times: Vec<f32>,
     frames: u64,
@@ -102,8 +115,13 @@ impl Viewer {
             cursor: None,
             hovered: None,
             search: String::new(),
+            helper: None,
+            ask_when_ready: false,
+            photo: None,
             status: String::new(),
             cutoff: 0.72,
+            shown: String::new(),
+            photo_tex: None,
             last_frame: Instant::now(),
             frame_times: Vec::new(),
             frames: 0,
@@ -131,13 +149,15 @@ impl Viewer {
         self.library.remember(&path);
         self.camera.jump(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
         let n = data.n();
+        let photo_world = median_neighbour_distance(&data.points);
         let search_file = search_file_time(&path);  // one from before this opening is old news
-        self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, sims: Vec::new(), search_file });
         self.status.clear();
+        self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, photo_world, sims: Vec::new(), search_file });
+        self.follow_map();
     }
 
     fn size_px(&self) -> f32 {
-        (self.camera.scale * PHOTO_WORLD).max(MIN_PX)
+        (self.camera.scale * self.map.as_ref().map_or(PHOTO_WORLD_DEFAULT, |m| m.photo_world)).max(MIN_PX)
     }
 
     /// The photo under the mouse: of the squares containing it, the one drawn last (on top).
@@ -158,18 +178,79 @@ impl Viewer {
         best
     }
 
-    /// Enter in the search box: ask the helper (src/map_search.py) for the best photos for the text; its answer
-    /// comes back in search.json (poll_search_file). Empty text clears the last search.
+    /// Take a photo for the search: remember its path and a small picture of it to show in the bar. False if it can't be read.
+    fn set_photo(&mut self, path: PathBuf) -> bool {
+        let Ok(img) = image::open(&path) else {
+            self.status = "can't read that photo".into();
+            return false;
+        };
+        let small = img.thumbnail(96, 96).to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
+        self.photo_tex = Some(self.ui.ctx.load_texture("query photo", color, egui::TextureOptions::LINEAR));
+        self.photo = Some(path);
+        true
+    }
+
+    /// Make sure a search helper runs and works on the open map: it is started once, and told when the map changes
+    /// (the project's logs/search.bundle holds the map's path) so it keeps its model loaded and just loads the map's vectors.
+    fn follow_map(&mut self) {
+        let Some(path) = self.map.as_ref().map(|m| m.path.clone()) else { return };
+        match std::fs::canonicalize(&path).map_err(|e| e.to_string()).and_then(|b| project_root(&b).map(|r| (b, r))) {
+            Ok((bundle, root)) => {
+                let _ = std::fs::create_dir_all(root.join("logs"));
+                let _ = std::fs::write(root.join("logs/search.bundle"), bundle.to_string_lossy().as_bytes());
+            }
+            Err(e) => {
+                self.status = format!("search can't start: {e}");
+                return;
+            }
+        }
+        let running = self.helper.as_mut().is_some_and(|h| h.0.try_wait().ok().flatten().is_none());
+        if !running {
+            self.helper = None; // a dead one's leftovers
+            if !helper_alive(&path) {  // not one started by hand
+                match start_helper(&path) {
+                    Ok(h) => self.helper = Some(h),
+                    Err(e) => self.status = format!("search can't start: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Enter in the search box, or a photo dropped on the window: ask the helper (src/map_search.py) for the best photos
+    /// for the text and/or the photo (query.txt, as JSON); its answer comes back in search.json (poll_search_file).
+    /// Nothing to search for clears the last search.
     fn ask(&mut self) {
-        let query = self.search.trim().to_string();
-        let Some(m) = &mut self.map else { return };
-        if query.is_empty() {
-                    self.status.clear();
-        } else if helper_alive(&m.path) {
-            let _ = std::fs::write(m.path.join("query.txt"), &query);
+        let text = self.search.trim().to_string();
+        // a path to a photo typed or pasted in the box (from a file manager, or dragged on a terminal) is a photo search
+        if let Some(path) = photo_path(&text) {
+            if self.set_photo(path) {
+                self.search.clear();
+            }
+        }
+        let text = self.search.trim().to_string();
+        let Some(path) = self.map.as_ref().map(|m| m.path.clone()) else { return };
+        if text.is_empty() && self.photo.is_none() {
+            if let Some(m) = &mut self.map {
+                m.flags.fill(0);
+                m.flags_dirty = true;
+                m.sims.clear();
+            }
+            self.shown.clear();
+            self.status.clear();
+        } else if helper_alive(&path) {
+            let query = serde_json::json!({ "text": text, "image": self.photo });
+            let _ = std::fs::write(path.join("query.txt"), query.to_string());
             self.status = "searching…".into();
+            self.ask_when_ready = false;
         } else {
-            self.status = "the search helper isn't running: python src/map_search.py".into();
+            // not answering: still starting (it takes about 30 s the first time), or stopped: start it again
+            self.follow_map();
+            if self.helper.is_none() && !helper_alive(&path) {
+                return; // follow_map said why
+            }
+            self.ask_when_ready = true;
+            self.status = "starting the search (a few seconds, 30 s the first time), it will run when ready…".into();
         }
     }
 
@@ -184,7 +265,12 @@ impl Viewer {
         m.search_file = time;
         let Ok(text) = std::fs::read_to_string(m.path.join("search.json")) else { return };
         let Ok(found) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+        if let Some(error) = found["error"].as_str() {
+            self.status = error.to_string();
+            return;
+        }
         let Some(bytes) = found["file"].as_str().and_then(|f| std::fs::read(m.path.join(f)).ok()).filter(|r| r.len() == 4 * m.flags.len()) else { return };
+        self.shown = found["query"].as_str().unwrap_or_default().to_string();
         m.sims = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         if let Some((min, max)) = self.apply_search() {
             self.camera.fly_to(self.camera.fit(min, max));
@@ -195,7 +281,8 @@ impl Viewer {
     /// score is the better of its image and caption cosines. The box the matches span, if there are enough of them.
     fn apply_search(&mut self) -> Option<(Vec2, Vec2)> {
         const WIDTH: f32 = 0.06; // the strongest colour is this far above the cutoff
-        let (cut, top) = (self.cutoff, self.cutoff + WIDTH);
+        let cut = self.cutoff;
+        let top = cut + WIDTH;
         const MIN_HITS: usize = 8; // fewer matches than this: nothing matches well
         let m = self.map.as_mut()?;
         let n = m.flags.len();
@@ -210,11 +297,11 @@ impl Viewer {
         }
         if hits < MIN_HITS {
             m.flags.fill(0);
-            self.status = "nothing matches well".into();
+            self.status = format!("{}: nothing matches well", self.shown);
             m.flags_dirty = true;
             return None;
         }
-        self.status = format!("{hits} matches");
+        self.status = format!("{}: {hits} matches", self.shown);
         m.flags_dirty = true;
         let pts = m.flags.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, _)| Vec2::new(m.data.points[i].x, m.data.points[i].y));
         Some(pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p))))
@@ -273,6 +360,15 @@ impl Viewer {
                     self.key(&event.logical_key, false); // never leave a key stuck down
                 }
             }
+            WindowEvent::DroppedFile(path) => {
+                if path.extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_TYPES.contains(&e.to_lowercase().as_str())) {
+                    if self.set_photo(path) {
+                        self.ask();
+                    }
+                } else {
+                    self.status = "that isn't a photo I can search with (jpg, png, webp, gif, bmp)".into();
+                }
+            }
             WindowEvent::Focused(false) => self.keys = Keys::default(),
             WindowEvent::RedrawRequested => self.frame(),
             _ => {}
@@ -291,6 +387,9 @@ impl Viewer {
         self.frames += 1;
         if self.frames % 30 == 0 {
             self.poll_search_file();
+            if self.ask_when_ready && self.map.as_ref().is_some_and(|m| helper_alive(&m.path)) {
+                self.ask();
+            }
         }
         if self.opening.as_ref().is_some_and(|(_, job)| job.is_finished()) {
             let (path, job) = self.opening.take().unwrap();
@@ -355,6 +454,11 @@ impl Viewer {
         let mut actions = UiActions::default();
         let ctx = self.ui.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| self.build_ui(ui, &mut actions));
+        if actions.clear_photo {
+            self.photo = None;
+            self.photo_tex = None;
+            self.ask();
+        }
         if actions.ask {
             self.ask();
         }
@@ -455,12 +559,36 @@ impl Viewer {
                     }
                 }
                 ui.separator();
-                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("search by meaning, then Enter").desired_width(260.0));
+                // whether a search can run now
+                let helper_up = self.helper.as_mut().is_some_and(|h| h.0.try_wait().ok().flatten().is_none());
+                match self.map.as_ref().map(|m| (helper_alive(&m.path), helper_up)) {
+                    Some((true, _)) => {
+                        ui.colored_label(egui::Color32::from_rgb(110, 200, 120), "● search ready");
+                    }
+                    Some((false, true)) => {
+                        ui.spinner();
+                        ui.weak("search starting…");
+                    }
+                    Some((false, false)) => {
+                        ui.weak("○ search off (Enter starts it)");
+                    }
+                    None => {}
+                }
+                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("words, or a photo (drop it, or paste its path); Enter").desired_width(260.0));
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     actions.ask = true;
                 }
+                if let Some(photo) = &self.photo {
+                    if let Some(tex) = &self.photo_tex {
+                        ui.add(egui::Image::new((tex.id(), egui::vec2(36.0 * tex.aspect_ratio(), 36.0))));
+                    }
+                    ui.label(photo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                    if ui.small_button("x").on_hover_text("remove the photo and search again").clicked() {
+                        actions.clear_photo = true;
+                    }
+                }
                 ui.label("cutoff");
-                if ui.add(egui::Slider::new(&mut self.cutoff, 0.5..=0.85).fixed_decimals(2)).changed() {
+                if ui.add(egui::Slider::new(&mut self.cutoff, 0.5..=0.95).fixed_decimals(2)).changed() {
                     actions.reblend = true;
                 }
                 ui.label(&self.status);
@@ -504,6 +632,7 @@ impl Viewer {
 struct UiActions {
     ask: bool,
     reblend: bool,
+    clear_photo: bool,
     open: Option<PathBuf>,
 }
 
@@ -540,6 +669,69 @@ impl ApplicationHandler for App {
     }
 }
 
+/// The median distance from a photo to its nearest neighbour, over a sample of up to 2,000 photos.
+fn median_neighbour_distance(points: &[data::Point]) -> f32 {
+    let step = (points.len() / 2000).max(1);
+    let mut nearest: Vec<f32> = (0..points.len())
+        .step_by(step)
+        .map(|i| {
+            let p = points[i];
+            let d2 = points.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, q)| (q.x - p.x).powi(2) + (q.y - p.y).powi(2)).fold(f32::MAX, f32::min);
+            d2.sqrt()
+        })
+        .collect();
+    nearest.sort_by(f32::total_cmp);
+    nearest.get(nearest.len() / 2).copied().filter(|d| *d > 0.0).unwrap_or(PHOTO_WORLD_DEFAULT)
+}
+
+const PHOTO_TYPES: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "bmp"];
+
+/// The file a text names, if it is a photo: plain, in quotes, with escaped spaces, or as file://.
+fn photo_path(text: &str) -> Option<PathBuf> {
+    let t = text.trim().trim_matches(|c| c == '\'' || c == '"').replace("\\ ", " ");
+    let path = PathBuf::from(t.strip_prefix("file://").unwrap_or(&t));
+    let image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_TYPES.contains(&e.to_lowercase().as_str()));
+    (image && path.is_file()).then_some(path)
+}
+
+/// The project folder: the one that has the bundle's maps/ folder.
+fn project_root(bundle: &std::path::Path) -> Result<PathBuf, String> {
+    bundle.parent().and_then(|p| p.parent()).map(PathBuf::from).ok_or_else(|| "no project folder around the map".to_string())
+}
+
+/// The search helper (src/map_search.py) this viewer started; stopped with it.
+struct Helper(std::process::Child);
+
+impl Drop for Helper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Start the helper for a bundle: the project's .venv python on src/map_search.py, its output in logs/map_search.log.
+/// (The project folder is the one with the bundle's maps/ folder.)
+fn start_helper(bundle: &std::path::Path) -> Result<Helper, String> {
+    let bundle = std::fs::canonicalize(bundle).map_err(|e| e.to_string())?;
+    let root = project_root(&bundle)?;
+    let (python, script) = (root.join(".venv/bin/python"), root.join("src/map_search.py"));
+    if !python.exists() || !script.exists() {
+        return Err("search needs .venv/bin/python and src/map_search.py in the project folder".into());
+    }
+    let _ = std::fs::create_dir_all(root.join("logs"));
+    let log = std::fs::File::create(root.join("logs/map_search.log")).map_err(|e| e.to_string())?;
+    let child = std::process::Command::new(python)
+        .arg(script)
+        .arg(&bundle)
+        .current_dir(&root)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone().map_err(|e| e.to_string())?)
+        .stderr(log)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(Helper(child))
+}
+
 /// Is src/map_search.py running for this bundle? It keeps query.ready fresh.
 fn helper_alive(bundle: &std::path::Path) -> bool {
     std::fs::metadata(bundle.join("query.ready")).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs_f32() < 3.0)
@@ -553,6 +745,12 @@ fn search_file_time(bundle: &std::path::Path) -> Option<SystemTime> {
 fn main() {
     let maps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("maps");
     let first = std::env::args().nth(1).map(PathBuf::from);
+    // winit doesn't deliver files dropped on a native Wayland window (the photo search takes dropped photos), but does on
+    // an X11 one: with an X server around (XWayland), use that, unless PHOTO_MAP_WAYLAND is set
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("PHOTO_MAP_WAYLAND").is_none() {
+        // SAFETY: nothing else is running yet to read the environment
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
     let event_loop = EventLoop::new().unwrap();
     event_loop.run_app(&mut App { maps, first, viewer: None }).unwrap();
 }

@@ -1,21 +1,26 @@
-"""Semantic search for a map in the viewer: type a query in the viewer's search box and press Enter; the viewer (open on
-the same bundle) tints the photos that match. The viewer leaves the query in <bundle>/query.txt; this answers in
+"""Semantic search for a map in the viewer: type a query in the viewer's search box and press Enter, or drop a photo on
+the window (or both: the photo and the words are searched together); the viewer (open on the same bundle) tints the
+photos that match. The viewer leaves the query in <bundle>/query.txt as JSON {"text", "image": a file path or null}; this answers in
 <bundle>/search.json ({"query", "file": "search.u16"}), search.u16 holding two cosines per photo (all the image ones,
 then all the caption ones; 0..1 as 0..65535, caption 0 = no caption), and keeps query.ready fresh so the viewer knows
-it runs. The viewer blends the two with its slider.
-    python src/map_search.py [bundle]          runs until Ctrl-C
-A photo's similarity is a blend of its image vector's and its caption vector's cosine with the query (caption vectors:
-search_test.py). A photo matches from CUT up; how far it is above CUT (to TOP) is its colour in the viewer, a fixed
-scale. Measured on the Wikivoyage map: the best photos of real queries are 0.76-0.89, of nonsense ones
+it runs. The viewer takes the better of the two and applies its cutoff.
+One helper serves whatever map the viewer has open: the viewer writes the map's path to logs/search.bundle when it
+opens another, and the helper (model already loaded) loads that map's vectors; the last two maps stay loaded.
+    python src/map_search.py [bundle]          runs until Ctrl-C (the viewer starts it itself)
+A photo's similarity is the better of its image vector's and its caption vector's cosine with the query (caption
+vectors: search_test.py). A photo matches from the viewer's cutoff up (0.72 to start); how far above it is its colour. Measured on the Wikivoyage map: the best photos of real queries are 0.76-0.89, of nonsense ones
 ('zxqv blorf') 0.65-0.70, and 70-550 photos are above 0.72 for real queries.
 """
 
 import json
+import os
 import sys
+import threading
 import time
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 import config
 from search_test import CACHE
@@ -23,28 +28,98 @@ from search_test import CACHE
 # (CUT, TOP and MIN_HITS live in the viewer's main.rs now)
 
 
-if __name__ == "__main__":
-    bundle = Path(sys.argv[1] if len(sys.argv) > 1 else config.ROOT / "maps/wikivoyage.photomap")
+CONTROL = config.ROOT / "logs/search.bundle"  # the viewer writes the path of the map it has open here
+KEEP = 2  # maps kept loaded: going back and forth between two is instant
+
+
+def load(bundle):
+    """A map's vectors: its photos' image vectors, the caption vectors (the Wikivoyage map has them) and who has a caption."""
     n = json.loads((bundle / "manifest.json").read_text())["photos"]
     img = np.fromfile(bundle / "embeddings.bin", np.float16).reshape(n, -1).astype(np.float32)
     photos = json.loads((bundle / "photos.json").read_text())
-    texts = [p["meta"].get("caption", "") for p in photos]
-    has = np.array([bool(t) for t in texts])
-    cap = np.load(CACHE).astype(np.float32)
-    model = config.load_model()
-    ask, ready = bundle / "query.txt", bundle / "query.ready"
-    seen = ask.stat().st_mtime_ns if ask.exists() else 0  # a query from before this started is old news
+    has = np.array([bool(p["meta"].get("caption", "")) for p in photos])
+    # caption vectors exist for the Wikivoyage map (search_test.py); a map with no captions is searched by its images alone
+    cap = np.load(CACHE).astype(np.float32) if has.any() else np.zeros_like(img)
+    if len(cap) != n:  # caption vectors of another map
+        print(f"{bundle.name}: no caption vectors ({len(cap)} != {n} rows): images only", flush=True)
+        cap, has = np.zeros_like(img), np.zeros(n, bool)
+    return {"img": img, "cap": cap, "has": has}
+
+
+if __name__ == "__main__":
+    first = Path(sys.argv[1] if len(sys.argv) > 1 else config.ROOT / "maps/wikivoyage.photomap").resolve()
+    model = config.load_model(images=True)
+    model[0].processor.image_processor.max_soft_tokens = 140  # as when the photos were embedded
+    loaded = {}  # bundle -> load(bundle), the KEEP most recently used
+    now = {"bundle": None, "seen": 0}  # the map being served; its query.txt time when it was taken up (older: old news)
+
+    def take_up(bundle):
+        if bundle not in loaded:
+            loaded[bundle] = load(bundle)
+        loaded[bundle] = loaded.pop(bundle)  # most recent last
+        while len(loaded) > KEEP:
+            del loaded[next(iter(loaded))]
+        ask = bundle / "query.txt"
+        now["seen"] = ask.stat().st_mtime_ns if ask.exists() else 0
+        now["bundle"] = bundle  # from here the heartbeat is for this map: the viewer's "search ready"
+        print(f"serving {bundle.name}", flush=True)
+
+    take_up(first)
+    control_seen = CONTROL.stat().st_mtime_ns if CONTROL.exists() else 0  # a switch from before this started is old news
     print("ready: type a query in the viewer's search box and press Enter", flush=True)
+
+    parent = os.getppid()
+
+    def beat():  # the viewer calls the helper dead when this is 3 s old: keep it fresh during a slow search too
+        while True:
+            if now["bundle"]:
+                (now["bundle"] / "query.ready").touch()
+            if os.getppid() != parent:  # whoever started this is gone (the viewer crashed or was killed): stop too
+                os._exit(0)
+            time.sleep(0.5)
+
+    threading.Thread(target=beat, daemon=True).start()
     while True:
-        ready.touch()
         time.sleep(0.25)
-        if not ask.exists() or ask.stat().st_mtime_ns == seen:
+        if CONTROL.exists() and CONTROL.stat().st_mtime_ns != control_seen:  # the viewer opened another map
+            control_seen = CONTROL.stat().st_mtime_ns
+            wanted = Path(CONTROL.read_text().strip())
+            if wanted != now["bundle"] and (wanted / "manifest.json").exists():
+                try:
+                    take_up(wanted)
+                except Exception as e:
+                    print(f"can't serve {wanted}: {e}", flush=True)
+        bundle = now["bundle"]
+        data = loaded[bundle]
+        img, cap, has = data["img"], data["cap"], data["has"]
+        ask = bundle / "query.txt"
+        if not ask.exists() or ask.stat().st_mtime_ns == now["seen"]:
             continue
-        seen = ask.stat().st_mtime_ns
-        query = ask.read_text().strip()
-        if not query:
+        now["seen"] = ask.stat().st_mtime_ns
+        raw = ask.read_text().strip()
+        try:
+            asked = json.loads(raw)  # {"text": ..., "image": path or null} from the viewer
+        except json.JSONDecodeError:
+            asked = {"text": raw}
+        text, image = (asked.get("text") or "").strip(), asked.get("image")
+        if not text and not image:
             continue
-        v = model.encode([query], prompt=config.QUERY_PROMPT, normalize_embeddings=True)[0]
+        try:
+            parts = []
+            if text:
+                parts.append(model.encode([text], prompt=config.QUERY_PROMPT, normalize_embeddings=True)[0])
+            if image:  # a photo is embedded like the map's photos: no prompt
+                with Image.open(image) as im:
+                    parts.append(model.encode([{"image": im.convert("RGB")}], normalize_embeddings=True)[0])
+        except Exception as e:  # unreadable photo etc.: tell the viewer, keep running
+            print(f"{asked}: {e}", flush=True)
+            tmp = bundle / "search.json.tmp"
+            tmp.write_text(json.dumps({"error": f"couldn't search: {e}"[:120]}))
+            tmp.replace(bundle / "search.json")
+            continue
+        v = np.sum(parts, axis=0)  # text and photo together: the vector between them
+        v /= np.linalg.norm(v)
+        query = " + ".join(filter(None, [text, Path(image).name if image else ""]))
         a, b = img @ v, cap @ v
         # both cosines go to the viewer (u16: 0..65535 = 0..1; 0 for a caption that isn't there); it blends them
         # with its slider and applies CUT / TOP
@@ -55,4 +130,4 @@ if __name__ == "__main__":
         tmp = bundle / "search.json.tmp"
         tmp.write_text(json.dumps(found))
         tmp.replace(bundle / "search.json")  # whole or not there
-        print(f"{query!r}: best image {a.max():.2f}, best caption {b[has].max():.2f}", flush=True)
+        print(f"{query!r}: best image {a.max():.2f}" + (f", best caption {b[has].max():.2f}" if has.any() else ""), flush=True)

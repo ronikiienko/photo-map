@@ -21,6 +21,7 @@ const HOT = vec3f(1.0, 0.92, 0.25);   // ... the strongest ones (flags 1 ... 255
 const TINT_FROM: f32 = 24.0;  // a match is tinted solid while it is smaller than this on screen (px) ...
 const TINT_UNTIL: f32 = 96.0; // ... and shows its own picture by this size
 const GROW: f32 = 3.0;        // a match is drawn this much bigger while it is small, real size by TINT_UNTIL
+const OUTLINE: f32 = 3.0;     // px: a match keeps an outline of its colour at every zoom, so it stands out once its picture shows
 const AA: f32 = 1.0;  // px the quad reaches past the photo's edge, for the partly covered pixels
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -91,6 +92,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     if in.flags != 0u {  // a match: tinted from afar (red to yellow with the match), its picture up close
         let tint = mix(COLD, HOT, f32(in.flags - 1u) / 254.0);
         c = mix(c, tint, 1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
+        c = mix(tint, c, smoothstep(OUTLINE - 1.0, OUTLINE, min(inside.x, inside.y)));  // the outline, inside the photo's edge
     }
     return vec4f(c * cover, cover);
 }

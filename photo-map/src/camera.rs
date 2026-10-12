@@ -11,8 +11,8 @@ const PAN_SMOOTHING: f32 = 0.8;
 const PAN_STOP: f32 = 5.0;
 const ZOOM_FRICTION: f32 = 0.9;
 /// Log zoom per wheel line (one notch); with the coast a notch zooms about 1.8x in total.
-const ZOOM_PER_LINE: f32 = 0.06;
-const ZOOM_PER_PIXEL: f32 = 0.0006;
+const ZOOM_PER_LINE: f32 = 0.12;
+const ZOOM_PER_PIXEL: f32 = 0.0012;
 const ZOOM_STOP: f32 = 1e-4;
 const KEY_SPEED: f32 = 900.0;
 const KEY_FRICTION: f32 = 0.8;
