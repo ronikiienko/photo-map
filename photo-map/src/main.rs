@@ -87,8 +87,8 @@ struct Viewer {
     photo: Option<PathBuf>,
     /// What the last search did, next to the box.
     status: String,
-    /// Matches start at this cosine similarity (the strongest colour is WIDTH above).
-    cutoff: f32,
+    /// How many photos a search should light up (the slider): the closest this many match.
+    wanted: f32,
     /// What the shown search was for (words and/or a photo's name), from the helper's answer.
     shown: String,
     /// The photo in the box, as a small picture.
@@ -123,7 +123,7 @@ impl Viewer {
             ask_when_ready: false,
             photo: None,
             status: String::new(),
-            cutoff: 0.72,
+            wanted: 100.0,
             shown: String::new(),
             photo_tex: None,
             last_frame: Instant::now(),
@@ -284,30 +284,31 @@ impl Viewer {
     }
 
     /// Turn the last search's cosines into the photos' match bytes (0 = no match, 1..=255 from the cutoff up): a photo's
-    /// score is the better of its image and caption cosines. The box the matches span, if there are enough of them.
+    /// score is the better of its image and caption cosines, and the closest `wanted` photos match. The box the matches span.
     fn apply_search(&mut self) -> Option<(Vec2, Vec2)> {
-        const WIDTH: f32 = 0.06; // the strongest colour is this far above the cutoff
-        let cut = self.cutoff;
-        let top = cut + WIDTH;
-        const MIN_HITS: usize = 8; // fewer matches than this: nothing matches well
         let m = self.map.as_mut()?;
         let n = m.flags.len();
-        if m.sims.len() != 2 * n {
+        if n == 0 || m.sims.len() != 2 * n {
             return None;
         }
+        // a photo's similarity: the better of its image's and its caption's cosine (no caption: the image's)
+        let score: Vec<f32> = (0..n)
+            .map(|i| {
+                let (a, b) = (m.sims[i] as f32 / 65535.0, m.sims[n + i] as f32 / 65535.0);
+                if m.sims[n + i] > 0 { a.max(b) } else { a }
+            })
+            .collect();
+        // the closest `wanted` photos match: the cutoff is the similarity of the last of them (ties may add a few)
+        let k = (self.wanted.round() as usize).clamp(1, n);
+        let mut sorted = score.clone();
+        let (_, &mut cut, _) = sorted.select_nth_unstable_by(n - k, |a, b| a.total_cmp(b));
+        let best = score.iter().copied().fold(0.0, f32::max);
+        let span = (best - cut).max(1e-4); // red at the cutoff, yellow at the best photo
         let mut hits = 0;
         for i in 0..n {
-            let (a, b) = (m.sims[i] as f32 / 65535.0, m.sims[n + i] as f32 / 65535.0);
-            let s = if m.sims[n + i] > 0 { a.max(b) } else { a };
-            m.flags[i] = if s >= cut { hits += 1; 1 + ((s - cut) / (top - cut)).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
+            m.flags[i] = if score[i] >= cut { hits += 1; 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
         }
-        if hits < MIN_HITS {
-            m.flags.fill(0);
-            self.status = format!("{}: nothing matches well", self.shown);
-            m.flags_dirty = true;
-            return None;
-        }
-        self.status = format!("{}: {hits} matches", self.shown);
+        self.status = format!("{}: {hits} photos, similarity {cut:.2} to {best:.2}", self.shown);
         m.flags_dirty = true;
         let pts = m.flags.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, _)| Vec2::new(m.data.points[i].x, m.data.points[i].y));
         Some(pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p))))
@@ -574,14 +575,35 @@ impl Viewer {
         });
         for i in visible.into_iter().take(200) {
             let photo = &m.data.photos[i];
-            let text = photo.meta.get("caption").and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()).unwrap_or(&photo.title);
-            if text.trim().is_empty() {
+            let text = photo.meta.get("caption").and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()).unwrap_or(&photo.title).trim().to_string();
+            // while a search is showing: the photo's similarity to it first, in the colour of its match (grey if it is no match)
+            let score = (m.sims.len() == 2 * m.flags.len()).then(|| {
+                let n = m.flags.len();
+                let (a, b) = (m.sims[i] as f32 / 65535.0, m.sims[n + i] as f32 / 65535.0);
+                (if m.sims[n + i] > 0 { a.max(b) } else { a }, m.flags[i])
+            });
+            if text.is_empty() && score.is_none() {
                 continue;
             }
             let shape = m.data.shape(i);
             let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
             let (w, h) = (shape.x * long, shape.y * long);
-            let mut job = egui::text::LayoutJob::simple(text.trim().to_string(), egui::FontId::proportional(16.0), egui::Color32::WHITE, w.max(140.0));
+            let font = egui::FontId::proportional(16.0);
+            let mut job = egui::text::LayoutJob::default();
+            if let Some((sim, flag)) = score {
+                let colour = if flag == 0 {
+                    egui::Color32::from_gray(150)
+                } else {
+                    let t = (flag - 1) as f32 / 254.0; // as in map.wgsl: COLD to HOT
+                    egui::Color32::from_rgb((255.0 * (0.9 + 0.1 * t)) as u8, (255.0 * (0.15 + 0.77 * t)) as u8, (255.0 * (0.15 + 0.10 * t)) as u8)
+                };
+                job.append(&format!("{sim:.2}"), 0.0, egui::TextFormat::simple(font.clone(), colour));
+                if !text.is_empty() {
+                    job.append("  ", 0.0, egui::TextFormat::simple(font.clone(), egui::Color32::WHITE));
+                }
+            }
+            job.append(&text, 0.0, egui::TextFormat::simple(font, egui::Color32::WHITE));
+            job.wrap.max_width = w.max(140.0);
             job.wrap.max_rows = 3;
             job.wrap.overflow_character = Some('…');
             job.halign = egui::Align::Center;
@@ -651,8 +673,9 @@ impl Viewer {
                         actions.clear_photo = true;
                     }
                 }
-                ui.label("cutoff");
-                if ui.add(egui::Slider::new(&mut self.cutoff, 0.1..=0.95).fixed_decimals(2)).changed() {
+                ui.label("photos");
+                let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
+                if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
                     actions.reblend = true;
                 }
                 ui.label(&self.status);
