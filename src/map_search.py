@@ -39,8 +39,11 @@ def load(bundle):
     img = np.fromfile(bundle / "embeddings.bin", np.float16).reshape(n, -1).astype(np.float32)
     photos = json.loads((bundle / "photos.json").read_text())
     has = np.array([bool(p["meta"].get("caption", "")) for p in photos])
-    # caption vectors exist for the Wikivoyage map (search_test.py); a map with no captions is searched by its images alone
-    cap = np.load(CACHE).astype(np.float32) if has.any() else np.zeros_like(img)
+    # caption vectors: captions.bin in the map (species_captions.py), or for the Wikivoyage map search_test.py's; a map with no captions is searched by its images alone
+    if has.any() and (bundle / "captions.bin").exists():
+        cap = np.fromfile(bundle / "captions.bin", np.float16).reshape(n, -1).astype(np.float32)
+    else:
+        cap = np.load(CACHE).astype(np.float32) if has.any() else np.zeros_like(img)
     if len(cap) != n:  # caption vectors of another map
         print(f"{bundle.name}: no caption vectors ({len(cap)} != {n} rows): images only", flush=True)
         cap, has = np.zeros_like(img), np.zeros(n, bool)
