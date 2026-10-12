@@ -44,6 +44,27 @@ const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
 const LABEL_IN: (f32, f32) = (25.0, 50.0);
 const LABEL_OUT: (f32, f32) = (300.0, 500.0);
 
+/// Which of a photo's two cosines with the search count: its image's, its caption's, or the better of them.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum SearchOn {
+    #[default]
+    Both,
+    Images,
+    Captions,
+}
+
+/// Photo `i`'s similarity to the last search (`sims`: the n image cosines, then the n caption cosines, 0 = no caption), or None
+/// if it has no score on that side (captions only, and no caption).
+fn similarity(sims: &[u16], n: usize, i: usize, on: SearchOn) -> Option<f32> {
+    let (a, b) = (sims[i] as f32 / 65535.0, sims[n + i] as f32 / 65535.0);
+    let captioned = sims[n + i] > 0;
+    match on {
+        SearchOn::Images => Some(a),
+        SearchOn::Captions => captioned.then_some(b),
+        SearchOn::Both => Some(if captioned { a.max(b) } else { a }),
+    }
+}
+
 struct Ui {
     ctx: egui::Context,
     state: egui_winit::State,
@@ -89,6 +110,8 @@ struct Viewer {
     status: String,
     /// How many photos a search should light up (the slider): the closest this many match.
     wanted: f32,
+    /// What the search looks at: the photos' images, their captions, or both.
+    on: SearchOn,
     /// What the shown search was for (words and/or a photo's name), from the helper's answer.
     shown: String,
     /// The photo in the box, as a small picture.
@@ -124,6 +147,7 @@ impl Viewer {
             photo: None,
             status: String::new(),
             wanted: 100.0,
+            on: SearchOn::default(),
             shown: String::new(),
             photo_tex: None,
             last_frame: Instant::now(),
@@ -291,13 +315,8 @@ impl Viewer {
         if n == 0 || m.sims.len() != 2 * n {
             return None;
         }
-        // a photo's similarity: the better of its image's and its caption's cosine (no caption: the image's)
-        let score: Vec<f32> = (0..n)
-            .map(|i| {
-                let (a, b) = (m.sims[i] as f32 / 65535.0, m.sims[n + i] as f32 / 65535.0);
-                if m.sims[n + i] > 0 { a.max(b) } else { a }
-            })
-            .collect();
+        // a photo's similarity (see SearchOn); no score (-1): it can't match
+        let score: Vec<f32> = (0..n).map(|i| similarity(&m.sims, n, i, self.on).unwrap_or(-1.0)).collect();
         // the closest `wanted` photos match: the cutoff is the similarity of the last of them (ties may add a few)
         let k = (self.wanted.round() as usize).clamp(1, n);
         let mut sorted = score.clone();
@@ -306,7 +325,7 @@ impl Viewer {
         let span = (best - cut).max(1e-4); // red at the cutoff, yellow at the best photo
         let mut hits = 0;
         for i in 0..n {
-            m.flags[i] = if score[i] >= cut { hits += 1; 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
+            m.flags[i] = if score[i] >= cut && score[i] >= 0.0 { hits += 1; 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
         }
         self.status = format!("{}: {hits} photos, similarity {cut:.2} to {best:.2}", self.shown);
         m.flags_dirty = true;
@@ -314,7 +333,23 @@ impl Viewer {
         Some(pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p))))
     }
 
+    /// F over a photo: the same as dropping that photo's file on the window (it goes in the search box and is searched).
+    fn ask_like(&mut self, photo: usize) {
+        let Some(file) = self.map.as_ref().map(|m| m.path.join(&m.data.photos[photo].file)) else { return };
+        if self.set_photo(file) {
+            self.ask();
+        }
+    }
+
     fn key(&mut self, key: &Key, down: bool) {
+        if let Key::Character(c) = key {
+            if c.eq_ignore_ascii_case("f") {
+                if let (true, Some(i)) = (down, self.hovered) {
+                    self.ask_like(i);
+                }
+                return;
+            }
+        }
         let k = &mut self.keys;
         match key {
             Key::Named(NamedKey::ArrowLeft) => k.left = down,
@@ -577,11 +612,7 @@ impl Viewer {
             let photo = &m.data.photos[i];
             let text = photo.meta.get("caption").and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()).unwrap_or(&photo.title).trim().to_string();
             // while a search is showing: the photo's similarity to it first, in the colour of its match (grey if it is no match)
-            let score = (m.sims.len() == 2 * m.flags.len()).then(|| {
-                let n = m.flags.len();
-                let (a, b) = (m.sims[i] as f32 / 65535.0, m.sims[n + i] as f32 / 65535.0);
-                (if m.sims[n + i] > 0 { a.max(b) } else { a }, m.flags[i])
-            });
+            let score = (m.sims.len() == 2 * m.flags.len()).then(|| similarity(&m.sims, m.flags.len(), i, self.on)).flatten().map(|sim| (sim, m.flags[i]));
             if text.is_empty() && score.is_none() {
                 continue;
             }
@@ -673,6 +704,18 @@ impl Viewer {
                         actions.clear_photo = true;
                     }
                 }
+                ui.label("search in");
+                let before = self.on;
+                for (value, text, tip) in [
+                    (SearchOn::Both, "both", "a photo's similarity is the better of its image's and its caption's"),
+                    (SearchOn::Images, "images", "only what the pictures look like"),
+                    (SearchOn::Captions, "captions", "only the captions (photos without one don't match)"),
+                ] {
+                    ui.selectable_value(&mut self.on, value, text).on_hover_text(tip);
+                }
+                if self.on != before {
+                    actions.reblend = true;
+                }
                 ui.label("photos");
                 let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
                 if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
@@ -700,7 +743,7 @@ impl Viewer {
             });
         }
         egui::Area::new("help".into()).anchor(egui::Align2::LEFT_BOTTOM, [10.0, -8.0]).show(&ctx, |ui| {
-            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw)").small().weak());
+            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw) · F = photos like the one under the mouse").small().weak());
         });
 
         if let (Some(id), Some(c), Some(m)) = (self.hovered, self.cursor, &self.map) {
@@ -709,6 +752,7 @@ impl Viewer {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(320.0);
                     ui.label(&m.data.photos[id].title);
+                    ui.weak("F: photos like this");
                 });
             });
         }
