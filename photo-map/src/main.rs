@@ -39,6 +39,8 @@ const MIN_PX: f32 = 1.0;
 /// Region names show while their region's spread is between these sizes on screen (points), fading in and out.
 /// Region names on the map are switched off until they are put back carefully (the names stay in each map's regions.json).
 const SHOW_REGION_NAMES: bool = false;
+/// A photo shows its own caption above it once it is this wide on screen (points), fully from the second size.
+const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
 const LABEL_IN: (f32, f32) = (25.0, 50.0);
 const LABEL_OUT: (f32, f32) = (300.0, 500.0);
 
@@ -548,11 +550,64 @@ impl Viewer {
         }
     }
 
+    /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view
+    /// and only when they are big, so it costs nothing when zoomed out. A caption that would overlap one already drawn is skipped.
+    fn draw_photo_captions(&self, ctx: &egui::Context) {
+        let Some(m) = &self.map else { return };
+        let ppp = ctx.pixels_per_point();
+        let long = self.size_px() / ppp; // a photo's longer side, points
+        let alpha = ((long - CAPTION_FROM.0) / (CAPTION_FROM.1 - CAPTION_FROM.0)).clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "photo captions".into()));
+        let screen = ctx.content_rect();
+        let (view_min, view_max) = (self.camera.to_world(Vec2::ZERO), self.camera.to_world(self.camera.viewport));
+        let mut shown: Vec<(egui::Pos2, egui::Rect, std::sync::Arc<egui::Galley>)> = Vec::new();
+        let mut taken: Vec<egui::Rect> = Vec::new();
+        let centre = Vec2::new(0.5 * (view_min.x + view_max.x), 0.5 * (view_min.y + view_max.y));
+        let mut visible = Vec::new();
+        m.data.grid.within(&m.data.points, view_min, view_max, |i| visible.push(i));
+        visible.sort_by(|&a, &b| {  // nearest the middle first: those win when captions would collide
+            let d = |i: usize| (Vec2::new(m.data.points[i].x, m.data.points[i].y) - centre).length_squared();
+            d(a).total_cmp(&d(b))
+        });
+        for i in visible.into_iter().take(200) {
+            let photo = &m.data.photos[i];
+            let text = photo.meta.get("caption").and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()).unwrap_or(&photo.title);
+            if text.trim().is_empty() {
+                continue;
+            }
+            let shape = m.data.shape(i);
+            let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
+            let (w, h) = (shape.x * long, shape.y * long);
+            let mut job = egui::text::LayoutJob::simple(text.trim().to_string(), egui::FontId::proportional(13.0), egui::Color32::WHITE, w.max(120.0));
+            job.wrap.max_rows = 3;
+            job.wrap.overflow_character = Some('…');
+            job.halign = egui::Align::Center;
+            let galley = painter.layout_job(job);
+            // the text itself (the galley's own rect is as wide as the wrap width), centred over the photo, its bottom just above it
+            let text_box = galley.rows.iter().fold(egui::Rect::NOTHING, |a, r| a.union(r.rect()));
+            let origin = egui::pos2(at.x - text_box.center().x, at.y - h * 0.5 - 6.0 - text_box.max.y);
+            let rect = text_box.translate(origin.to_vec2());
+            if !screen.intersects(rect) || taken.iter().any(|t| t.intersects(rect.expand(3.0))) {
+                continue;
+            }
+            taken.push(rect);
+            shown.push((origin, rect, galley));
+        }
+        for (origin, rect, galley) in shown {
+            painter.rect_filled(rect.expand2(egui::vec2(5.0, 2.0)), 4.0, egui::Color32::from_black_alpha((170.0 * alpha) as u8));
+            painter.galley(origin, galley, egui::Color32::WHITE.gamma_multiply(alpha));
+        }
+    }
+
     fn build_ui(&mut self, ui: &mut egui::Ui, actions: &mut UiActions) {
         let ctx = ui.ctx().clone();
         if SHOW_REGION_NAMES {
             self.draw_labels(&ctx);
         }
+        self.draw_photo_captions(&ctx);
 
         egui::Area::new("top".into()).fixed_pos([10.0, 10.0]).show(&ctx, |ui| {
             ui.horizontal(|ui| {
