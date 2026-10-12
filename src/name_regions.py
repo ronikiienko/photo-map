@@ -1,5 +1,5 @@
 """Name a map's regions from a vocabulary of plain labels -> region_names.json (the viewer prefers it to regions.json).
-    python src/name_regions.py [bundle]        default: maps/wikivoyage.photomap
+    python src/name_regions.py [bundle] [--no-map-average]        default: maps/wikivoyage.photomap
 
 For every level of the map's regions, each region (FINEST levels, MIN_PHOTOS photos or more) gets the phrase that fits it best:
 - a region's vector is the average of its photos' image vectors, and separately of the vectors of its photos' captions where there are captions;
@@ -31,7 +31,7 @@ def unit(v):
     return v / np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), 1e-9)
 
 
-def name(bundle):
+def name(bundle, map_average=True):
     bundle = Path(bundle)
     manifest = json.loads((bundle / "manifest.json").read_text())
     if manifest["embedding"]["model"] != config.MODEL_ID:
@@ -44,8 +44,8 @@ def name(bundle):
     names = [i["name"] for i in items]
     V = unit(V - V.mean(0))
     bonus = (COMMON * np.log10([i["common"] for i in items]))[:, None]
-    mean_img = data["img"].mean(0)
-    mean_cap = data["cap"][data["has"]].mean(0) if data["has"].any() else 0
+    mean_img = data["img"].mean(0) if map_average else 0  # map_average=False: only for comparing, the names get worse
+    mean_cap = data["cap"][data["has"]].mean(0) if map_average and data["has"].any() else 0
     result = []
     for li, lab in enumerate(photomap.cluster(xy)):
         out = []
@@ -72,4 +72,5 @@ def name(bundle):
 
 
 if __name__ == "__main__":
-    name(sys.argv[1] if len(sys.argv) > 1 else config.ROOT / "maps/wikivoyage.photomap")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    name(args[0] if args else config.ROOT / "maps/wikivoyage.photomap", "--no-map-average" not in sys.argv)
