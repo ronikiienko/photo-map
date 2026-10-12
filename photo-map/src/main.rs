@@ -581,7 +581,7 @@ impl Viewer {
             let shape = m.data.shape(i);
             let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
             let (w, h) = (shape.x * long, shape.y * long);
-            let mut job = egui::text::LayoutJob::simple(text.trim().to_string(), egui::FontId::proportional(13.0), egui::Color32::WHITE, w.max(120.0));
+            let mut job = egui::text::LayoutJob::simple(text.trim().to_string(), egui::FontId::proportional(16.0), egui::Color32::WHITE, w.max(140.0));
             job.wrap.max_rows = 3;
             job.wrap.overflow_character = Some('…');
             job.halign = egui::Align::Center;
