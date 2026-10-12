@@ -5,6 +5,7 @@
 mod bake;
 mod camera;
 mod data;
+mod gallery;
 mod gpu;
 mod library;
 mod pages;
@@ -14,6 +15,7 @@ mod stream;
 use camera::{Camera, Keys};
 use data::{MapData, Progress, WORLD};
 use glam::Vec2;
+use gallery::Gallery;
 use gpu::{CameraUniform, Gpu, MapRenderer};
 use library::Library;
 use std::path::PathBuf;
@@ -104,6 +106,8 @@ struct Viewer {
     keys: Keys,
     cursor: Option<Vec2>,
     hovered: Option<usize>,
+    /// The window with every match together.
+    gallery: Gallery,
     search: String,
     /// The search helper this viewer started: one for the whole session, it follows the open map.
     helper: Option<Helper>,
@@ -146,6 +150,7 @@ impl Viewer {
             keys: Keys::default(),
             cursor: None,
             hovered: None,
+            gallery: Gallery::new(),
             search: String::new(),
             helper: None,
             ask_when_ready: false,
@@ -175,6 +180,7 @@ impl Viewer {
 
     /// The bundle has been read: let go of the old map, put the new one on the GPU and show all of it.
     fn opened(&mut self, path: PathBuf, data: MapData) {
+        self.gallery.clear();
         self.map = None; // free the old map's GPU memory first
         let started = Instant::now();
         let streamer = Streamer::new(&self.gpu.device, &self.gpu.queue, &data);
@@ -363,8 +369,15 @@ impl Viewer {
             None => found - 1,
             Some(k) => (k as i32 + dir).rem_euclid(found as i32) as usize,
         };
+        self.go_to_match(k);
+    }
+
+    /// Fly to the `k`th match (zooming in if its photo is small on screen) and make it the current one.
+    fn go_to_match(&mut self, k: usize) {
+        let Some(m) = &mut self.map else { return };
+        let Some(&photo) = m.order.get(k) else { return };
         m.at = Some(k);
-        let p = m.data.points[m.order[k]];
+        let p = m.data.points[photo];
         let wanted_scale = STEP_TO * self.window.scale_factor() as f32 / m.photo_world;
         self.camera.fly_to((Vec2::new(p.x, p.y), self.camera.scale.max(wanted_scale)));
     }
@@ -374,6 +387,10 @@ impl Viewer {
             match c.as_str() {
                 "n" | "N" | "]" => return self.step_match(1),
                 "p" | "P" | "[" => return self.step_match(-1),
+                "g" | "G" => {
+                    self.gallery.open = !self.gallery.open;
+                    return;
+                }
                 _ => {}
             }
         }
@@ -542,6 +559,9 @@ impl Viewer {
         if actions.reblend {
             self.apply_search();
         }
+        if let Some(k) = actions.goto {
+            self.go_to_match(k);
+        }
         if actions.step != 0 {
             self.step_match(actions.step);
         }
@@ -699,6 +719,22 @@ impl Viewer {
             self.draw_labels(&ctx);
         }
         self.draw_photo_captions(&ctx);
+        if self.gallery.open {
+            if let Some(m) = &self.map {
+                let (on, n) = (self.on, m.flags.len());
+                actions.goto = self.gallery.show(
+                    &ctx,
+                    &m.order,
+                    m.at,
+                    &|i| m.path.join(&m.data.photos[i].file),
+                    &|i| (m.sims.len() == 2 * n).then(|| similarity(&m.sims, n, i, on)).flatten(),
+                    &|i| {
+                        let photo = &m.data.photos[i];
+                        photo.meta.get("caption").and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()).unwrap_or(&photo.title).trim().to_string()
+                    },
+                );
+            }
+        }
 
         egui::Area::new("top".into()).fixed_pos([10.0, 10.0]).show(&ctx, |ui| {
             ui.horizontal(|ui| {
@@ -768,6 +804,7 @@ impl Viewer {
                         actions.step = 1;
                     }
                     ui.label(at.map_or(format!("{found} matches"), |k| format!("{} / {found}", k + 1)));
+                    ui.toggle_value(&mut self.gallery.open, "gallery").on_hover_text("all the matches together (G)");
                 }
                 ui.label(&self.status);
             });
@@ -791,7 +828,7 @@ impl Viewer {
             });
         }
         egui::Area::new("help".into()).anchor(egui::Align2::LEFT_BOTTOM, [10.0, -8.0]).show(&ctx, |ui| {
-            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw) · F = photos like the one under the mouse · N / P = next / previous match").small().weak());
+            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw) · F = photos like the one under the mouse · N / P = next / previous match · G = gallery of the matches").small().weak());
         });
 
         if let (Some(id), Some(c), Some(m)) = (self.hovered, self.cursor, &self.map) {
@@ -813,6 +850,8 @@ struct UiActions {
     reblend: bool,
     /// A prev / next button was pressed: -1 / 1.
     step: i32,
+    /// A thumbnail in the gallery was clicked: its position among the matches.
+    goto: Option<usize>,
     clear_photo: bool,
     open: Option<PathBuf>,
 }
