@@ -668,7 +668,7 @@ impl Viewer {
     /// Fly to a region so that it fills the screen.
     fn go_to_region(&mut self, level: usize, index: usize) {
         let Some(l) = self.map.as_ref().and_then(|m| m.data.regions.levels.get(level)?.get(index)) else { return };
-        let scale = self.camera.viewport.min_element() / (l.spread * 4.4).max(1.0);
+        let scale = self.camera.viewport.min_element() / (l.spread * 1.8).max(1.0);
         self.camera.fly_to((Vec2::new(l.x, l.y), scale));
     }
 
