@@ -1,8 +1,9 @@
 # Label vocabulary
 
-Plain English labels for naming groups of photos (`src/name_regions.py`). Three files, written in rounds by a language model,
+Plain English labels for naming groups of photos (`src/name_regions.py`). Files written in rounds by a language model,
 each round less common than the one before: `curated2_round1.txt` (the 1000 most basic things in photos), `round2` (the next
-1000), `round3` (the next 1000). Format: a `# general` block (broad labels: animal, vehicle, food) then a `# specific` block
+1000), `round3` (the next 1000). Added later: `round1b` (more basic phrases, counted as common as round 1), `round4` and `round5`
+(rarer than round 3); most of what was written for them was already in the earlier rounds, so only about 380 phrases are new. Format: a `# general` block (broad labels: animal, vehicle, food) then a `# specific` block
 (owl, bicycle, pizza), one phrase per line. A phrase is kept once (the earliest round).
 
 Style: lowercase, singular, 1-3 words, no proper names, no adjectives on their own, plain words, no filler.

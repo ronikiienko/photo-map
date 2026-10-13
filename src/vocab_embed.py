@@ -11,12 +11,12 @@ import config
 
 SRC = config.ROOT / "vocab"
 OUT = config.ROOT / "data" / "vocab"
-ROUNDS = (1, 2, 3)
+ROUNDS = ("1", "1b", "2", "3", "4", "5")  # "1b": more basic phrases, as common as round 1; 4 and 5: rarer than round 3
 STEM = "curated2"
 
 
 def phrases():
-    """Every phrase once (its earliest round), with: general (the file's '# general' block), round, common = 1000 / 100 / 10 for the round."""
+    """Every phrase once (its earliest round), with: general (the file's '# general' block), round, common = 1000 / 100 / 10 / 1 / 0.1 for rounds 1 (and 1b) / 2 / 3 / 4 / 5."""
     items, seen = [], set()
     for rnd in ROUNDS:
         general = True
@@ -26,7 +26,7 @@ def phrases():
                 general = line.lstrip("# ").strip() == "general"
             elif line and line.lower() not in seen:
                 seen.add(line.lower())
-                items.append({"name": line, "general": general, "round": rnd, "common": 10 ** (4 - rnd)})
+                items.append({"name": line, "general": general, "round": rnd, "common": 10 ** (4 - int(rnd.rstrip("b")))})
     return items
 
 

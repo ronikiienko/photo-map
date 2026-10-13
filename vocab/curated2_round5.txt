@@ -1,0 +1,475 @@
+# general
+architectural detail
+fabric
+rare animal
+machinery
+craft tool
+ceremony
+natural phenomenon
+# specific
+gargoyle
+weathervane
+sundial
+cornice
+balustrade
+buttress
+flying buttress
+vaulted ceiling
+rose window
+cloister
+crypt
+bell
+belfry
+carillon
+organ
+choir stall
+confessional
+baptismal font
+reliquary
+monstrance
+chalice
+censer
+prayer wheel
+prayer flag
+incense
+shrine gate
+buddha statue
+dragon statue
+lion statue
+stone lion
+totem pole
+mask carving
+wood carving
+ice sculpture
+sand sculpture
+topiary
+maze
+labyrinth
+rock garden
+zen garden
+pond with koi
+koi
+lotus
+water lily
+bamboo
+bamboo grove
+cherry blossom
+autumn leaves
+maple leaf
+fern
+ivy
+vine
+thistle
+dandelion
+poppy
+lavender
+sunflower field
+wildflower
+edelweiss
+bluebell
+snowdrop
+crocus
+daffodil
+iris
+peony
+hydrangea
+magnolia
+jasmine
+cactus flower
+succulent
+bonsai
+baobab
+redwood
+willow
+birch
+cypress
+eucalyptus
+banyan
+palm grove
+coconut
+date palm
+banana plant
+sugar cane
+cotton field
+coffee plant
+cocoa pod
+tea leaves
+rice paddy
+hops
+pumpkin patch
+sheaf
+haystack
+windbreak
+stone wall
+dry stone wall
+hedgerow
+cattle grid
+barbed wire
+water pump
+well
+windpump
+water wheel
+mill
+watermill
+sawmill
+lime kiln
+brick kiln
+charcoal pile
+log pile
+firewood
+sleigh
+snowshoe
+ice axe
+crampon
+ice climbing
+rock climbing
+bouldering
+abseiling
+bungee jumping
+skydiving
+white water rafting
+canoeing
+windsurfing
+kitesurfing
+scuba diving
+snorkeling
+spearfishing
+ice fishing
+falconry
+hunting dog
+sheepdog
+husky
+greyhound
+bulldog
+poodle
+dachshund
+labrador
+shepherd dog
+terrier
+spaniel
+persian cat
+siamese cat
+tabby cat
+black cat
+maine coon
+hamster
+guinea pig
+ferret
+parakeet
+canary
+cockatoo
+macaw
+toucan
+flamingo
+pelican
+heron
+stork
+crane bird
+ibis
+cormorant
+puffin
+albatross
+kingfisher
+hummingbird
+woodpecker
+robin
+blue jay
+cardinal
+finch
+swallow
+starling
+crow
+raven
+magpie
+vulture
+hawk
+falcon
+osprey
+ostrich
+emu
+kiwi
+peacock feathers
+nest
+egg nest
+feather
+antler
+horn
+tusk
+shell
+seashell
+coral
+starfish
+sea urchin
+sea horse
+manta ray
+stingray
+clownfish
+pufferfish
+eel
+salmon
+trout
+catfish
+carp
+barracuda
+swordfish
+tuna
+sea lion
+walrus
+polar bear
+arctic fox
+reindeer
+moose
+elk
+bison
+buffalo
+yak
+camel
+llama
+alpaca
+donkey
+mule
+zebra herd
+rhinoceros
+hippopotamus
+warthog
+hyena
+cheetah
+leopard
+jaguar
+cougar
+lynx
+panther
+meerkat
+lemur
+gorilla
+chimpanzee
+orangutan
+baboon
+sloth
+armadillo
+anteater
+koala
+wombat
+platypus
+tasmanian devil
+hedgehog
+porcupine
+badger
+otter
+beaver
+raccoon
+skunk
+bat
+chameleon
+iguana
+gecko
+komodo dragon
+tortoise
+salamander
+toad
+tree frog
+cobra
+python
+viper
+scorpion
+tarantula
+praying mantis
+grasshopper
+cricket
+caterpillar
+ladybug
+moth
+firefly
+wasp
+hornet
+termite mound
+anthill
+cobweb
+spider web
+snail
+slug
+earthworm
+starfish pool
+lace curtain
+velvet
+silk
+wool
+leather
+denim
+linen
+cotton fabric
+tweed
+plaid
+polka dots
+checkered pattern
+herringbone
+brocade
+sequins
+feather boa
+fur coat
+kimono
+sari
+kilt
+poncho
+turban
+veil
+top hat
+bowler hat
+beret
+cowboy hat
+straw hat
+helmet
+crown
+tiara
+scepter
+sword
+shield
+armor
+suit of armor
+cannon
+musket
+bow and arrow
+catapult
+trebuchet
+spear
+dagger
+medal
+trophy
+banner
+coat of arms
+seal stamp
+coin
+banknote
+stamp collection
+postcard
+telegram
+globe
+compass
+sextant
+hourglass
+astrolabe
+quill
+inkwell
+parchment
+scroll
+manuscript
+illuminated book
+atlas
+printing block
+easel
+palette
+canvas
+sculptor studio
+potter's wheel
+kiln
+glassblowing
+stained glass window
+mosaic floor
+tile pattern
+azulejo
+terracotta
+brick wall
+cobblestone
+wooden floor
+marble floor
+spiral staircase
+revolving door
+trapdoor
+skylight
+dormer window
+bay window
+shutters
+wrought iron
+iron gate
+cast iron
+copper roof
+thatched roof
+tile roof
+slate roof
+flat roof
+green roof
+roof terrace
+clothesline
+laundry
+water tank
+satellite dish
+antenna
+radio tower
+power plant
+cooling tower
+nuclear plant
+hydroelectric dam
+solar farm
+oil pump
+gas flare
+pipeline
+container terminal
+gantry crane
+tower crane
+cherry picker
+manhole
+fire hydrant
+traffic cone
+barrier
+speed bump
+toll booth
+road works
+snow plow
+gritter
+street sweeper
+garbage truck
+tow truck
+cement truck
+dump truck
+tanker
+pickup truck
+limousine
+vintage car
+sports car
+race car
+formula car
+go-kart
+quad bike
+snowmobile
+jet ski
+hovercraft
+airship
+biplane
+fighter jet
+seaplane
+cargo plane
+cockpit
+airship hangar
+sunbeam
+light rays
+long exposure
+star trails
+milky way
+aurora
+solar eclipse
+lunar eclipse
+full moon
+comet
+meteor shower
+halo
+sundog
+mirage
+dust storm
+tornado
+flood
+drought
+cracked earth
+avalanche
+landslide
+wildfire
+burnt forest
+frost
+dew
+icicle
+snowflake
+frozen lake
+frozen waterfall
+snowdrift
+puddle
+mud
+rainbow over field

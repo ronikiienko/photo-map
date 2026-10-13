@@ -1,0 +1,460 @@
+# general
+insect group
+bird group
+tool set
+musical instrument
+kitchenware
+building part
+landscape feature
+craft
+game
+ritual
+profession
+vehicle part
+water body
+rock formation
+sea creature
+# specific
+glacier
+iceberg
+fjord
+geyser
+hot spring
+volcano
+crater
+canyon wall
+mesa
+plateau
+cliff face
+sea stack
+arch
+sand dune
+salt flat
+swamp
+marsh
+mangrove
+bay
+lagoon
+reef
+tide pool
+estuary
+delta
+rapids
+creek
+canal
+reservoir
+dam
+irrigation channel
+rice terrace
+tea plantation
+cornfield
+wheat field
+lavender field
+tulip field
+hay bale
+scarecrow
+greenhouse
+vegetable garden
+flower bed
+botanical garden
+zoo
+aquarium
+amusement park
+carousel
+ferris wheel
+roller coaster
+circus tent
+fairground
+theme park
+water park
+ski lift
+ski slope
+cable car
+chairlift
+mountain hut
+tent
+caravan
+treehouse
+igloo
+yurt
+hut
+shack
+farmhouse
+manor
+villa
+townhouse
+row houses
+terrace
+courtyard
+patio
+porch
+veranda
+gazebo
+pergola
+arcade
+colonnade
+dome
+spire
+steeple
+bell tower
+minaret
+pagoda
+stupa
+torii gate
+archway
+triumphal arch
+obelisk
+column
+fortress
+watchtower
+city wall
+drawbridge
+moat
+aqueduct
+viaduct
+suspension bridge
+footbridge
+stone bridge
+iron bridge
+covered bridge
+boardwalk
+promenade
+seafront
+quay
+jetty
+marina
+shipyard
+dry dock
+oil rig
+wind turbine
+solar panel
+power line
+pylon
+water tower
+silo
+smokestack
+refinery
+mine
+quarry
+construction site
+scaffolding
+excavator
+cement mixer
+forklift
+conveyor belt
+assembly line
+workshop
+forge
+blacksmith
+pottery
+loom
+sewing machine
+spinning wheel
+printing press
+typewriter
+telephone booth
+mailbox
+vending machine
+payphone
+lamp post
+street lamp
+neon sign
+shop sign
+awning
+market stall
+flea market
+antique shop
+bookstore
+flower shop
+pharmacy
+barber shop
+laundromat
+bank
+post office
+town hall
+courthouse
+prison
+school bus
+schoolyard
+university
+laboratory
+observatory
+telescope
+planetarium
+microscope
+test tube
+operating room
+hospital bed
+wheelchair
+crutch
+syringe
+stethoscope
+bandage
+dentist chair
+altar
+pulpit
+pew
+stained glass
+rosary
+icon
+cross
+gravestone
+cemetery
+tomb
+mausoleum
+mosaic
+fresco
+tapestry
+embroidery
+lace
+quilt
+rug
+vase of flowers
+chandelier
+fireplace
+stove
+oven
+refrigerator
+microwave
+sink
+bathtub
+shower
+toilet
+washing machine
+iron
+vacuum cleaner
+broom
+mop
+trash can
+recycling bin
+wheelbarrow
+shovel
+rake
+hoe
+watering can
+garden hose
+lawn mower
+chainsaw
+axe
+pickaxe
+drill
+screwdriver
+pliers
+tape measure
+paintbrush
+paint can
+roller
+sandpaper
+workbench
+toolbox
+bolt
+nut and bolt
+nail
+screw
+spring
+gear
+pulley
+lever
+anchor
+buoy
+life jacket
+fishing net
+fishing rod
+fishing boat
+rowboat
+motorboat
+yacht
+speedboat
+cruise ship
+cargo ship
+container ship
+tugboat
+gondola
+raft
+submarine
+sled
+dog sled
+horse cart
+carriage
+rickshaw
+tuk-tuk
+cable tram
+funicular
+monorail
+steam train
+freight train
+railway track
+level crossing
+signal box
+platform
+subway station
+escalator
+airport terminal
+runway
+control tower
+hot air balloon
+glider
+parachute
+paraglider
+drone
+kite
+rocket
+satellite
+space station
+astronaut
+saddle
+bridle
+horseshoe
+stable
+paddock
+rodeo
+bullfight
+horse race
+polo
+fencing
+archery
+shooting range
+darts
+billiards
+bowling
+chess
+checkers
+dominoes
+playing cards
+dice
+jigsaw puzzle
+board game
+video game
+arcade game
+slot machine
+toy car
+doll
+teddy bear
+building blocks
+rocking horse
+swing
+slide
+seesaw
+sandbox
+trampoline
+bouncy castle
+snowman
+sandcastle
+pumpkin
+christmas tree
+gift
+wreath
+easter egg
+firecracker
+lantern
+paper lantern
+candle light
+dragon dance
+lion dance
+carnival
+masquerade
+folk dance
+ballet
+opera
+orchestra
+choir
+marching band
+street musician
+accordion
+harp
+flute
+saxophone
+cello
+double bass
+banjo
+ukulele
+harmonica
+xylophone
+tambourine
+gong
+sheet music
+vinyl record
+radio
+gramophone
+jukebox
+loudspeaker
+dj booth
+recording studio
+film set
+clapperboard
+spotlight
+puppet
+marionette
+shadow puppet
+magician
+clown
+acrobat
+juggler
+circus performer
+street performer
+mime
+statue performer
+bonfire
+barbecue grill
+smoker
+food truck
+street food
+noodle stand
+fish market
+spice market
+fruit stand
+vegetable market
+bakery shelf
+cheese counter
+deli
+wine cellar
+barrel
+brewery
+distillery
+vineyard row
+olive grove
+olive
+grapes on vine
+honeycomb
+beehive
+apiary
+cheese wheel
+sausage links
+cured ham
+sushi bar
+ramen
+curry
+paella
+kebab
+falafel
+hummus
+bagel
+croissant
+baguette
+pretzel
+pancake
+waffle
+donut
+cupcake
+cheesecake
+macaron
+tart
+pudding
+jelly
+honey
+jam
+syrup
+garlic
+ginger
+chili
+pumpkin soup
+stew
+roast
+barbecue ribs
+grilled fish
+lobster
+oyster
+shrimp
+squid
+octopus
+caviar
