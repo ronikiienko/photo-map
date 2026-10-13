@@ -2,6 +2,7 @@
 //! Made as the last step of building a map (build.rs), and kept in the bundle.
 //! Every level L holds each photo in a slot of 2^L px (photo fitted into the top-left corner, real shape kept,
 //! small photos enlarged). Slots sit on PAGE x PAGE pages in a grid of PAGE / 2^L per row; slot = photo index.
+//! Smaller levels are averaged from the photo's own pixels only, never from the empty rest of the tile.
 //! Pages are written level 0 first, each as BC7 blocks (16 bytes per 4 x 4 pixels).
 
 use crate::data::{Photo, Progress};
@@ -28,10 +29,13 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     progress.stage("preparing small pictures (step 1 of 2, reading every photo)", n);
     // 1. every photo fitted to 32 px (longer side) in the corner of a 32 x 32 tile
     let done = AtomicUsize::new(0);
+    // `content`: how much of each tile is the photo (width, height); the rest of the tile is padding, which no average may use
     let mut tiles = vec![0u8; n * TOP * TOP * 4];
-    tiles.par_chunks_mut(TOP * TOP * 4).enumerate().for_each(|(i, tile)| {
+    let mut content = vec![(0usize, 0usize); n];
+    tiles.par_chunks_mut(TOP * TOP * 4).zip(content.par_iter_mut()).enumerate().for_each(|(i, (tile, size))| {
         if let Some(img) = photo::load(&bundle.join(&photos[i].file)) {
             let img = photo::fit(&img, TOP as u32, true);
+            *size = (img.width() as usize, img.height() as usize);
             for (y, row) in img.as_raw().chunks(img.width() as usize * 4).enumerate() {
                 tile[y * TOP * 4..y * TOP * 4 + row.len()].copy_from_slice(row);
             }
@@ -78,20 +82,11 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
         levels[level] = out;
         step(format!("level {level} ({s} px): {pages} page(s)"));
         if level > 0 {
-            // average 2 x 2 pixels: tiles of s px -> s/2 px
+            // average 2 x 2 pixels: tiles of s px -> s/2 px, using only the photo's own pixels
             let h = s / 2;
             let mut next = vec![0u8; n * h * h * 4];
-            next.par_chunks_mut(h * h * 4).enumerate().for_each(|(i, t)| {
-                let src = &tiles[i * s * s * 4..(i + 1) * s * s * 4];
-                for y in 0..h {
-                    for x in 0..h {
-                        for c in 0..4 {
-                            let at = |yy: usize, xx: usize| src[(yy * s + xx) * 4 + c] as u32;
-                            let sum = at(2 * y, 2 * x) + at(2 * y, 2 * x + 1) + at(2 * y + 1, 2 * x) + at(2 * y + 1, 2 * x + 1);
-                            t[(y * h + x) * 4 + c] = ((sum + 2) / 4) as u8;
-                        }
-                    }
-                }
+            next.par_chunks_mut(h * h * 4).zip(content.par_iter_mut()).enumerate().for_each(|(i, (t, size))| {
+                *size = halve(&tiles[i * s * s * 4..(i + 1) * s * s * 4], s, *size, t);
             });
             tiles = next;
         }
@@ -108,10 +103,55 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     Ok(())
 }
 
+/// One tile of `s` x `s` px (RGBA) halved into `out` (s/2 x s/2). Each new pixel is the average of the photo's pixels among its 2 x 2
+/// (`content`: the photo's width and height in the tile; the rest is padding and counts for nothing). Returns the photo's size in the
+/// halved tile. A pixel with no photo in it stays 0: the viewer never reads it.
+fn halve(src: &[u8], s: usize, content: (usize, usize), out: &mut [u8]) -> (usize, usize) {
+    let h = s / 2;
+    for y in 0..h {
+        for x in 0..h {
+            let mut sum = [0u32; 4];
+            let mut count = 0;
+            for (yy, xx) in [(2 * y, 2 * x), (2 * y, 2 * x + 1), (2 * y + 1, 2 * x), (2 * y + 1, 2 * x + 1)] {
+                if xx < content.0 && yy < content.1 {
+                    for c in 0..4 {
+                        sum[c] += src[(yy * s + xx) * 4 + c] as u32;
+                    }
+                    count += 1;
+                }
+            }
+            for c in 0..4 {
+                out[(y * h + x) * 4 + c] = if count > 0 { ((sum[c] + count / 2) / count) as u8 } else { 0 };
+            }
+        }
+    }
+    (content.0.div_ceil(2), content.1.div_ceil(2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::data::Progress;
+
+    /// A wide white photo (32 x 16 in a 32 x 32 tile) is still white at 1 px: the padding is not in the average.
+    #[test]
+    fn padding_stays_out_of_the_average() {
+        let mut tile = vec![0u8; 32 * 32 * 4];
+        for y in 0..16 {
+            for x in 0..32 {
+                tile[(y * 32 + x) * 4..(y * 32 + x) * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        let (mut size, mut s) = ((32, 16), 32);
+        while s > 1 {
+            let mut next = vec![0u8; s / 2 * (s / 2) * 4];
+            size = halve(&tile, s, size, &mut next);
+            tile = next;
+            s /= 2;
+        }
+        assert_eq!(tile, vec![255, 255, 255, 255]);
+        assert_eq!(size, (1, 1));
+    }
 
     /// Baking a few photos writes the always-loaded levels, in pages.rs's size.
     #[test]
