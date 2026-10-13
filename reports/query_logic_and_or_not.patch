@@ -1,0 +1,383 @@
+diff --git a/photo-map/src/main.rs b/photo-map/src/main.rs
+index 77e6441..0b09a43 100644
+--- a/photo-map/src/main.rs
++++ b/photo-map/src/main.rs
+@@ -57,6 +57,22 @@ enum SearchOn {
+     Captions,
+ }
+ 
++/// The search in words: the "all" terms joined by "and", then the "any" ones as "(a or b)", then "but not (c or d)".
++fn describe(names: &[String], groups: &[Group]) -> String {
++    let pick = |want: Group| names.iter().zip(groups).filter(|&(_, &g)| g == want).map(|(n, _)| n.as_str()).collect::<Vec<_>>();
++    let (all, some, not) = (pick(Group::All), pick(Group::Any), pick(Group::Not));
++    let mut text = match (all.is_empty(), some.len()) {
++        (_, 0) => all.join(" and "),
++        (true, _) => some.join(" or "),
++        (false, 1) => format!("{} and {}", all.join(" and "), some[0]),
++        (false, _) => format!("{} and ({})", all.join(" and "), some.join(" or ")),
++    };
++    if !not.is_empty() {
++        text += &format!(" but not {}", if not.len() == 1 { not[0].to_string() } else { format!("({})", not.join(" or ")) });
++    }
++    text
++}
++
+ /// Photo `i`'s similarity to the last search (`sims`: the n image cosines, then the n caption cosines, 0 = no caption), or None
+ /// if it has no score on that side (captions only, and no caption).
+ fn similarity(sims: &[u16], n: usize, i: usize, on: SearchOn) -> Option<f32> {
+@@ -69,6 +85,26 @@ fn similarity(sims: &[u16], n: usize, i: usize, on: SearchOn) -> Option<f32> {
+     }
+ }
+ 
++/// Which group of the search a term is in: a photo must match all of the first, at least one of the second, and
++/// is marked down by the third.
++#[derive(Clone, Copy, PartialEq)]
++enum Group {
++    All,
++    Any,
++    Not,
++}
++
++/// How much of a "none of these" term's similarity is taken off a photo's score. Measured on Flickr30k (dog without snow,
++/// horse without man...): 0.5 keeps almost all the gain (1.0 and more hurt when the unwanted word overlaps the wanted one:
++/// people without children).
++const NOT_WEIGHT: f32 = 0.5;
++
++/// A search term beyond the one in the box: words, in a group.
++struct Extra {
++    text: String,
++    group: Group,
++}
++
+ struct Ui {
+     ctx: egui::Context,
+     state: egui_winit::State,
+@@ -117,6 +153,13 @@ struct Viewer {
+     ask_when_ready: bool,
+     /// A photo dropped on the window: searched for together with the text.
+     photo: Option<PathBuf>,
++    /// More terms (the panel under the bar): a photo must match the box and every "all" one, and at least one "any" one.
++    extras: Vec<Extra>,
++    /// The "any of these" and "none of these" groups are shown (each also whenever it has a term).
++    any_open: bool,
++    not_open: bool,
++    /// For each term of the last search sent to the helper, its group (the box's own term is in "all").
++    asked: Vec<Group>,
+     /// What the last search did, next to the box.
+     status: String,
+     /// How many photos a search should light up (the slider): the closest this many match.
+@@ -158,6 +201,10 @@ impl Viewer {
+             helper: None,
+             ask_when_ready: false,
+             photo: None,
++            extras: Vec::new(),
++            any_open: false,
++            not_open: false,
++            asked: Vec::new(),
+             status: String::new(),
+             wanted: 100.0,
+             on: SearchOn::default(),
+@@ -274,7 +321,18 @@ impl Viewer {
+         }
+         let text = self.search.trim().to_string();
+         let Some(path) = self.map.as_ref().map(|m| m.path.clone()) else { return };
+-        if text.is_empty() && self.photo.is_none() {
++        // the terms: the box (with its photo) and the filled-in extra ones; the box's is an "all" one
++        let mut terms = Vec::new();
++        let mut asked = Vec::new();
++        if !text.is_empty() || self.photo.is_some() {
++            terms.push(serde_json::json!({ "text": text, "image": self.photo }));
++            asked.push(Group::All);
++        }
++        for e in self.extras.iter().filter(|e| !e.text.trim().is_empty()) {
++            terms.push(serde_json::json!({ "text": e.text.trim(), "image": null }));
++            asked.push(e.group);
++        }
++        if terms.is_empty() {
+             if let Some(m) = &mut self.map {
+                 m.flags.fill(0);
+                 m.flags_dirty = true;
+@@ -285,8 +343,9 @@ impl Viewer {
+             self.shown.clear();
+             self.status.clear();
+         } else if helper_alive(&path) {
+-            let query = serde_json::json!({ "text": text, "image": self.photo });
++            let query = serde_json::json!({ "terms": terms });
+             let _ = std::fs::write(path.join("query.txt"), query.to_string());
++            self.asked = asked;
+             self.status = "searching…".into();
+             self.ask_when_ready = false;
+         } else {
+@@ -315,38 +374,72 @@ impl Viewer {
+             self.status = error.to_string();
+             return;
+         }
+-        let Some(bytes) = found["file"].as_str().and_then(|f| std::fs::read(m.path.join(f)).ok()).filter(|r| r.len() == 4 * m.flags.len()) else { return };
+-        self.shown = found["query"].as_str().unwrap_or_default().to_string();
++        let Some(bytes) = found["file"].as_str().and_then(|f| std::fs::read(m.path.join(f)).ok()).filter(|r| r.len() == 4 * m.flags.len() * self.asked.len().max(1)) else { return };
++        self.shown = match found["queries"].as_array() {
++            Some(names) if names.len() == self.asked.len() => describe(&names.iter().map(|n| n.as_str().unwrap_or_default().to_string()).collect::<Vec<_>>(), &self.asked),
++            _ => found["query"].as_str().unwrap_or_default().to_string(),
++        };
+         m.sims = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+         if let Some((min, max)) = self.apply_search() {
+             self.camera.fly_to(self.camera.fit(min, max));
+         }
+     }
+ 
+-    /// Turn the last search's cosines into the photos' match bytes (0 = no match, 1..=255 from the cutoff up): a photo's
+-    /// score is the better of its image and caption cosines, and the closest `wanted` photos match. The box the matches span.
++    /// Turn the last search's cosines into the photos' match bytes (0 = no match, 1..=255 from the cutoff up) and the closest
++    /// `wanted` photos match. A photo's score is its similarity to the term (see SearchOn); with several terms, its weakest "all"
++    /// term and its strongest "any" term, whichever is lower (raw similarities: put on a common scale by standard deviation
++    /// they did worse, measured on Flickr30k: a common word such as "man" held the AND back, a rare one took over the OR).
++    /// The box the matches span.
+     fn apply_search(&mut self) -> Option<(Vec2, Vec2)> {
+         let m = self.map.as_mut()?;
+         let n = m.flags.len();
+-        if n == 0 || m.sims.len() != 2 * n {
++        let terms = self.asked.len().max(1);
++        if n == 0 || m.sims.len() != 2 * n * terms {
+             return None;
+         }
+-        // a photo's similarity (see SearchOn); no score (-1): it can't match
+-        let score: Vec<f32> = (0..n).map(|i| similarity(&m.sims, n, i, self.on).unwrap_or(-1.0)).collect();
+-        // the closest `wanted` photos match: the cutoff is the similarity of the last of them (ties may add a few)
++        // per term, per photo: its similarity; no score (-inf): it can't match
++        let per: Vec<Vec<f32>> = (0..terms)
++            .map(|k| {
++                let block = &m.sims[k * 2 * n..(k + 1) * 2 * n];
++                (0..n).map(|i| similarity(block, n, i, self.on).unwrap_or(f32::NEG_INFINITY)).collect()
++            })
++            .collect();
++        let group = |k: usize| self.asked.get(k).copied().unwrap_or(Group::All);
++        let score: Vec<f32> = (0..n)
++            .map(|i| {
++                let of = |g: Group| (0..terms).filter(move |&k| group(k) == g).map(|k| per[k][i]);
++                let (all, any) = (of(Group::All).reduce(f32::min), of(Group::Any).reduce(f32::max));
++                let wanted = match (all, any) {
++                    (Some(a), Some(b)) => a.min(b),
++                    (a, b) => a.or(b).unwrap_or(f32::NEG_INFINITY),
++                };
++                // a photo with no score on a "none" term (no caption) is not marked down by it
++                wanted - NOT_WEIGHT * of(Group::Not).filter(|s| s.is_finite()).fold(0.0, f32::max)
++            })
++            .collect();
++        let best = score.iter().copied().fold(f32::NEG_INFINITY, f32::max);
++        if !best.is_finite() {
++            m.flags.fill(0);
++            m.flags_dirty = true;
++            m.order.clear();
++            m.at = None;
++            self.status = format!("{}: nothing to look for (add a term to \"all of these\" or \"any of these\")", self.shown);
++            return None;
++        }
++        // the closest `wanted` photos match: the cutoff is the score of the last of them (ties may add a few)
+         let k = (self.wanted.round() as usize).clamp(1, n);
+         let mut sorted = score.clone();
+         let (_, &mut cut, _) = sorted.select_nth_unstable_by(n - k, |a, b| a.total_cmp(b));
+-        let best = score.iter().copied().fold(0.0, f32::max);
++        let cut = if cut.is_finite() { cut } else { score.iter().copied().filter(|s| s.is_finite()).fold(best, f32::min) };
+         let span = (best - cut).max(1e-4); // red at the cutoff, yellow at the best photo
+         let mut hits = 0;
+         for i in 0..n {
+-            m.flags[i] = if score[i] >= cut && score[i] >= 0.0 { hits += 1; 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
++            m.flags[i] = if score[i] >= cut && score[i].is_finite() { hits += 1; 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
+         }
+         m.order = (0..n).filter(|&i| m.flags[i] > 0).collect();
+         m.order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
+         m.at = None;
+-        self.status = format!("{}: {hits} photos, similarity {cut:.2} to {best:.2}", self.shown);
++        self.status = format!("{}: {hits} photos, {} {cut:.2} to {best:.2}", self.shown, if self.asked.contains(&Group::Not) { "score" } else { "similarity" });
+         m.flags_dirty = true;
+         let pts = m.flags.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, _)| Vec2::new(m.data.points[i].x, m.data.points[i].y));
+         Some(pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p))))
+@@ -803,19 +896,6 @@ impl Viewer {
+                     }
+                     None => {}
+                 }
+-                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("words, or a photo (drop it, or paste its path); Enter").desired_width(260.0));
+-                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+-                    actions.ask = true;
+-                }
+-                if let Some(photo) = &self.photo {
+-                    if let Some(tex) = &self.photo_tex {
+-                        ui.add(egui::Image::new((tex.id(), egui::vec2(36.0 * tex.aspect_ratio(), 36.0))));
+-                    }
+-                    ui.label(photo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+-                    if ui.small_button("x").on_hover_text("remove the photo and search again").clicked() {
+-                        actions.clear_photo = true;
+-                    }
+-                }
+                 ui.label("search in");
+                 let before = self.on;
+                 for (value, text, tip) in [
+@@ -847,6 +927,82 @@ impl Viewer {
+                 ui.label(&self.status);
+             });
+         });
++        if self.map.is_some() {
++            egui::Area::new("terms".into()).fixed_pos([10.0, 46.0]).show(&ctx, |ui| {
++                egui::Frame::popup(ui.style()).show(ui, |ui| {
++                    ui.set_max_width(440.0);
++                    let mut remove = None;
++                    let mut add = None;
++                    let open = |g: Group, flag: bool| flag || self.extras.iter().any(|e| e.group == g);
++                    let (any_open, not_open) = (open(Group::Any, self.any_open), open(Group::Not, self.not_open));
++                    for group in [Group::All, Group::Any, Group::Not] {
++                        if (group == Group::Any && !any_open) || (group == Group::Not && !not_open) {
++                            let (label, tip) = if group == Group::Any {
++                                ("+ any of these…", "a photo must match at least one of the terms in this group")
++                            } else {
++                                ("+ none of these…", "photos that look like these terms are marked down")
++                            };
++                            if ui.small_button(label).on_hover_text(tip).clicked() {
++                                if group == Group::Any {
++                                    self.any_open = true;
++                                } else {
++                                    self.not_open = true;
++                                }
++                            }
++                            continue;
++                        }
++                        ui.label(
++                            egui::RichText::new(match group {
++                                Group::All => "all of these",
++                                Group::Any => "any of these (at least one)",
++                                Group::Not => "none of these (photos like them rank lower)",
++                            })
++                            .small()
++                            .weak(),
++                        );
++                        if group == Group::All {
++                            // the first term: words and/or a photo
++                            ui.horizontal(|ui| {
++                                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("words, or a photo (drop it, or paste its path); Enter").desired_width(300.0));
++                                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
++                                    actions.ask = true;
++                                }
++                                if let Some(photo) = &self.photo {
++                                    if let Some(tex) = &self.photo_tex {
++                                        ui.add(egui::Image::new((tex.id(), egui::vec2(28.0 * tex.aspect_ratio(), 28.0))));
++                                    }
++                                    ui.label(photo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
++                                    if ui.small_button("x").on_hover_text("remove the photo and search again").clicked() {
++                                        actions.clear_photo = true;
++                                    }
++                                }
++                            });
++                        }
++                        for (k, e) in self.extras.iter_mut().enumerate().filter(|(_, e)| e.group == group) {
++                            ui.horizontal(|ui| {
++                                let edit = ui.add(egui::TextEdit::singleline(&mut e.text).hint_text("words; Enter").desired_width(300.0));
++                                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
++                                    actions.ask = true;
++                                }
++                                if ui.small_button("x").on_hover_text("remove this term and search again").clicked() {
++                                    remove = Some(k);
++                                }
++                            });
++                        }
++                        if ui.small_button("+ term").clicked() {
++                            add = Some(group);
++                        }
++                    }
++                    if let Some(group) = add {
++                        self.extras.push(Extra { text: String::new(), group });
++                    }
++                    if let Some(k) = remove {
++                        self.extras.remove(k);
++                        actions.ask = true;
++                    }
++                });
++            });
++        }
+         if self.map.is_none() && self.opening.is_none() {
+             egui::Area::new("empty".into()).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
+                 ui.weak(if self.library.maps.is_empty() { "No maps in maps/ yet: make one in Python (src/photomap.py)" } else { "Choose a map above" });
+diff --git a/src/map_search.py b/src/map_search.py
+index 575beb4..26c8305 100644
+--- a/src/map_search.py
++++ b/src/map_search.py
+@@ -55,12 +55,18 @@ models = {}  # name -> (text(query), photo(PIL image)) -> vector: each model is
+ 
+ 
+ def gemma():
+-    model = config.load_model(images=True)
+-    model[0].processor.image_processor.max_soft_tokens = 140  # as when the photos were embedded
+-    return (
+-        lambda text: model.encode([text], prompt=config.QUERY_PROMPT, normalize_embeddings=True)[0],
+-        lambda im: model.encode([{"image": im}], normalize_embeddings=True)[0],
+-    )
++    """Text queries on the CPU (84 ms, none of the GPU's memory); photos on the GPU (0.14 s against 2-7 s on the CPU), loaded when
++    the first photo is searched, and on the CPU in float32 if there is no GPU."""
++    text_model = config.load_model(cpu=True)
++    seen = {}
++
++    def photo(im):
++        if "model" not in seen:
++            seen["model"] = config.load_model(images=True)  # the GPU if there is one
++            seen["model"][0].processor.image_processor.max_soft_tokens = 140  # as when the photos were embedded
++        return seen["model"].encode([{"image": im}], normalize_embeddings=True)[0]
++
++    return (lambda text: text_model.encode([text], prompt=config.QUERY_PROMPT, normalize_embeddings=True)[0], photo)
+ 
+ 
+ def bioclip():
+@@ -145,33 +151,39 @@ if __name__ == "__main__":
+             asked = json.loads(raw)  # {"text": ..., "image": path or null} from the viewer
+         except json.JSONDecodeError:
+             asked = {"text": raw}
+-        text, image = (asked.get("text") or "").strip(), asked.get("image")
+-        if not text and not image:
++        # one term {"text", "image"} (older viewers), or {"terms": [{"text", "image"}, ...]}: the viewer combines them
++        terms = [{"text": (t.get("text") or "").strip(), "image": t.get("image")} for t in asked.get("terms", [asked])]
++        terms = [t for t in terms if t["text"] or t["image"]]
++        if not terms:
+             continue
+         try:
+-            parts = []
+-            if text:
+-                parts.append(embed_text(text))
+-            if image:  # a photo is embedded like the map's photos: no prompt
+-                with Image.open(image) as im:
+-                    parts.append(embed_photo(im.convert("RGB")))
++            blocks, queries = [], []
++            for t in terms:
++                parts = []
++                if t["text"]:
++                    parts.append(embed_text(t["text"]))
++                if t["image"]:  # a photo is embedded like the map's photos: no prompt
++                    with Image.open(t["image"]) as im:
++                        parts.append(embed_photo(im.convert("RGB")))
++                v = np.sum(parts, axis=0)  # text and photo together: the vector between them
++                v /= np.linalg.norm(v)
++                a, b = img @ v, cap @ v
++                # both cosines go to the viewer (u16: 0..65535 = 0..1; 0 for a caption that isn't there); it blends them
++                # with its slider and applies CUT / TOP
++                blocks.append(np.concatenate([a, np.where(has, b, 0)]).clip(0, 1))
++                queries.append(" + ".join(filter(None, [t["text"], Path(t["image"]).name if t["image"] else ""])))
+         except Exception as e:  # unreadable photo etc.: tell the viewer, keep running
+             print(f"{asked}: {e}", flush=True)
+             tmp = bundle / "search.json.tmp"
+             tmp.write_text(json.dumps({"error": f"couldn't search: {e}"[:120]}))
+             tmp.replace(bundle / "search.json")
+             continue
+-        v = np.sum(parts, axis=0)  # text and photo together: the vector between them
+-        v /= np.linalg.norm(v)
+-        query = " + ".join(filter(None, [text, Path(image).name if image else ""]))
+-        a, b = img @ v, cap @ v
+-        # both cosines go to the viewer (u16: 0..65535 = 0..1; 0 for a caption that isn't there); it blends them
+-        # with its slider and applies CUT / TOP
+-        both = np.concatenate([a, np.where(has, b, 0)]).clip(0, 1)
++        both = np.concatenate(blocks)  # per term: the n image cosines, then the n caption ones
++        query = " | ".join(queries)
+         (bundle / "search.tmp").write_bytes(np.round(both * 65535).astype("<u2").tobytes())
+         (bundle / "search.tmp").replace(bundle / "search.u16")  # before search.json: that is what the viewer waits for
+-        found = {"query": query, "file": "search.u16"}
++        found = {"query": query, "queries": queries, "file": "search.u16"}
+         tmp = bundle / "search.json.tmp"
+         tmp.write_text(json.dumps(found))
+         tmp.replace(bundle / "search.json")  # whole or not there
+-        print(f"{query!r}: best image {a.max():.2f}" + (f", best caption {b[has].max():.2f}" if has.any() else ""), flush=True)
++        print(f"{query!r}: best image {a.max():.2f}" + (f", best caption {b[has].max():.2f}" if has.any() else "") + " (last term)", flush=True)
