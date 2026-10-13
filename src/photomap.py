@@ -81,7 +81,7 @@ def make(bundle, photos, files, vectors, model=config.MODEL_ID):
     xy = lay_out(vectors)
     xy.tofile(new / "layout.bin")
     regions(new, vectors, xy, [p.get("caption", "") for p in out])
-    manifest = {"format": 1, "name": bundle.name.removesuffix(".photomap"), "created": time.strftime("%Y-%m-%d %H:%M"),
+    manifest = {"format": 1, "name": bundle.name.removesuffix(".photomap"), "created": time.strftime("%Y-%m-%d %H:%M", time.gmtime()),
                 "photos": len(out), "world": WORLD, "embedding": {"model": model, "dim": vectors.shape[1], "dtype": "float16"}}
     (new / "manifest.json").write_text(json.dumps(manifest, indent=2))
     shutil.rmtree(bundle, ignore_errors=True)

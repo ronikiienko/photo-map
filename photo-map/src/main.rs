@@ -15,6 +15,7 @@ mod library;
 mod naming;
 mod pages;
 mod regions;
+mod reuse;
 mod photo;
 mod search;
 mod storage;
@@ -131,6 +132,8 @@ struct Viewer {
     keys: Keys,
     alt: bool,
     help_open: bool,
+    /// Builds stopped because a map was opened (a build and a map together would not fit on the card): they go on when the Maps page is back.
+    paused_for_viewing: Vec<PathBuf>,
     /// Files and folders dropped on the Maps page this frame.
     dropped: Vec<PathBuf>,
     cursor: Option<Vec2>,
@@ -191,6 +194,7 @@ impl Viewer {
             keys: Keys::default(),
             alt: false,
             help_open: false,
+            paused_for_viewing: Vec::new(),
             dropped: Vec::new(),
             cursor: None,
             hovered: None,
@@ -220,6 +224,12 @@ impl Viewer {
 
     /// Start reading a bundle on a thread (photos.json and friends take a moment for big maps; a new bundle is baked).
     fn open(&mut self, path: PathBuf) {
+        for run in self.runs.iter().filter(|r| r.running()) {
+            run.pause();
+            if !self.paused_for_viewing.contains(&run.dir) {
+                self.paused_for_viewing.push(run.dir.clone());
+            }
+        }
         let p = path.clone();
         let progress = Arc::new(Progress::default());
         let shared = progress.clone();
@@ -272,6 +282,7 @@ impl Viewer {
                     stage: state.as_ref().map_or(b.job.stage, |s| s.stage),
                     running: run.is_some_and(|r| r.running()),
                     queued: self.queue.contains(&b.dir),
+                    elsewhere: run.is_none_or(|r| !r.running()) && build::locked(&b.dir),
                     state,
                 }
             })
@@ -298,7 +309,13 @@ impl Viewer {
             let name = dir.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             self.notice = Some((format!("{name} is ready."), true));
         }
-        if !self.runs.iter().any(|r| r.running()) {
+        // builds only run on the Maps page; the ones stopped for a map go back in the queue when it is shown again
+        let on_maps = self.page == Page::Maps && self.opening.is_none();
+        if on_maps && !self.paused_for_viewing.is_empty() {
+            let back: Vec<PathBuf> = self.paused_for_viewing.drain(..).filter(|d| !self.queue.contains(d)).collect();
+            self.queue.splice(0..0, back);
+        }
+        if on_maps && !self.runs.iter().any(|r| r.running()) {
             while !self.queue.is_empty() {
                 let dir = self.queue.remove(0);
                 if !dir.exists() {
@@ -339,7 +356,7 @@ impl Viewer {
         use home::Action;
         match action {
             Action::Open(path) => self.open(path),
-            Action::Create { name, sources, names_as_captions } => match build::create(self.library.dir(), &name, &sources, names_as_captions) {
+            Action::Create { name, sources, names_as_captions, every } => match build::create(self.library.dir(), &name, &sources, names_as_captions, every) {
                 Ok(dir) => {
                     self.library.refresh();
                     self.queue.push(dir);
@@ -360,7 +377,9 @@ impl Viewer {
                 }
             }
             Action::Discard(dir) => {
-                if self.stop_build(&dir) {
+                if !self.runs.iter().any(|r| r.dir == dir && r.running()) && build::locked(&dir) {
+                    self.notice = Some(("another window is making this map: stop it there first".into(), false));
+                } else if self.stop_build(&dir) {
                     let _ = std::fs::remove_dir_all(&dir);
                     self.library.refresh();
                 } else {

@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 pub enum Action {
     Open(PathBuf),
-    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool },
+    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize },
     Pause(PathBuf),
     Continue(PathBuf),
     Discard(PathBuf),
@@ -29,6 +29,8 @@ pub struct BuildView {
     pub running: bool,
     /// Waiting for the map before it to finish.
     pub queued: bool,
+    /// Being made by another window of the app.
+    pub elsewhere: bool,
     pub state: Option<State>,
 }
 
@@ -45,15 +47,30 @@ enum Measured {
 }
 
 struct NewMap {
-    folder: String,
-    /// Folders and photos dropped on the page: used instead of the typed folder.
-    dropped: Vec<PathBuf>,
+    /// The folders and photo files the map is made from.
+    sources: Vec<PathBuf>,
     name: String,
     name_edited: bool,
+    /// Which list of sources `photos` counts (the list as text).
     counted: String,
     count: Option<Receiver<usize>>,
+    /// How many photos the sources hold, all of them.
     photos: Option<usize>,
+    /// Use every Nth photo.
+    every: usize,
     names_as_captions: bool,
+}
+
+impl NewMap {
+    /// More folders and photos for the list: each once, in order.
+    fn add(&mut self, paths: Vec<PathBuf>) {
+        for p in paths {
+            if !self.sources.contains(&p) {
+                self.sources.push(p);
+            }
+        }
+        self.sources.sort();
+    }
 }
 
 pub struct Home {
@@ -76,7 +93,7 @@ impl Home {
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { folder: String::new(), dropped: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, names_as_captions: false });
+        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, every: 1, names_as_captions: false });
     }
 
     pub fn set_drag_over(&mut self, over: bool) {
@@ -94,14 +111,7 @@ impl Home {
         if self.new_map.is_none() {
             self.open_new_map();
         }
-        let nm = self.new_map.as_mut().unwrap();
-        let mut seen: std::collections::HashSet<PathBuf> = nm.dropped.iter().cloned().collect();
-        for p in usable {
-            if seen.insert(p.clone()) {
-                nm.dropped.push(p);
-            }
-        }
-        nm.dropped.sort();
+        self.new_map.as_mut().unwrap().add(usable);
         true
     }
 
@@ -219,10 +229,12 @@ impl Home {
                 ui.label(RichText::new(&b.name).size(17.0));
                 ui.label(theme::muted(format!("from {}", b.source)));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Discard").clicked() {
+                    if ui.add_enabled(!b.elsewhere, egui::Button::new("Discard")).clicked() {
                         self.confirm_discard = Some(b.dir.clone());
                     }
-                    if b.running {
+                    if b.elsewhere {
+                        // nothing to press: another window runs it
+                    } else if b.running {
                         if ui.button("Pause").clicked() {
                             actions.push(Action::Pause(b.dir.clone()));
                         }
@@ -273,6 +285,9 @@ impl Home {
                         line += &format!(" · {}", s.message);
                     }
                     ui.label(theme::muted(line));
+                }
+                _ if b.elsewhere => {
+                    ui.label(theme::muted("This map is being made in another window of the app. It shows here when it is finished."));
                 }
                 _ if b.queued => {
                     ui.label(theme::muted("Waiting for the map before it to finish"));
@@ -337,6 +352,9 @@ impl Home {
             actions.push(Action::Open(e.path.clone()));
         }
         response.context_menu(|ui| {
+            // egui's menus shrink the padding of their buttons to 2 px: put back the app's, so the text has room inside its highlight
+            ui.spacing_mut().button_padding = vec2(10.0, 5.0);
+            ui.set_min_width(170.0);
             if ui.button("Show in file manager").clicked() {
                 show_in_file_manager(&e.path);
                 ui.close();
@@ -490,34 +508,40 @@ impl Home {
         let mut close = false;
         let mut create = None;
         // a click on the backdrop does not close this one (what you typed would be lost): Cancel or Esc does
-        theme::modal(ctx, "new-map", 460.0, Some("New map"), |ui| {
-            if nm.dropped.is_empty() {
-                ui.label("Folder with photos");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut nm.folder).desired_width(340.0).hint_text("/path/to/photos, or drop folders and photos here"));
-                    if ui.button("Choose…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().set_title("Folder with photos").pick_folder() {
-                            nm.folder = p.display().to_string();
-                        }
-                    }
-                });
+        theme::modal(ctx, "new-map", 480.0, Some("New map"), |ui| {
+            ui.label("Photos");
+            if nm.sources.is_empty() {
+                ui.label(theme::muted("Add the folders (their sub-folders are included) or photos to make the map from. You can also drop them on this window."));
             } else {
-                ui.label("Dropped");
-                ui.horizontal(|ui| {
-                    ui.label(theme::muted(build::describe(&nm.dropped)));
-                    if ui.button("Use a folder instead").clicked() {
-                        nm.dropped.clear();
+                let mut remove = None;
+                egui::ScrollArea::vertical().max_height(120.0).auto_shrink([true, true]).show(ui, |ui| {
+                    for (i, p) in nm.sources.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(theme::muted(if p.is_dir() { "folder" } else { "photo" }));
+                            if theme::close_button(ui) {
+                                remove = Some(i);
+                            }
+                            ui.add(egui::Label::new(p.display().to_string()).truncate());
+                        });
                     }
                 });
+                if let Some(i) = remove {
+                    nm.sources.remove(i);
+                }
             }
-            let folder = PathBuf::from(nm.folder.trim());
-            let sources: Vec<PathBuf> = if !nm.dropped.is_empty() {
-                nm.dropped.clone()
-            } else if folder.is_dir() {
-                vec![folder.clone()]
-            } else {
-                Vec::new()
-            };
+            ui.horizontal(|ui| {
+                if ui.button("Add folder…").clicked() {
+                    if let Some(folders) = rfd::FileDialog::new().set_title("Folders with photos").pick_folders() {
+                        nm.add(folders);
+                    }
+                }
+                if ui.button("Add photos…").clicked() {
+                    if let Some(files) = rfd::FileDialog::new().set_title("Photos").add_filter("Photos", &build::TYPES).pick_files() {
+                        nm.add(files);
+                    }
+                }
+            });
+            let sources = nm.sources.clone();
             let key = sources.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
             if nm.counted != key {
                 nm.counted = key;
@@ -528,7 +552,7 @@ impl Home {
                     let ctx = ui.ctx().clone();
                     let list = sources.clone();
                     std::thread::spawn(move || {
-                        let _ = tx.send(build::collect_photos(&list).len());
+                        let _ = tx.send(build::collect_photos(&list, 1).len());
                         ctx.request_repaint();
                     });
                     nm.count = Some(rx);
@@ -541,14 +565,18 @@ impl Home {
                     };
                 }
             }
-            ui.add_space(4.0);
+            ui.add_space(2.0);
             if sources.is_empty() {
-                ui.label(theme::muted(if nm.folder.trim().is_empty() { "Pick the folder the photos are in (its sub-folders are included)." } else { "That folder does not exist." }));
+                // nothing to count yet
             } else if nm.count.is_some() {
                 ui.label(theme::muted("Counting photos…"));
             } else if let Some(n) = nm.photos {
-                ui.label(theme::muted(format!("{} photos found", thousands(n))));
+                ui.label(theme::muted(if nm.every > 1 { format!("{} photos found, {} of them used", thousands(n), thousands(n.div_ceil(nm.every))) } else { format!("{} photos found", thousands(n)) }));
             }
+            ui.add_space(8.0);
+            ui.label("How many");
+            theme::segmented(ui, &mut nm.every, &[(1, "All", "every photo"), (2, "1 in 2", "every second photo"), (5, "1 in 5", "every fifth photo"), (10, "1 in 10", "every tenth photo"), (20, "1 in 20", "every twentieth photo")]);
+            ui.label(theme::muted("A smaller map takes less time to make, to see whether it is what you want. The photos are picked evenly from the sorted list. Make a bigger one later: photos already understood in your other maps are not done again."));
             ui.add_space(8.0);
             ui.label("Name");
             if ui.add(egui::TextEdit::singleline(&mut nm.name).desired_width(340.0)).changed() {
@@ -574,7 +602,7 @@ impl Home {
             ui.horizontal(|ui| {
                 let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0);
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
-                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions });
+                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every });
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;

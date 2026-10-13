@@ -79,6 +79,13 @@ pub struct Job {
     /// Every photo's file name is its caption (shown above it, and searched along with the picture).
     #[serde(default)]
     pub names_as_captions: bool,
+    /// Use every Nth photo (1: all): a smaller map made quicker, picked evenly through the sorted list.
+    #[serde(default = "one")]
+    pub every: usize,
+}
+
+fn one() -> usize {
+    1
 }
 
 fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PathBuf>, D::Error> {
@@ -143,7 +150,7 @@ pub fn clean_name(name: &str) -> String {
 }
 
 /// Start a new build: its folder with job.json. Err with what is wrong (name taken, folder missing).
-pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: bool) -> Result<PathBuf, String> {
+pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: bool, every: usize) -> Result<PathBuf, String> {
     let name = clean_name(name);
     if name.is_empty() {
         return Err("give the map a name".into());
@@ -151,19 +158,25 @@ pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: b
     if sources.is_empty() || sources.iter().any(|s| !s.exists()) {
         return Err("that folder or photo doesn't exist".into());
     }
+    // full paths, links resolved: they are how a photo is recognised later (see reuse.rs)
+    let sources: Vec<PathBuf> = sources.iter().map(|s| fs::canonicalize(s).unwrap_or_else(|_| s.clone())).collect();
     if building_dir(maps, &name).exists() || finished_dir(maps, &name).exists() {
         return Err(format!("there is already a map called {name}"));
     }
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, sources: sources.to_vec(), created, stage: Stage::Scan, photos: 0, names_as_captions }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, sources, created, stage: Stage::Scan, photos: 0, names_as_captions, every: every.max(1) }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
 /// "2026-10-13 21:40" (UTC), without a date library.
 fn chrono_like_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    time_text(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64)
+}
+
+/// A time (seconds since 1970) as "2026-10-13 21:40" (UTC): the form maps record when they were started, which compares as text.
+pub fn time_text(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil-from-days (Howard Hinnant)
     let z = days + 719_468;
@@ -258,14 +271,33 @@ impl Ctx {
     }
 }
 
+/// The lock a build holds on its folder while it runs, so that a second window (or a second copy of the program) can't run the
+/// same build and write the same files. The system drops it when the build ends, or when the program dies.
+fn lock(dir: &Path) -> Option<fs::File> {
+    let file = fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(".lock")).ok()?;
+    file.try_lock().ok()?;
+    Some(file)
+}
+
+/// Is something holding the lock of this build's folder? (Its own run counts too: the caller knows its own runs.)
+pub fn locked(dir: &Path) -> bool {
+    match fs::OpenOptions::new().write(true).open(dir.join(".lock")) {
+        Ok(file) => file.try_lock().is_err(),
+        Err(_) => false,
+    }
+}
+
 impl Run {
     /// Run (or go on with) the build in `dir` on a thread. `wake`: called when something changed, to redraw.
+    /// None if there is no job in `dir`, or another run of it (in another window) holds it.
     pub fn start(dir: PathBuf, root: PathBuf, model: Arc<Mutex<Option<Gemma>>>, wake: impl Fn() + Send + 'static) -> Option<Run> {
         let job = Job::read(&dir)?;
+        let lock = lock(&dir)?;
         let state = State { stage: job.stage, done: 0, total: 0, message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false };
         let shared = Arc::new(Shared { pause: AtomicBool::new(false), state: Mutex::new(state) });
         let ctx = Ctx { dir: dir.clone(), root, job, shared: shared.clone(), model };
         let handle = std::thread::spawn(move || {
+            let _lock = lock; // held until the run is over
             let result = run(ctx);
             let mut s = shared_state(&result.0);
             if let Err(e) = result.1 {
@@ -349,8 +381,8 @@ pub fn is_photo(path: &Path) -> bool {
 }
 
 /// Every photo among the sources: the photo files themselves, and those in the folders and the folders inside them (not hidden
-/// ones). Sorted, each once.
-pub fn collect_photos(sources: &[PathBuf]) -> Vec<PathBuf> {
+/// ones). Sorted, each once; with `every` above 1, every Nth of them.
+pub fn collect_photos(sources: &[PathBuf], every: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for source in sources {
         if source.is_dir() {
@@ -361,7 +393,7 @@ pub fn collect_photos(sources: &[PathBuf]) -> Vec<PathBuf> {
     }
     out.sort();
     out.dedup();
-    out
+    out.into_iter().step_by(every.max(1)).collect()
 }
 
 fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -396,7 +428,7 @@ fn shown_size(path: &Path) -> Option<(u32, u32)> {
 
 fn scan(ctx: &mut Ctx) -> Result<Flow, String> {
     ctx.progress(0, 0, "looking for photos");
-    let files = collect_photos(&ctx.job.sources);
+    let files = collect_photos(&ctx.job.sources, ctx.job.every);
     let total = files.len();
     ctx.progress(0, total, format!("{total} photo files, checking them"));
     let done = AtomicUsize::new(0);
@@ -471,7 +503,7 @@ fn copy(ctx: &mut Ctx) -> Result<Flow, String> {
             let caption = if names { name_as_caption(&f.src) } else { String::new() };
             serde_json::json!({
                 "file": original_name(i, &f.src),
-                "source": f.src.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+                "source": f.src.to_string_lossy(),
                 "width": f.width,
                 "height": f.height,
                 "title": f.src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -518,7 +550,22 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    ctx.progress(already, n, "reading the photos and embedding them");
+
+    // photos an earlier map already has vectors for (the same file, unchanged): copied, not embedded
+    ctx.progress(already, n, "looking for photos embedded before");
+    let found = read_found(&ctx.dir)?;
+    let mut in_todo = vec![false; n];
+    for &k in &todo {
+        in_todo[k * SHARD..k * SHARD + shard_len(n, k)].fill(true);
+    }
+    let wanted: std::collections::HashSet<PathBuf> = (0..n).filter(|&i| in_todo[i]).map(|i| found[i].src.clone()).collect();
+    let earlier = crate::reuse::Found::open(ctx.dir.parent().ok_or("no maps folder")?, &wanted);
+    drop(wanted);
+    let hits: Vec<Option<crate::reuse::Hit>> = (0..n).into_par_iter().map(|i| if in_todo[i] { earlier.find(&found[i].src) } else { None }).collect();
+    let reused: Arc<Vec<bool>> = Arc::new(hits.iter().map(Option::is_some).collect());
+    let reused_count = reused.iter().filter(|&&r| r).count();
+    // the reused photos cost nothing: they count as done from the start, so the speed and the time left are about the photos the model does
+    ctx.progress(already + reused_count, n, if reused_count > 0 { format!("{reused_count} photos were embedded in earlier maps; embedding the rest") } else { "reading the photos and embedding them".to_string() });
 
     // CPU side ahead of the GPU: the next shard's photos are decoded and cut into patches while this one is embedded
     let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -526,13 +573,13 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<Option<embed::Patches>>)>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let producer = {
-        let (todo, files, stop) = (todo.clone(), files.clone(), stop.clone());
+        let (todo, files, stop, reused) = (todo.clone(), files.clone(), stop.clone(), reused.clone());
         std::thread::spawn(move || {
             for k in todo {
                 let range = k * SHARD..k * SHARD + shard_len(n, k);
-                let cuts: Vec<Option<embed::Patches>> = files[range]
-                    .par_iter()
-                    .map(|f| if stop.load(Ordering::Relaxed) { None } else { crate::photo::load(f).and_then(|img| embed::patches(&img).ok()) })
+                let cuts: Vec<Option<embed::Patches>> = range
+                    .into_par_iter()
+                    .map(|i| if stop.load(Ordering::Relaxed) || reused[i] { None } else { crate::photo::load(&files[i]).and_then(|img| embed::patches(&img).ok()) })
                     .collect();
                 if stop.load(Ordering::Relaxed) || tx.send((k, cuts)).is_err() {
                     return;
@@ -541,10 +588,17 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         })
     };
 
-    let mut done = already;
+    let mut processed = 0usize; // photos that were not reused, seen to so far
     let mut outcome = Ok(Flow::Done);
     'shards: for (k, mut cuts) in rx {
         let mut vectors = vec![0f32; cuts.len() * DIM];
+        for i in 0..cuts.len() {
+            if let Some(hit) = hits[k * SHARD + i] {
+                for (slot, b) in vectors[i * DIM..(i + 1) * DIM].iter_mut().zip(earlier.row(hit).chunks_exact(2)) {
+                    *slot = half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+                }
+            }
+        }
         let mut at = 0;
         while at < cuts.len() {
             if ctx.paused() {
@@ -570,13 +624,12 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                     }
                 }
             }
+            processed += (at..end).filter(|&i| hits[k * SHARD + i].is_none()).count();
             at = end;
-            ctx.set_done(done + at);
+            ctx.set_done(already + reused_count + processed);
         }
         let bytes: Vec<u8> = vectors.iter().flat_map(|&x| half::f16::from_f32(x).to_le_bytes()).collect();
         write_atomic(&shard_path(&ctx.dir, k), &bytes).map_err(|e| e.to_string())?;
-        done += cuts.len();
-        ctx.set_done(done);
     }
     stop.store(true, Ordering::Relaxed);
     let _ = producer.join();
@@ -743,7 +796,7 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
         "created": ctx.job.created,
         "photos": ctx.job.photos,
         "world": crate::data::WORLD as u32,
-        "embedding": { "model": "google/embeddinggemma-2", "dim": DIM, "dtype": "float16" },
+        "embedding": { "model": "google/embeddinggemma-2", "dim": DIM, "dtype": "float16", "input": "image" },
     });
     write_atomic(&ctx.dir.join("manifest.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let maps = ctx.dir.parent().ok_or("no maps folder")?;
@@ -752,6 +805,7 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
     let _ = fs::remove_file(ctx.dir.join("files.json"));
     let _ = fs::remove_file(ctx.dir.join("levels.bin"));
     let _ = fs::remove_file(ctx.dir.join("job.json"));
+    let _ = fs::remove_file(ctx.dir.join(".lock"));
     fs::rename(&ctx.dir, &target).map_err(|e| e.to_string())?;
     ctx.shared.state.lock().unwrap().finished = true;
     Ok(Flow::Done)
@@ -760,6 +814,21 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A build's folder is held while it runs: a second run can't start on it, and it is free again afterwards.
+    #[test]
+    fn a_build_folder_has_one_runner() {
+        let dir = std::env::temp_dir().join(format!("photo-map-lock-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!locked(&dir), "nobody holds a new folder");
+        let held = lock(&dir).expect("the first one gets it");
+        assert!(locked(&dir));
+        assert!(lock(&dir).is_none(), "a second one does not");
+        drop(held);
+        assert!(!locked(&dir));
+        assert!(lock(&dir).is_some(), "free again once the first is over");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// Photos come from folders and single files, each once; a job file from before the list reads as one folder.
     #[test]
@@ -770,15 +839,73 @@ mod tests {
         for f in ["a/1.jpg", "a/inner/2.png", "a/notes.txt", "b/3.jpg", "b/4.jpg"] {
             fs::write(temp.join(f), b"x").unwrap();
         }
-        let found = collect_photos(&[temp.join("a"), temp.join("a/1.jpg"), temp.join("b/3.jpg"), temp.join("b/notes.txt")]);
+        let found = collect_photos(&[temp.join("a"), temp.join("a/1.jpg"), temp.join("b/3.jpg"), temp.join("b/notes.txt")], 1);
         let names: Vec<String> = found.iter().map(|p| p.strip_prefix(&temp).unwrap().display().to_string()).collect();
         assert_eq!(names, ["a/1.jpg", "a/inner/2.png", "b/3.jpg"]);
+        let all = [temp.join("a"), temp.join("b")];
+        assert_eq!(collect_photos(&all, 1).len(), 4);
+        assert_eq!(collect_photos(&all, 2).len(), 2, "every second one");
+        assert_eq!(collect_photos(&all, 3).len(), 2, "the first, then the fourth");
         assert_eq!(describe(&[temp.join("a"), temp.join("b/3.jpg"), temp.join("b/4.jpg")]), "1 folder and 2 photos");
         let old: Job = serde_json::from_str(r#"{"name":"x","source":"/photos","created":"","stage":"scan"}"#).unwrap();
         assert_eq!(old.sources, [PathBuf::from("/photos")]);
         let new: Job = serde_json::from_str(r#"{"name":"x","source":["/a","/b/c.jpg"],"created":"","stage":"scan"}"#).unwrap();
         assert_eq!(new.sources.len(), 2);
         fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// A photo an earlier map already holds a vector for (same file, not changed since) is not embedded again: its row is copied.
+    /// Proved by changing a row in the first map to a vector the model would never make, and finding it in the second.
+    #[test]
+    fn reuses_vectors_of_earlier_maps() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let temp = std::env::temp_dir().join(format!("photo-map-reuse-test-{}", std::process::id()));
+        let (source, maps) = (temp.join("photos"), temp.join("maps"));
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&maps).unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for i in 0..24 {
+            let img = image::RgbImage::from_fn(96 + (i % 4) as u32 * 8, 80, |x, y| image::Rgb([(i * 9) as u8, (x * 2) as u8, (y * 3 + i as u32) as u8]));
+            let path = source.join(format!("p{i:02}.png"));
+            img.save(&path).unwrap();
+            fs::File::options().write(true).open(&path).unwrap().set_modified(hour_ago).unwrap(); // older than the map started
+        }
+        let model = embed::shared_model();
+        let build = |name: &str| {
+            let dir = create(&maps, name, &[source.clone()], false, 1).unwrap();
+            let run = Run::start(dir, root.clone(), model.clone(), || {}).unwrap();
+            while run.running() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(run.state().error.is_none(), "{:?}", run.state().error);
+            finished_dir(&maps, name)
+        };
+        let first = build("first");
+        let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(first.join("photos.json")).unwrap()).unwrap();
+        assert!(Path::new(photos[0]["source"].as_str().unwrap()).is_absolute() && photos[0]["source"].as_str().unwrap().ends_with(".png"), "the full path of the file");
+
+        // the first map is the only one the second can reuse from: its row 0 becomes a vector the model would not give
+        let mut raw = fs::read(first.join("embeddings.bin")).unwrap();
+        let marker: Vec<u8> = (0..DIM).flat_map(|d| half::f16::from_f32(if d == 0 { 1.0 } else { 0.0 }).to_le_bytes()).collect();
+        raw[..DIM * 2].copy_from_slice(&marker);
+        fs::write(first.join("embeddings.bin"), &raw).unwrap();
+
+        let second = build("second");
+        let again = fs::read(second.join("embeddings.bin")).unwrap();
+        assert_eq!(&again[..DIM * 2], &marker[..], "row 0 was copied from the first map");
+        assert_eq!(&again[DIM * 2..], &raw[DIM * 2..], "and the others");
+
+        // a file changed since the first map was started is embedded again
+        let changed = first_source_path(&photos);
+        fs::File::options().write(true).open(&changed).unwrap().set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600)).unwrap();
+        let third = build("third");
+        let last = fs::read(third.join("embeddings.bin")).unwrap();
+        assert_ne!(&last[..DIM * 2], &marker[..], "a changed file is embedded again");
+        fs::remove_dir_all(&temp).unwrap();
+
+        fn first_source_path(photos: &[serde_json::Value]) -> PathBuf {
+            PathBuf::from(photos[0]["source"].as_str().unwrap())
+        }
     }
 
     /// A folder of photos becomes a map's vectors, also when the build is paused and continued several times on the way.
@@ -797,9 +924,9 @@ mod tests {
         }
         fs::write(source.join("notes.txt"), "not a photo").unwrap();
 
-        let model = Arc::new(Mutex::new(Some(Gemma::load(&root).unwrap())));
-        let dir = create(&maps, "test map", &[source.clone()], true).unwrap();
-        assert!(create(&maps, "test map", &[source.clone()], true).is_err(), "a second map with the same name");
+        let model = embed::shared_model();
+        let dir = create(&maps, "test map", &[source.clone()], true, 1).unwrap();
+        assert!(create(&maps, "test map", &[source.clone()], true, 1).is_err(), "a second map with the same name");
         // stop and go on a few times at arbitrary moments
         for pause_after_ms in [0u64, 150, 900, 2500] {
             let run = Run::start(dir.clone(), root.clone(), model.clone(), || {}).unwrap();

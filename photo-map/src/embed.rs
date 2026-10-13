@@ -237,6 +237,18 @@ impl Gemma {
     }
 }
 
+/// The one model all the tests share: ONNX Runtime allows one environment per process, and a copy takes 1.7 GB of the card.
+#[cfg(test)]
+pub fn shared_model() -> std::sync::Arc<std::sync::Mutex<Option<Gemma>>> {
+    static MODEL: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Option<Gemma>>>> = std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+            std::sync::Arc::new(std::sync::Mutex::new(Some(Gemma::load(root).unwrap())))
+        })
+        .clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,7 +259,9 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("photo-map/tests/query_vectors.json")).unwrap()).unwrap();
         assert_eq!(fixture["prompt"].as_str().unwrap(), QUERY_PROMPT);
-        let mut model = Gemma::load(root).unwrap();
+        let shared = shared_model();
+        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap();
         eprintln!("on the GPU: {}", model.on_gpu);
         for (k, text) in fixture["texts"].as_array().unwrap().iter().enumerate() {
             let text = text.as_str().unwrap();
@@ -266,7 +280,9 @@ mod tests {
     fn photos_match_python() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("photo-map/tests/image_vectors.json")).unwrap()).unwrap();
-        let mut model = Gemma::load(root).unwrap();
+        let shared = shared_model();
+        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap();
         for (k, file) in fixture["files"].as_array().unwrap().iter().enumerate() {
             let path = root.join("maps/wikivoyage.photomap/originals").join(file.as_str().unwrap());
             let Some(img) = crate::photo::load(&path) else { return };
@@ -301,7 +317,9 @@ mod tests {
         let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
         files.sort();
         let cuts: Vec<Patches> = files.iter().take(96).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
-        let mut model = Gemma::load(root).unwrap();
+        let shared = shared_model();
+        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap();
         model.embed_patches(cuts[..4].iter().map(|c| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens }).collect()); // warm up
         for batch in [1usize, 2, 4, 8, 12, 16] {
             let started = std::time::Instant::now();

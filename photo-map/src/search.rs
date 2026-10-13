@@ -170,7 +170,9 @@ mod tests {
         let n = 88133;
         let Some(vectors) = Vectors::open(&bundle, n) else { return };
         let python: Vec<u16> = std::fs::read(std::path::Path::new("/tmp/wv_ref.u16")).unwrap().chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        let mut model = Gemma::load(root).unwrap();
+        let shared = crate::embed::shared_model();
+        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap();
         let started = std::time::Instant::now();
         let vector = model.embed_query(&query).unwrap();
         let embedded = started.elapsed();

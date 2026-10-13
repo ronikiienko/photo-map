@@ -52,6 +52,14 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     // 2. from 32 px down: pack each level's tiles onto pages and compress; halve the tiles for the next level
     let settings = intel_tex_2::bc7::opaque_basic_settings();
     let mut levels: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
+    // what the encoder makes of a block of zeros (transparent black), the same wherever it is
+    let empty = {
+        let zeros = [0u8; 4 * 4 * 4];
+        let surface = intel_tex_2::RgbaSurface { data: &zeros, width: 4, height: 4, stride: 16 };
+        let mut block = [0u8; 16];
+        intel_tex_2::bc7::compress_blocks_into(&settings, &surface, &mut block);
+        block
+    };
     for level in (0..LEVELS).rev() {
         progress.stage("preparing small pictures (step 2 of 2, compressing them)", LEVELS);
         progress.set_done(LEVELS - 1 - level);
@@ -72,8 +80,16 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
                     px[b..b + s * 4].copy_from_slice(&tiles[a..a + s * 4]);
                 }
             }
+            // the photos fill the first rows of slots of a page; the rest is zeros, which compress to one block, repeated
+            let used_rows = (n - first).min(per_page).div_ceil(per_row) * s;
             let mut blocks = vec![0u8; PAGE * PAGE];
-            px.par_chunks(PAGE * STRIP * 4).zip(blocks.par_chunks_mut(PAGE / 4 * STRIP / 4 * 16)).for_each(|(src, dst)| {
+            px.par_chunks(PAGE * STRIP * 4).zip(blocks.par_chunks_mut(PAGE / 4 * STRIP / 4 * 16)).enumerate().for_each(|(strip, (src, dst))| {
+                if strip * STRIP >= used_rows {
+                    for block in dst.chunks_exact_mut(16) {
+                        block.copy_from_slice(&empty);
+                    }
+                    return;
+                }
                 let surface = intel_tex_2::RgbaSurface { data: src, width: PAGE as u32, height: STRIP as u32, stride: (PAGE * 4) as u32 };
                 intel_tex_2::bc7::compress_blocks_into(&settings, &surface, dst);
             });
@@ -169,5 +185,20 @@ mod tests {
         let len = std::fs::metadata(dir.join("pages_bc7.bin")).unwrap().len() as usize;
         assert_eq!(len, crate::pages::resident_bytes(photos.len()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The shortcut for empty rows: a strip of zeros compresses to one block, the same everywhere.
+    #[test]
+    fn empty_strips_are_one_repeated_block() {
+        let settings = intel_tex_2::bc7::opaque_basic_settings();
+        let encode = |data: &[u8], width: usize, height: usize, out: &mut [u8]| {
+            let surface = intel_tex_2::RgbaSurface { data, width: width as u32, height: height as u32, stride: (width * 4) as u32 };
+            intel_tex_2::bc7::compress_blocks_into(&settings, &surface, out);
+        };
+        let mut one = [0u8; 16];
+        encode(&[0u8; 64], 4, 4, &mut one);
+        let mut strip = vec![0u8; PAGE / 4 * STRIP / 4 * 16];
+        encode(&vec![0u8; PAGE * STRIP * 4], PAGE, STRIP, &mut strip);
+        assert!(strip.chunks_exact(16).all(|b| b == one));
     }
 }

@@ -56,7 +56,7 @@ pub struct Manifest {
 pub struct Photo {
     /// Path inside the bundle (originals/NNNNNN.ext).
     pub file: String,
-    /// Where the photo came from (source folder / path), just a label (not shown yet).
+    /// The full path of the file the photo was made from. Builds use it to find vectors already made for the same file (reuse.rs).
     #[serde(default)]
     #[allow(dead_code)]
     pub source: String,
