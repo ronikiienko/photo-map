@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 pub enum Action {
     Open(PathBuf),
-    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize },
+    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String },
     Pause(PathBuf),
     Continue(PathBuf),
     Discard(PathBuf),
@@ -59,6 +59,8 @@ struct NewMap {
     /// Use every Nth photo.
     every: usize,
     names_as_captions: bool,
+    /// The id of the model that will make the photos' vectors (models.rs).
+    model: String,
 }
 
 impl NewMap {
@@ -95,7 +97,7 @@ impl Home {
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, every: 1, names_as_captions: false });
+        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, every: 1, names_as_captions: false, model: crate::models::DEFAULT.to_string() });
     }
 
     pub fn set_drag_over(&mut self, over: bool) {
@@ -367,7 +369,7 @@ impl Home {
         let response = ui
             .allocate_ui(vec2(COVER, 0.0), |ui| {
                 ui.set_width(COVER);
-                let (rect, response) = ui.allocate_exact_size(vec2(COVER, COVER + 76.0), Sense::click());
+                let (rect, response) = ui.allocate_exact_size(vec2(COVER, COVER + 94.0), Sense::click());
                 let hovered = response.hovered();
                 let p = ui.painter();
                 p.rect_filled(rect, theme::RADIUS, if hovered { Color32::from_rgb(30, 33, 42) } else { Color32::from_rgb(24, 26, 33) });
@@ -384,13 +386,16 @@ impl Home {
                 p.text(rect.min + vec2(12.0, COVER + 6.0), Align2::LEFT_TOP, &e.name, egui::FontId::proportional(15.0), theme::TEXT);
                 let detail = if e.created.is_empty() { format!("{} photos", thousands(e.photos)) } else { format!("{} photos · {}", thousands(e.photos), e.created) };
                 p.text(rect.min + vec2(12.0, COVER + 28.0), Align2::LEFT_TOP, detail, egui::FontId::proportional(12.0), theme::MUTED);
+                // the model that made its vectors (it is the one that searches it)
+                let model = crate::models::spec(&e.model).map_or("unknown model", |s| s.label);
+                p.text(rect.min + vec2(12.0, COVER + 46.0), Align2::LEFT_TOP, model, egui::FontId::proportional(12.0), theme::MUTED);
                 // total on disk, and a bar of what it is made of; "details" opens the explanation
                 let sizes = self.sizes(&ctx, &e.path);
                 let text = sizes.map_or("measuring…".to_string(), |s| format!("{} on disk", storage::human(s.total())));
-                let line = rect.min + vec2(12.0, COVER + 50.0);
+                let line = rect.min + vec2(12.0, COVER + 68.0);
                 let p = ui.painter();
                 p.text(line, Align2::LEFT_TOP, text, egui::FontId::proportional(12.0), theme::TEXT);
-                let bar = egui::Rect::from_min_size(rect.min + vec2(12.0, COVER + 68.0), vec2(COVER - 24.0, 4.0));
+                let bar = egui::Rect::from_min_size(rect.min + vec2(12.0, COVER + 86.0), vec2(COVER - 24.0, 4.0));
                 p.rect_filled(bar, 2.0, Color32::from_rgb(38, 42, 52));
                 if let Some(s) = sizes {
                     let total = s.total().max(1) as f32;
@@ -401,7 +406,7 @@ impl Home {
                         x += w;
                     }
                 }
-                let details = egui::Rect::from_min_size(rect.min + vec2(COVER - 62.0, COVER + 44.0), vec2(56.0, 20.0));
+                let details = egui::Rect::from_min_size(rect.min + vec2(COVER - 62.0, COVER + 62.0), vec2(56.0, 20.0));
                 let more = ui.interact(details, ui.id().with(("details", &e.path)), Sense::click());
                 ui.painter().text(details.right_center() - vec2(4.0, 0.0), Align2::RIGHT_CENTER, "Details", egui::FontId::proportional(12.0), if more.hovered() { theme::ACCENT } else { theme::MUTED });
                 if more.clicked() {
@@ -641,6 +646,22 @@ impl Home {
             theme::segmented(ui, &mut nm.every, &[(1, "All", "every photo"), (2, "1 in 2", "every second photo"), (5, "1 in 5", "every fifth photo"), (10, "1 in 10", "every tenth photo"), (20, "1 in 20", "every twentieth photo")]);
             ui.label(theme::muted("A smaller map takes less time to make, to see whether it is what you want. The photos are picked evenly from the sorted list. Make a bigger one later: photos already understood in your other maps are not done again."));
             ui.add_space(8.0);
+            ui.label("Model");
+            let root = lib.root();
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().button_padding = egui::vec2(12.0, 5.0);
+                for spec in crate::models::ALL.iter() {
+                    let installed = spec.installed(&root);
+                    let tip = if installed { spec.note.to_string() } else { format!("{} Not installed: its files are missing from .cache/onnx/{}.", spec.note, spec.folder) };
+                    ui.add_enabled_ui(installed, |ui| ui.selectable_value(&mut nm.model, spec.id.to_string(), spec.label)).response.on_hover_text(tip);
+                }
+            });
+            if let Some(spec) = crate::models::spec(&nm.model) {
+                ui.label(theme::muted(spec.note));
+            }
+            ui.label(theme::muted("The map is searched with the same model, and vectors from different models are never mixed: photos already understood in your other maps are reused only if those were made with this model too."));
+            ui.add_space(8.0);
             ui.label("Name");
             if ui.add(egui::TextEdit::singleline(&mut nm.name).desired_width(340.0)).changed() {
                 nm.name_edited = true;
@@ -665,7 +686,7 @@ impl Home {
             ui.horizontal(|ui| {
                 let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0);
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
-                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every });
+                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone() });
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;

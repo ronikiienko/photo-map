@@ -10,6 +10,8 @@ pub struct Entry {
     pub photos: usize,
     /// "2026-10-11 14:00", if the map says.
     pub created: String,
+    /// The id of the model the map was made with (models.rs).
+    pub model: String,
 }
 
 /// A map being made that is not finished.
@@ -44,6 +46,7 @@ impl Library {
                     name: manifest["name"].as_str()?.to_string(),
                     photos: manifest["photos"].as_u64()? as usize,
                     created: manifest["created"].as_str().unwrap_or_default().to_string(),
+                    model: manifest["embedding"]["model"].as_str().unwrap_or(crate::models::DEFAULT).to_string(),
                 })
             })
             .collect();

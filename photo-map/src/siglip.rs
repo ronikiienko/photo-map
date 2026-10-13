@@ -1,0 +1,346 @@
+//! SigLIP 2 (photo encoder and text encoder, two separate networks that were trained to put a photo near the words that describe it)
+//! through ONNX Runtime. Made by src/siglip_export.py into .cache/onnx/<model>/: vision_fp16.onnx, text_fp16.onnx, tokenizer.json.
+//!
+//! A photo is squeezed into a square (its shape is not kept), scaled to -1..1; the photo encoder runs on TensorRT when it can (its
+//! libraries are in runtime/tensorrt/) and on the CUDA provider otherwise. The text goes in lower case, cut to 64 tokens with an
+//! end mark and padded to 64 by the tokenizer's own settings.
+
+use crate::embed::{Result, Runtime};
+use crate::models::Spec;
+use image::RgbaImage;
+use ort::ep;
+use ort::session::Session;
+use ort::value::Tensor;
+use std::path::{Path, PathBuf};
+use tokenizers::{Tokenizer, TruncationParams};
+
+/// How many tokens the text encoder takes (what it was trained with).
+const TOKENS: usize = 64;
+/// The most photos TensorRT's engine takes at once (it is built for 1 to this many).
+const BATCH: usize = 4;
+
+pub struct Siglip {
+    id: &'static str,
+    // the environment must outlive the sessions
+    env: ort::environment::Environment,
+    /// Opened with the first photo (it costs video memory, and TensorRT builds its engine then).
+    vision: Option<Session>,
+    text: Session,
+    tokenizer: Tokenizer,
+    dim: usize,
+    size: u32,
+    model_dir: PathBuf,
+    cache: PathBuf,
+    tensorrt: bool,
+    pub on_gpu: bool,
+}
+
+fn err(what: &str) -> impl Fn(ort::Error) -> String + '_ {
+    move |e| format!("{what}: {e}")
+}
+
+/// How long the longer side of a photo must at least be for `prepare`: the shorter side has to be a full `size`, since the
+/// photo is squeezed into a square and a smaller one would be stretched.
+pub fn longest_side_needed(size: u32, width: u32, height: u32) -> u32 {
+    let (long, short) = (width.max(height) as u64, width.min(height).max(1) as u64);
+    ((size as u64 * long).div_ceil(short)) as u32
+}
+
+/// The photo as the encoder takes it: `size` x `size`, red plane then green then blue, each pixel 0..255 scaled to -1..1.
+pub fn prepare(img: &RgbaImage, size: u32) -> Result<Vec<f32>> {
+    if img.width() == 0 || img.height() == 0 {
+        return Err("empty photo".into());
+    }
+    let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+    let rgb = image::imageops::resize(&rgb, size, size, image::imageops::FilterType::Triangle);
+    let plane = (size * size) as usize;
+    let mut out = vec![0f32; 3 * plane];
+    for (i, p) in rgb.pixels().enumerate() {
+        for c in 0..3 {
+            out[c * plane + i] = p[c] as f32 / 127.5 - 1.0;
+        }
+    }
+    Ok(out)
+}
+
+fn unit(mut v: Vec<f32>) -> Vec<f32> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+    v.iter_mut().for_each(|x| *x /= norm);
+    v
+}
+
+impl Siglip {
+    pub fn load(rt: &Runtime, root: &Path, spec: &'static Spec, size: u32) -> Result<Self> {
+        let model_dir = root.join(".cache/onnx").join(spec.folder);
+        for need in spec.files {
+            if !model_dir.join(need).exists() {
+                return Err(format!("missing {}", model_dir.join(need).display()));
+            }
+        }
+        let env = rt.env.clone();
+        let text = Session::builder(&env).and_then(|mut b| b.commit_from_file(model_dir.join("text_fp16.onnx"))).map_err(err("loading the text encoder"))?;
+        let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
+        tokenizer.with_truncation(Some(TruncationParams { max_length: TOKENS, ..Default::default() })).map_err(|e| e.to_string())?;
+        Ok(Self {
+            id: spec.id,
+            env,
+            vision: None,
+            text,
+            tokenizer,
+            dim: spec.dim,
+            size,
+            cache: root.join(".cache/trt").join(spec.folder),
+            model_dir,
+            tensorrt: rt.tensorrt,
+            on_gpu: rt.on_gpu,
+        })
+    }
+
+    pub fn id(&self) -> &'static str {
+        self.id
+    }
+
+    /// A text's vector, unit length.
+    pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>> {
+        let encoding = self.tokenizer.encode(text.to_lowercase(), true).map_err(|e| e.to_string())?;
+        let ids: Vec<i64> = encoding.get_ids().iter().map(|&i| i as i64).collect();
+        if ids.len() != TOKENS {
+            return Err(format!("the tokenizer made {} tokens, expected {TOKENS}", ids.len()));
+        }
+        let outputs = self.text.run(ort::inputs!["input_ids" => Tensor::from_array(([1usize, TOKENS], ids)).map_err(err("tensor"))?]).map_err(err("running the text encoder"))?;
+        let (_, data) = outputs["text_features"].try_extract_tensor::<f32>().map_err(err("reading the result"))?;
+        Ok(unit(data.to_vec()))
+    }
+
+    /// Is the text longer than the 64 tokens the encoder reads?
+    pub fn cuts(&self, text: &str) -> bool {
+        self.tokenizer.encode(text.to_lowercase(), true).is_ok_and(|e| !e.get_overflowing().is_empty())
+    }
+
+    pub fn embed_image(&mut self, img: &RgbaImage) -> Result<Vec<f32>> {
+        let pixels = prepare(img, self.size)?;
+        self.embed_pixels(vec![pixels]).pop().unwrap()
+    }
+
+    /// Prepared photos (see `prepare`), a few at a time.
+    pub fn embed_pixels(&mut self, photos: Vec<Vec<f32>>) -> Vec<Result<Vec<f32>>> {
+        let n = photos.len();
+        let mut out: Vec<Result<Vec<f32>>> = Vec::with_capacity(n);
+        let mut photos = photos.into_iter().peekable();
+        while photos.peek().is_some() {
+            let group: Vec<Vec<f32>> = photos.by_ref().take(BATCH).collect();
+            let count = group.len();
+            match self.encode(group) {
+                Ok(rows) => out.extend(rows.into_iter().map(Ok)),
+                Err(e) => out.extend((0..count).map(|_| Err(e.clone()))),
+            }
+        }
+        out
+    }
+
+    fn encode(&mut self, group: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>> {
+        if self.vision.is_none() {
+            self.open_vision()?;
+        }
+        let batch = group.len();
+        let side = self.size as usize;
+        let pixels: Vec<f32> = group.into_iter().flatten().collect();
+        let vision = self.vision.as_mut().unwrap();
+        let outputs = vision.run(ort::inputs!["pixel_values" => Tensor::from_array(([batch, 3, side, side], pixels)).map_err(err("tensor"))?]).map_err(err("running the photo encoder"))?;
+        let (_, data) = outputs["image_features"].try_extract_tensor::<f32>().map_err(err("reading the result"))?;
+        if data.len() != batch * self.dim {
+            return Err(format!("the photo encoder made {} numbers for {batch} photos", data.len()));
+        }
+        Ok(data.chunks_exact(self.dim).map(|row| unit(row.to_vec())).collect())
+    }
+
+    /// The photo encoder: on TensorRT if it can (its engine is built the first time, about a minute, and kept in .cache/trt/), else
+    /// on the CUDA provider.
+    fn open_vision(&mut self) -> Result<()> {
+        let file = self.model_dir.join("vision_fp16.onnx");
+        if self.tensorrt {
+            match self.open_tensorrt(&file) {
+                Ok(session) => {
+                    self.vision = Some(session);
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("TensorRT is off, the photo encoder runs on CUDA: {e}");
+                    self.tensorrt = false;
+                }
+            }
+        }
+        self.vision = Some(Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?);
+        Ok(())
+    }
+
+    fn open_tensorrt(&self, file: &Path) -> Result<Session> {
+        std::fs::create_dir_all(&self.cache).map_err(|e| e.to_string())?;
+        let side = self.size;
+        let shapes = |n: usize| format!("pixel_values:{n}x3x{side}x{side}");
+        let trt = ep::TensorRT::default()
+            .with_fp16(true)
+            .with_max_workspace_size(1 << 30) // the card is shared with the map: keep the engine's scratch space small
+            .with_engine_cache(true)
+            .with_engine_cache_path(self.cache.display())
+            .with_timing_cache(true)
+            .with_timing_cache_path(self.cache.display())
+            .with_profile_min_shapes(shapes(1))
+            .with_profile_opt_shapes(shapes(BATCH))
+            .with_profile_max_shapes(shapes(BATCH))
+            .build();
+        // (the CUDA provider is already registered for every session by the environment, and takes what TensorRT leaves)
+        Session::builder(&self.env)
+            .and_then(|b| b.with_execution_providers([trt]).map_err(|e| e.into()))
+            .and_then(|mut b| b.commit_from_file(file))
+            .map_err(err("loading the photo encoder on TensorRT"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{self, Model, SIGLIP_BASE_512};
+
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let (dot, na, nb) = a.iter().zip(b).fold((0f32, 0f32, 0f32), |(d, x, y), (p, q)| (d + p * q, x + p * p, y + q * q));
+        dot / (na.sqrt() * nb.sqrt())
+    }
+
+    /// Words and photos come out as PyTorch makes them (.cache/onnx/<model>/reference.json, from src/siglip_export.py). These tests
+    /// swap the loaded model, so run them alone: cargo test --release siglip -- --ignored --test-threads=1 --nocapture
+    #[test]
+    #[ignore]
+    fn siglip_matches_pytorch() {
+        for id in [SIGLIP_BASE_512, models::SIGLIP_BASE_256] {
+            matches_pytorch(id);
+        }
+    }
+
+    fn matches_pytorch(id: &'static str) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let spec = models::spec(id).unwrap();
+        let reference: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join(".cache/onnx").join(spec.folder).join("reference.json")).unwrap()).unwrap();
+        let hub = models::test_hub();
+        assert_eq!(hub.wait_for(id, &|| false), Ok(true));
+        let vector = |v: &serde_json::Value| -> Vec<f32> { v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect() };
+        hub.with(id, |m| {
+            for (text, want) in reference["texts"].as_array().unwrap().iter().zip(reference["text_vectors"].as_array().unwrap()) {
+                let got = m.embed_query(text.as_str().unwrap()).unwrap();
+                let c = cosine(&got, &vector(want));
+                eprintln!("text {:?}: cosine to PyTorch {c:.5}", &text.as_str().unwrap()[..text.as_str().unwrap().len().min(30)]);
+                assert!(c > 0.999, "{c}");
+                assert!((got.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-3, "unit length");
+            }
+            let paths: Vec<&str> = reference["photos"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+            let prepared: Vec<_> = paths.iter().map(|p| spec.prepare(&crate::photo::load(std::path::Path::new(p)).unwrap()).unwrap()).collect();
+            let together = m.embed_prepared(prepared);
+            for ((path, got), want) in paths.iter().zip(together).zip(reference["photo_vectors"].as_array().unwrap()) {
+                let got = got.unwrap();
+                let c = cosine(&got, &vector(want));
+                eprintln!("photo {path}: cosine to PyTorch {c:.5}");
+                assert!(c > 0.99, "{c}"); // our resize is not PIL's, and the card computes in float16
+            }
+            // a photo alone is what it is in a group
+            let alone = m.embed_image(&crate::photo::load(std::path::Path::new(paths[1])).unwrap()).unwrap();
+            let c = cosine(&alone, &vector(&reference["photo_vectors"][1]));
+            assert!(c > 0.99, "{c}");
+        })
+        .unwrap();
+    }
+
+    /// Models can be swapped in the hub and each works after its turn.
+    #[test]
+    #[ignore]
+    fn models_swap() {
+        let hub = models::test_hub();
+        for id in [SIGLIP_BASE_512, models::GEMMA, models::SIGLIP_BASE_256, SIGLIP_BASE_512, models::GEMMA] {
+            assert_eq!(hub.wait_for(id, &|| false), Ok(true));
+            let dim = hub.with(id, |m: &mut Model| m.embed_query("a dog on a beach").unwrap().len()).unwrap();
+            assert_eq!(dim, models::spec(id).unwrap().dim, "{id}");
+            assert!(hub.with("some/other", |_| ()).is_err(), "a model that isn't loaded is refused");
+        }
+    }
+
+    /// How fast the processor alone can read photos and make them ready for the model (what feeds the card), one at a time and on all
+    /// cores (run by hand: cargo test --release siglip_cpu_side_speed -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn siglip_cpu_side_speed() {
+        use rayon::prelude::*;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for (id, name) in [SIGLIP_BASE_512, models::SIGLIP_BASE_256].into_iter().flat_map(|id| ["maps/rare-species.photomap/originals", "maps/wikivoyage.photomap/originals"].map(|n| (id, n))) {
+            let spec = models::spec(id).unwrap();
+            let mut files: Vec<_> = std::fs::read_dir(root.join(name)).unwrap().flatten().map(|e| e.path()).collect();
+            files.sort();
+            let files: Vec<_> = files.into_iter().step_by(23).take(96).collect();
+            let bytes: u64 = files.iter().map(|f| std::fs::metadata(f).unwrap().len()).sum();
+            let (mut read, mut prepare, mut small) = (0f32, 0f32, 0f32);
+            let one = std::time::Instant::now();
+            let mut done = 0;
+            let mut width = 0u32;
+            for f in &files {
+                let t = std::time::Instant::now();
+                let Some(img) = crate::photo::load_for(f, |w, h| spec.longest_side_needed(w, h)) else { continue };
+                read += t.elapsed().as_secs_f32();
+                width += img.width();
+                let t = std::time::Instant::now();
+                spec.prepare(&img).unwrap();
+                prepare += t.elapsed().as_secs_f32();
+                let t = std::time::Instant::now();
+                image::imageops::thumbnail(&img, 64, 64);
+                small += t.elapsed().as_secs_f32();
+                done += 1;
+            }
+            let one = one.elapsed().as_secs_f32();
+            let started = std::time::Instant::now();
+            let n: usize = files.par_iter().filter_map(|f| crate::photo::load_for(f, |w, h| spec.longest_side_needed(w, h)).map(|i| spec.prepare(&i).unwrap())).count();
+            let all = started.elapsed().as_secs_f32();
+            eprintln!(
+                "{}, {name}: {done} photos, {:.0} KB each, {:.0} px wide after reading; one core {:.1} photos/s (read {:.0} ms, prepare {:.0} ms, 64 px copy {:.0} ms each), all cores {:.1} photos/s",
+                spec.label,
+                bytes as f32 / 1024.0 / files.len() as f32,
+                width as f32 / done as f32,
+                done as f32 / one,
+                read * 1000.0 / done as f32,
+                prepare * 1000.0 / done as f32,
+                small * 1000.0 / done as f32,
+                n as f32 / all
+            );
+        }
+    }
+
+    /// How fast the card embeds real photos already made ready, in groups of 4 as the build does (run by hand with the viewer closed:
+    /// cargo test --release siglip_embed_speed -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn siglip_embed_speed() {
+        use rayon::prelude::*;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let hub = models::test_hub();
+        for (id, name) in [SIGLIP_BASE_512, models::SIGLIP_BASE_256].into_iter().flat_map(|id| ["maps/rare-species.photomap/originals", "maps/wikivoyage.photomap/originals"].map(|n| (id, n))) {
+            let spec = models::spec(id).unwrap();
+            assert_eq!(hub.wait_for(id, &|| false), Ok(true));
+            let mut files: Vec<_> = std::fs::read_dir(root.join(name)).unwrap().flatten().map(|e| e.path()).collect();
+            files.sort();
+            let files: Vec<_> = files.into_iter().step_by(11).take(160).collect();
+            let started = std::time::Instant::now();
+            let mut prepared: Vec<_> = files.par_iter().filter_map(|f| crate::photo::load_for(f, |w, h| spec.longest_side_needed(w, h)).map(|i| spec.prepare(&i).unwrap())).collect();
+            let prep = started.elapsed().as_secs_f32();
+            let n = prepared.len();
+            hub.with(id, |m| {
+                let warm: Vec<_> = prepared.drain(..4).collect();
+                m.embed_prepared(warm); // the engine loads on the first photos
+                let rest = prepared.len();
+                let started = std::time::Instant::now();
+                while !prepared.is_empty() {
+                    let group: Vec<_> = prepared.drain(..4.min(prepared.len())).collect();
+                    for r in m.embed_prepared(group) {
+                        r.unwrap();
+                    }
+                }
+                eprintln!("{}, {name}: {n} photos made ready in {prep:.1} s ({:.0} photos/s); the card alone, groups of 4: {:.1} photos/s", spec.label, n as f32 / prep, rest as f32 / started.elapsed().as_secs_f32());
+            })
+            .unwrap();
+        }
+    }
+}

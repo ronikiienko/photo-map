@@ -12,12 +12,14 @@ mod gpu;
 mod home;
 mod layout;
 mod library;
+mod models;
 mod naming;
 mod pages;
 mod regions;
 mod reuse;
 mod photo;
 mod search;
+mod siglip;
 mod storage;
 mod stream;
 mod theme;
@@ -250,19 +252,25 @@ impl Viewer {
         let n = data.n();
         let photo_world = median_neighbour_distance(&data.points);
         self.status.clear();
-        let vectors = search::Vectors::open(&path, n);
+        // the last map's search is over with it: its words, its photo, and what the box said it was
+        self.search.clear();
+        self.photo = None;
+        self.photo_tex = None;
+        self.shown.clear();
+        let vectors = search::Vectors::open(&path, n, data.manifest.dim());
         if !vectors.as_ref().is_some_and(|v| v.has_captions()) {
             self.on = SearchOn::Both; // the choice is hidden for a map without captions
         }
         let in_process = vectors.is_some();
         self.asked = None;
+        self.engine.want(data.manifest.model()); // load the map's model now, so that the first search is quick
         self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, photo_world, sims: Vec::new(), order: Vec::new(), at: None, vectors });
         if !in_process {
             self.status = "this map has no search vectors (embeddings.bin)".into();
         }
     }
 
-    fn wake(&self) -> impl Fn() + Send + 'static {
+    fn wake(&self) -> impl Fn() + Send + Sync + 'static {
         let window = self.window.clone();
         move || window.request_redraw()
     }
@@ -322,7 +330,7 @@ impl Viewer {
                     continue;
                 }
                 self.runs.retain(|r| r.dir != dir);
-                if let Some(run) = build::Run::start(dir, self.library.root(), self.engine.model.clone(), self.wake()) {
+                if let Some(run) = build::Run::start(dir, self.library.root(), self.engine.hub.clone(), self.wake()) {
                     self.runs.push(run);
                     refresh = true;
                     break;
@@ -356,7 +364,7 @@ impl Viewer {
         use home::Action;
         match action {
             Action::Open(path) => self.open(path),
-            Action::Create { name, sources, names_as_captions, every } => match build::create(self.library.dir(), &name, &sources, names_as_captions, every) {
+            Action::Create { name, sources, names_as_captions, every, model } => match build::create(self.library.dir(), &name, &sources, names_as_captions, every, &model) {
                 Ok(dir) => {
                     self.library.refresh();
                     self.queue.push(dir);
@@ -437,11 +445,12 @@ impl Viewer {
         let color = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
         self.photo_tex = Some(self.ui.ctx.load_texture("query photo", color, egui::TextureOptions::LINEAR));
         self.photo = Some(path);
+        self.search.clear(); // a search is words or a photo, not both: the photo replaces the words
         true
     }
 
-    /// Enter in the search box, or a photo dropped on the window: the words and/or the photo go to the model, whose answer
-    /// comes back through poll_engine. Nothing to search for clears the last search.
+    /// Enter in the search box, or a photo dropped on the window: the words or the photo (one of them, never both) go to the model,
+    /// whose answer comes back through poll_engine. Nothing to search for clears the last search.
     fn ask(&mut self) {
         let text = self.search.trim().to_string();
         // a path to a photo typed or pasted in the box (from a file manager, or dragged on a terminal) is a photo search
@@ -462,23 +471,29 @@ impl Viewer {
             self.status.clear();
         } else if m.vectors.is_none() {
             self.status = "this map has no search vectors (embeddings.bin)".into();
-        } else if let Some(why) = &self.engine.failed {
+        } else if models::spec(m.data.manifest.model()).is_none() {
+            self.status = format!("this map was made with {}, which this version doesn't know", m.data.manifest.model());
+        } else if !models::spec(m.data.manifest.model()).is_some_and(|s| s.installed(&self.library.root())) {
+            let spec = models::spec(m.data.manifest.model()).unwrap();
+            self.status = format!("this map was made with {}, whose files are missing (.cache/onnx/{})", spec.label, spec.folder);
+        } else if let Some(why) = self.engine.failed() {
             self.status = format!("search can't start: {why}");
         } else {
-            self.asked = Some(self.engine.ask(&text, self.photo.as_deref()));
-            self.shown = [text, self.photo.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()]
-                .into_iter()
-                .filter(|t| !t.is_empty())
-                .collect::<Vec<_>>()
-                .join(" + ");
-            self.status = if self.engine.ready.is_some() { "searching…".into() } else { "loading the search model, it will run when ready…".into() };
+            let model = m.data.manifest.model().to_string();
+            let (query, shown) = match &self.photo {
+                Some(path) => (search::Query::Photo(path.clone()), path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                None => (search::Query::Words(text.clone()), text),
+            };
+            self.asked = Some(self.engine.ask(&model, query));
+            self.shown = shown;
+            self.status = if self.engine.ready(&model).is_some() { "searching…".into() } else { "loading the search model, it will run when ready…".into() };
         }
     }
 
     /// What the text model has said: a query's vector becomes the photos' cosines, shown at once.
     fn poll_engine(&mut self) {
         for event in self.engine.poll() {
-            let search::Event::Vector { id, vector } = event else { continue };
+            let search::Event::Vector { id, vector, note } = event;
             if self.asked != Some(id) {
                 continue; // an older query, or the map changed
             }
@@ -489,6 +504,9 @@ impl Viewer {
                     m.sims = vectors.cosines(&v);
                     if let Some((min, max)) = self.apply_search() {
                         self.camera.fly_to(self.camera.fit(min, max));
+                    }
+                    if let Some(note) = note {
+                        self.status = format!("{} - {note}", self.status);
                     }
                 }
                 (Err(e), _) => self.status = format!("couldn't search: {e}"),
@@ -796,6 +814,7 @@ impl Viewer {
             self.photo = None;
             self.photo_tex = None;
             self.ask();
+            self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box"))); // ready to type
         }
         if actions.ask {
             self.ask();
@@ -1092,13 +1111,15 @@ impl Viewer {
                         });
                         // whether a search can run now
                         let searchable = self.map.as_ref().is_some_and(|m| m.vectors.is_some());
-                        if let Some(why) = &self.engine.failed {
-                            ui.label(theme::muted("search off")).on_hover_text(why.as_str());
+                        let map_model = self.map.as_ref().map(|m| m.data.manifest.model().to_string());
+                        let hint = map_model.as_deref().and_then(models::spec).map_or("Search the map: describe what you look for, or drop in a photo", |s| s.query_hint);
+                        if let Some(why) = self.engine.failed() {
+                            ui.label(theme::muted("search off")).on_hover_text(why);
                             theme::dot(ui, theme::MUTED);
                         } else if self.map.is_some() && !searchable {
                             ui.label(theme::muted("map not searchable")).on_hover_text("it has no embeddings.bin of the right size");
                             theme::dot(ui, theme::MUTED);
-                        } else if let Some(gpu) = self.engine.ready {
+                        } else if let Some(gpu) = map_model.as_deref().and_then(|m| self.engine.ready(m)) {
                             ui.label(theme::muted(if gpu { "search ready" } else { "search ready (CPU)" })).on_hover_text("The AI model that turns your words or photo into numbers is loaded. It runs on this computer, nothing is sent anywhere.");
                             theme::dot(ui, theme::OK);
                         } else if self.map.is_some() {
@@ -1106,34 +1127,48 @@ impl Viewer {
                             ui.spinner();
                         }
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            let edit = ui.add(
-                                egui::TextEdit::singleline(&mut self.search)
-                                    .hint_text("Search the map: describe what you look for, or drop in a photo")
-                                    .margin(egui::Margin::symmetric(10, 6))
-                                    .desired_width(ui.available_width()),
-                            );
-                            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                actions.ask = true;
+                            if let Some(photo) = &self.photo {
+                                // a search is a photo or words, never both: while a photo is the search it takes the place of the box
+                                let name = photo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                egui::Frame::new()
+                                    .fill(egui::Color32::from_rgb(30, 33, 42))
+                                    .stroke(egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.6)))
+                                    .corner_radius(6.0)
+                                    .inner_margin(egui::Margin::symmetric(8, 4))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width() - 2.0);
+                                        ui.horizontal(|ui| {
+                                            if let Some(tex) = &self.photo_tex {
+                                                ui.add(egui::Image::new((tex.id(), egui::vec2(28.0 * tex.aspect_ratio(), 28.0))).corner_radius(4));
+                                            }
+                                            ui.label(format!("Photos like {name}"));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.button("× Search with words instead").on_hover_text("stop searching by this photo, clear the matches and type words").clicked() {
+                                                    actions.clear_photo = true;
+                                                }
+                                            });
+                                        });
+                                    });
+                            } else {
+                                let edit = ui.add(
+                                    egui::TextEdit::singleline(&mut self.search)
+                                        .id(egui::Id::new("search-box"))
+                                        .hint_text(hint)
+                                        .margin(egui::Margin::symmetric(10, 6))
+                                        .desired_width(ui.available_width()),
+                                );
+                                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    actions.ask = true;
+                                }
                             }
                         });
                     });
                 });
                 // row 2, once there is something to say: the photo searched with, the matches and how to go through them, the status
                 let (found, at) = self.map.as_ref().map_or((0, None), |m| (m.order.len(), m.at));
-                if self.photo.is_some() || found > 0 || !self.status.is_empty() {
+                if found > 0 || !self.status.is_empty() {
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
-                        if let Some(photo) = &self.photo {
-                            if let Some(tex) = &self.photo_tex {
-                                ui.add(egui::Image::new((tex.id(), egui::vec2(24.0 * tex.aspect_ratio(), 24.0))).corner_radius(4));
-                            }
-                            let name = photo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                            ui.label(theme::muted(name));
-                            if ui.small_button("×").on_hover_text("remove the photo and search again").clicked() {
-                                actions.clear_photo = true;
-                            }
-                            ui.separator();
-                        }
                         if found > 0 {
                             if ui.button("Prev").on_hover_text("the previous match (P or [)").clicked() {
                                 actions.step = -1;
@@ -1171,7 +1206,7 @@ impl Viewer {
                         ui.label(theme::muted(
                             "Every photo is turned into numbers that describe what it shows, and photos that look alike are placed close together. \
                              Zoom in and similar photos sit side by side; the names mark regions of the map. \
-                             Search compares your words, or a photo you drop in, with every photo and highlights the best matches.",
+                             Search compares your words, or a photo you drop in (one or the other), with every photo and highlights the best matches.",
                         ));
                         ui.add_space(8.0);
                         egui::Grid::new("keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {

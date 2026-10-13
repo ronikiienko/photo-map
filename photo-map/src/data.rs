@@ -50,6 +50,44 @@ pub const WORLD: f32 = 10000.0;
 pub struct Manifest {
     pub name: String,
     pub photos: usize,
+    #[serde(default)]
+    embedding: Embedding,
+}
+
+/// What the vectors of a map are: which model made them, and how many numbers each has. A map without it (made before models could
+/// be chosen) was made with the default.
+#[derive(Deserialize)]
+struct Embedding {
+    #[serde(default = "default_model")]
+    model: String,
+    #[serde(default = "default_dim")]
+    dim: usize,
+}
+
+impl Default for Embedding {
+    fn default() -> Self {
+        Self { model: default_model(), dim: default_dim() }
+    }
+}
+
+fn default_model() -> String {
+    crate::models::DEFAULT.to_string()
+}
+
+fn default_dim() -> usize {
+    crate::models::spec(crate::models::DEFAULT).map_or(768, |s| s.dim)
+}
+
+impl Manifest {
+    /// The id of the model the map was made with (and has to be searched with).
+    pub fn model(&self) -> &str {
+        &self.embedding.model
+    }
+
+    /// How many numbers each vector of the map has.
+    pub fn dim(&self) -> usize {
+        self.embedding.dim
+    }
 }
 
 #[derive(Deserialize)]

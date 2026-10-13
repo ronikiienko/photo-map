@@ -1,112 +1,119 @@
-//! Search without Python: the text model (embed.rs) runs on a thread of its own, and a map's photo vectors are compared with the
-//! query's vector here. A map's vectors are two files in its bundle: embeddings.bin (the photos' images, float16, 768 numbers each) and
-//! captions.bin (the captions', same layout; the photos without a caption have zeros). Gemma is the only model.
+//! Search without Python: the text model (models.rs) runs on a thread of its own, and a map's photo vectors are compared with the
+//! query's vector here. A map's vectors are two files in its bundle: embeddings.bin (the photos' images, float16, as many numbers
+//! each as the map's model makes) and captions.bin (the captions', same layout; the photos without a caption have zeros). A map is
+//! searched with the model it was made with.
 
-use crate::embed::Gemma;
+use crate::models::{self, Hub, Model};
 use half::f16;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-
-const DIM: usize = 768;
 
 /// What the text model thread says.
 pub enum Event {
-    /// The model is loaded (on the GPU or not).
-    Ready { gpu: bool },
-    /// It couldn't be loaded.
-    Failed(String),
     /// The vector of a query (`id`: the number `ask` returned): the words' and the photo's vectors together.
-    Vector { id: u64, vector: Result<Vec<f32>, String> },
+    /// `note`: something to tell the user about the search (a text cut short).
+    Vector { id: u64, vector: Result<Vec<f32>, String>, note: Option<String> },
+}
+
+/// What is searched for: words, or a photo, never both. (Adding their two vectors would mean something only for a model whose words
+/// are about as close to its photos as photos are to each other; for SigLIP they are not - a caption is 0.17 like its own photo, a
+/// photo 0.78 like its nearest photo - and one model without it would make a feature that works on some maps and not on others.)
+#[derive(Clone)]
+pub enum Query {
+    Words(String),
+    Photo(PathBuf),
+}
+
+struct Request {
+    id: u64,
+    model: String,
+    query: Query,
 }
 
 pub struct Engine {
-    to_model: Sender<(u64, String, Option<PathBuf>)>,
+    to_model: Sender<Request>,
     from_model: Receiver<Event>,
     next: u64,
-    pub ready: Option<bool>,
-    pub failed: Option<String>,
-    /// The model, once loaded: shared with map building, which embeds photos with it (one copy on the card).
-    pub model: Arc<Mutex<Option<Gemma>>>,
+    /// The loaded model, shared with map building, which embeds photos with it (one copy on the card).
+    pub hub: Arc<Hub>,
 }
 
 impl Engine {
-    /// Start loading the model on a thread (a few seconds); `ask` can be called at once, it waits its turn.
-    pub fn start(root: PathBuf, wake: impl Fn() + Send + 'static) -> Self {
-        let (to_model, requests) = channel::<(u64, String, Option<PathBuf>)>();
+    /// Start the model thread. Nothing is loaded until a model is asked for (`want`, `ask`).
+    pub fn start(root: PathBuf, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let wake = Arc::new(wake);
+        let hub = Hub::start(root, {
+            let wake = wake.clone();
+            move || wake()
+        });
+        let (to_model, requests) = channel::<Request>();
         let (events, from_model) = channel();
-        let model = Arc::new(Mutex::new(None));
-        let shared = model.clone();
+        let shared = hub.clone();
         std::thread::spawn(move || {
-            let started = std::time::Instant::now();
-            let loaded = match Gemma::load(&root) {
-                Ok(m) => m,
-                Err(e) => {
-                    let _ = events.send(Event::Failed(e));
-                    wake();
-                    return;
-                }
-            };
-            eprintln!("search model ready ({}) after {:.1}s", if loaded.on_gpu { "GPU" } else { "CPU" }, started.elapsed().as_secs_f32());
-            let _ = events.send(Event::Ready { gpu: loaded.on_gpu });
-            *shared.lock().unwrap() = Some(loaded);
-            wake();
-            while let Ok((id, text, photo)) = requests.recv() {
-                let vector = match shared.lock().unwrap().as_mut() {
-                    Some(m) => query_vector(m, &text, photo.as_deref()),
-                    None => Err("the model is not loaded".into()),
+            while let Ok(Request { id, model, query }) = requests.recv() {
+                let (vector, note) = match shared.wait_for(&model, &|| false) {
+                    Ok(_) => match shared.with(&model, |m| query_vector(m, &model, &query)) {
+                        Ok(Ok((v, note))) => (Ok(v), note),
+                        Ok(Err(e)) | Err(e) => (Err(e), None),
+                    },
+                    Err(e) => (Err(e), None),
                 };
-                let _ = events.send(Event::Vector { id, vector });
+                let _ = events.send(Event::Vector { id, vector, note });
                 wake();
             }
         });
-        Self { to_model, from_model, next: 0, ready: None, failed: None, model }
+        Self { to_model, from_model, next: 0, hub }
     }
 
-    /// Ask for the vector of some words and/or a photo (their vectors added: the one between them).
-    pub fn ask(&mut self, text: &str, photo: Option<&Path>) -> u64 {
+    /// Start loading the model for a map (so that the first search is quick). Returns at once.
+    pub fn want(&self, model: &str) {
+        self.hub.want(model);
+    }
+
+    /// Is this model loaded? Some(on the graphics card).
+    pub fn ready(&self, model: &str) -> Option<bool> {
+        let state = self.hub.state();
+        (state.loaded.as_deref() == Some(model)).then_some(state.on_gpu)
+    }
+
+    /// Why the model couldn't be loaded, if it couldn't.
+    pub fn failed(&self) -> Option<String> {
+        self.hub.state().failed
+    }
+
+    /// Ask for the vector of some words or a photo, made by this model.
+    pub fn ask(&mut self, model: &str, query: Query) -> u64 {
         self.next += 1;
-        let _ = self.to_model.send((self.next, text.to_string(), photo.map(Path::to_path_buf)));
+        let _ = self.to_model.send(Request { id: self.next, model: model.to_string(), query });
         self.next
     }
 
     /// Whatever the thread has said since the last call.
     pub fn poll(&mut self) -> Vec<Event> {
-        let events: Vec<Event> = self.from_model.try_iter().collect();
-        for e in &events {
-            match e {
-                Event::Ready { gpu } => self.ready = Some(*gpu),
-                Event::Failed(why) => self.failed = Some(why.clone()),
-                Event::Vector { .. } => {}
-            }
-        }
-        events
+        self.from_model.try_iter().collect()
     }
 }
 
-fn query_vector(model: &mut Gemma, text: &str, photo: Option<&Path>) -> Result<Vec<f32>, String> {
-    let mut sum = vec![0f32; DIM];
-    let mut parts = 0;
-    if !text.trim().is_empty() {
-        for (s, v) in sum.iter_mut().zip(model.embed_query(text.trim())?) {
-            *s += v;
+/// The vector of a search (unit length), and a note if the model could not read all of it.
+fn query_vector(model: &mut Model, id: &str, query: &Query) -> Result<(Vec<f32>, Option<String>), String> {
+    let spec = models::spec(id).ok_or("unknown model")?;
+    match query {
+        Query::Words(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("nothing to search for".into());
+            }
+            let note = spec.max_tokens.filter(|_| model.query_cut(text)).map(|n| format!("{} reads only the first {n} tokens of a text (roughly {} words); the rest was ignored", spec.label, n * 2 / 3));
+            Ok((model.embed_query(text)?, note))
         }
-        parts += 1;
-    }
-    if let Some(path) = photo {
-        let img = crate::photo::load_for(path, crate::embed::longest_side_needed).ok_or("can't read that photo")?;
-        for (s, v) in sum.iter_mut().zip(model.embed_image(&img)?) {
-            *s += v;
+        Query::Photo(path) => {
+            let img = crate::photo::load_for(path, |w, h| spec.longest_side_needed(w, h)).ok_or("can't read that photo")?;
+            Ok((model.embed_image(&img)?, None))
         }
-        parts += 1;
     }
-    if parts == 0 {
-        return Err("nothing to search for".into());
-    }
-    let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
-    Ok(sum.into_iter().map(|x| x / norm).collect())
 }
 
 /// A map's vectors, memory-mapped.
@@ -115,17 +122,19 @@ pub struct Vectors {
     captions: Option<Mmap>,
     /// Which photos have a caption vector (a row of zeros is none).
     n: usize,
+    /// How many numbers each vector has.
+    dim: usize,
 }
 
 impl Vectors {
     /// None if the map has no vectors (embeddings.bin), or they are the wrong size for its photos.
-    pub fn open(bundle: &Path, n: usize) -> Option<Self> {
+    pub fn open(bundle: &Path, n: usize, dim: usize) -> Option<Self> {
         let map = |name: &str| {
             let file = std::fs::File::open(bundle.join(name)).ok()?;
             let map = unsafe { Mmap::map(&file) }.ok()?;
-            (map.len() == n * DIM * 2).then_some(map)
+            (map.len() == n * dim * 2).then_some(map)
         };
-        Some(Self { images: map("embeddings.bin")?, captions: map("captions.bin"), n })
+        Some(Self { images: map("embeddings.bin")?, captions: map("captions.bin"), n, dim })
     }
 
     pub fn has_captions(&self) -> bool {
@@ -136,7 +145,7 @@ impl Vectors {
     /// 0 for a photo with no caption). The query is a unit vector, so is each photo's.
     pub fn cosines(&self, query: &[f32]) -> Vec<u16> {
         let dots = |data: &Mmap| -> Vec<f32> {
-            data.par_chunks_exact(DIM * 2)
+            data.par_chunks_exact(self.dim * 2)
                 .map(|row| {
                     row.chunks_exact(2).zip(query).map(|(b, q)| f16::from_le_bytes([b[0], b[1]]).to_f32() * q).sum::<f32>()
                 })
@@ -146,7 +155,7 @@ impl Vectors {
         let mut out: Vec<u16> = dots(&self.images).into_iter().map(quantise).collect();
         match &self.captions {
             Some(captions) => {
-                let has = |i: usize| captions[i * DIM * 2..(i + 1) * DIM * 2].iter().any(|&b| b != 0);
+                let has = |i: usize| captions[i * self.dim * 2..(i + 1) * self.dim * 2].iter().any(|&b| b != 0);
                 out.extend(dots(captions).into_iter().enumerate().map(|(i, c)| if has(i) { quantise(c) } else { 0 }));
             }
             None => out.extend(std::iter::repeat_n(0, self.n)),
@@ -168,10 +177,10 @@ mod tests {
         let Ok(answer) = std::fs::read(std::path::Path::new("/tmp/wv_ref.json")) else { return };
         let query = serde_json::from_slice::<serde_json::Value>(&answer).unwrap()["query"].as_str().unwrap().to_string();
         let n = 88133;
-        let Some(vectors) = Vectors::open(&bundle, n) else { return };
+        let Some(vectors) = Vectors::open(&bundle, n, 768) else { return };
         let python: Vec<u16> = std::fs::read(std::path::Path::new("/tmp/wv_ref.u16")).unwrap().chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        let shared = crate::embed::shared_model();
-        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let shared = crate::models::test_hub();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let model = guard.as_mut().unwrap();
         let started = std::time::Instant::now();
         let vector = model.embed_query(&query).unwrap();

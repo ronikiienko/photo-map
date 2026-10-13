@@ -1,12 +1,11 @@
 //! Naming regions: a plain-English label for each region of a map (what src/name_regions.py did). The label vocabulary (vocab/*.txt,
-//! about 4,500 phrases) is embedded with the same model as the photos; a region's average vector, less the whole map's average, is
+//! about 4,500 phrases) is embedded with the same model as the photos (and kept per model: another model's vectors are no use here); a region's average vector, less the whole map's average, is
 //! compared with every phrase's vector, and the best match - with a small bonus for common phrases - is the region's name.
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const DIM: usize = 768;
 /// How much a phrase's commonness (log10: 1000 for the most basic ... 0.1 for the rarest) adds to its score.
 const COMMON: f32 = 0.01;
 /// Regions of fewer photos stay unnamed, and so do levels of regions of about 10 photos or fewer (the finest).
@@ -48,24 +47,40 @@ fn key(phrases: &[Phrase]) -> u64 {
     h
 }
 
-/// The phrases' vectors (n x 768, row by row), from the cache in .cache/vocab/ or made now with `embed` (told how far it is).
-pub fn vectors(root: &Path, phrases: &[Phrase], embed: &mut dyn FnMut(&str) -> Result<Vec<f32>, String>, progress: &dyn Fn(usize, usize), paused: &dyn Fn() -> bool) -> Result<Option<Vec<f32>>, String> {
+/// The file name part for a model's cache: its id with the slashes made harmless.
+fn slug(model: &str) -> String {
+    model.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect()
+}
+
+/// The phrases' vectors (n x dim, row by row), from the cache in .cache/vocab/ or made now with `embed` (told how far it is). The
+/// cache is per model: `model` is the id of the one `embed` is.
+pub fn vectors(root: &Path, model: &str, dim: usize, phrases: &[Phrase], embed: &mut dyn FnMut(&str) -> Result<Vec<f32>, String>, progress: &dyn Fn(usize, usize), paused: &dyn Fn() -> bool) -> Result<Option<Vec<f32>>, String> {
     let dir = root.join(".cache/vocab");
-    let (bin, stamp) = (dir.join("curated2.f16"), dir.join("curated2.key"));
+    let name = slug(model);
+    let (bin, stamp) = (dir.join(format!("curated2.{name}.f16")), dir.join(format!("curated2.{name}.key")));
+    // the cache from before models could be chosen was Gemma's
+    if model == crate::models::GEMMA && !bin.exists() {
+        let _ = std::fs::rename(dir.join("curated2.f16"), &bin);
+        let _ = std::fs::rename(dir.join("curated2.key"), &stamp);
+    }
     let want = key(phrases).to_string();
     if std::fs::read_to_string(&stamp).ok().as_deref() == Some(want.as_str()) {
         if let Ok(raw) = std::fs::read(&bin) {
-            if raw.len() == phrases.len() * DIM * 2 {
+            if raw.len() == phrases.len() * dim * 2 {
                 return Ok(Some(raw.chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect()));
             }
         }
     }
-    let mut all = Vec::with_capacity(phrases.len() * DIM);
+    let mut all = Vec::with_capacity(phrases.len() * dim);
     for (i, p) in phrases.iter().enumerate() {
         if paused() {
             return Ok(None);
         }
-        all.extend(embed(&p.name)?);
+        let v = embed(&p.name)?;
+        if v.len() != dim {
+            return Err(format!("the model made {} numbers for a phrase, expected {dim}", v.len()));
+        }
+        all.extend(v);
         progress(i + 1, phrases.len());
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -89,20 +104,20 @@ fn unit(v: &mut [f32]) {
     v.iter_mut().for_each(|x| *x /= norm);
 }
 
-/// Per level, the named regions (biggest first). `vectors`: n x 768; `xy`: x, y per photo; `levels`: a region number per photo per level.
-pub fn name_levels(vectors: &[f32], xy: &[f32], levels: &[Vec<u32>], phrases: &[Phrase], phrase_vectors: &[f32]) -> Vec<Vec<Label>> {
+/// Per level, the named regions (biggest first). `vectors`: n x `dim`; `xy`: x, y per photo; `levels`: a region number per photo per level.
+pub fn name_levels(dim: usize, vectors: &[f32], xy: &[f32], levels: &[Vec<u32>], phrases: &[Phrase], phrase_vectors: &[f32]) -> Vec<Vec<Label>> {
     let n = xy.len() / 2;
     // the phrases, centred on their own average so generic ones don't win everywhere, unit length
     let mut v = phrase_vectors.to_vec();
-    let mean: Vec<f32> = (0..DIM).map(|d| v.chunks_exact(DIM).map(|r| r[d]).sum::<f32>() / phrases.len() as f32).collect();
-    for row in v.chunks_exact_mut(DIM) {
+    let mean: Vec<f32> = (0..dim).map(|d| v.chunks_exact(dim).map(|r| r[d]).sum::<f32>() / phrases.len() as f32).collect();
+    for row in v.chunks_exact_mut(dim) {
         row.iter_mut().zip(&mean).for_each(|(x, m)| *x -= m);
         unit(row);
     }
     let bonus: Vec<f32> = phrases.iter().map(|p| COMMON * p.common.log10()).collect();
     // the map's average photo
-    let mut map_mean = vec![0f32; DIM];
-    for row in vectors.chunks_exact(DIM) {
+    let mut map_mean = vec![0f32; dim];
+    for row in vectors.chunks_exact(dim) {
         map_mean.iter_mut().zip(row).for_each(|(m, x)| *m += x / n as f32);
     }
 
@@ -122,14 +137,14 @@ pub fn name_levels(vectors: &[f32], xy: &[f32], levels: &[Vec<u32>], phrases: &[
                     .par_iter()
                     .filter(|m| m.len() >= MIN_PHOTOS)
                     .map(|m| {
-                        let mut region = vec![0f32; DIM];
+                        let mut region = vec![0f32; dim];
                         for &i in m {
-                            region.iter_mut().zip(&vectors[i as usize * DIM..(i as usize + 1) * DIM]).for_each(|(r, x)| *r += x / m.len() as f32);
+                            region.iter_mut().zip(&vectors[i as usize * dim..(i as usize + 1) * dim]).for_each(|(r, x)| *r += x / m.len() as f32);
                         }
                         region.iter_mut().zip(&map_mean).for_each(|(r, a)| *r -= a);
                         unit(&mut region);
                         let best = (0..phrases.len())
-                            .map(|w| (v[w * DIM..(w + 1) * DIM].iter().zip(&region).map(|(a, b)| a * b).sum::<f32>() + bonus[w], w))
+                            .map(|w| (v[w * dim..(w + 1) * dim].iter().zip(&region).map(|(a, b)| a * b).sum::<f32>() + bonus[w], w))
                             .max_by(|a, b| a.0.total_cmp(&b.0))
                             .map_or(0, |b| b.1);
                         // the label sits at the photo nearest the region's centre
@@ -162,5 +177,30 @@ mod tests {
         let common = |name: &str| list.iter().find(|p| p.name == name).map(|p| p.common);
         assert_eq!(common("sky"), Some(1000.0)); // round 1b counts as round 1
         assert!(list.iter().any(|p| p.common < 0.5)); // round 5
+    }
+
+    /// The vocabulary's vectors are kept per model: another model gets its own, made with its own `embed`, and the first keeps its.
+    #[test]
+    fn the_vocabulary_is_kept_per_model() {
+        let root = std::env::temp_dir().join(format!("photo-map-vocab-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let phrases = vec![Phrase { name: "sky".into(), common: 1000.0 }, Phrase { name: "sea".into(), common: 1000.0 }];
+        let make = |model: &str, dim: usize, value: f32| {
+            let mut calls = 0;
+            let mut embed = |_: &str| {
+                calls += 1;
+                Ok(vec![value; dim])
+            };
+            let v = vectors(&root, model, dim, &phrases, &mut embed, &|_, _| {}, &|| false).unwrap().unwrap();
+            (v, calls)
+        };
+        let (a, calls) = make("model/a", 4, 0.5);
+        assert_eq!((a.len(), calls), (8, 2), "made now");
+        let (a_again, calls) = make("model/a", 4, 9.0);
+        assert_eq!((a_again, calls), (a.clone(), 0), "kept: not made again");
+        let (b, calls) = make("model/b", 6, 0.25);
+        assert_eq!((b.len(), calls), (12, 2), "another model makes its own, whatever size");
+        assert_eq!(make("model/a", 4, 9.0).0, a, "and the first one's are still there");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

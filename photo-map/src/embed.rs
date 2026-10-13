@@ -135,17 +135,20 @@ fn err(what: &str) -> impl Fn(ort::Error) -> String + '_ {
     move |e| format!("{what}: {e}")
 }
 
-impl Gemma {
-    /// Load the model. `root`: the project folder (with runtime/ and .cache/).
-    pub fn load(root: &Path) -> Result<Self> {
+/// What every model shares: the ONNX Runtime environment (one per process), and whether the graphics card and TensorRT can be used.
+pub struct Runtime {
+    pub env: Environment,
+    pub on_gpu: bool,
+    pub tensorrt: bool,
+}
+
+impl Runtime {
+    /// Start ONNX Runtime from the project folder (runtime/), with the CUDA libraries loaded by full path (a missing one means no GPU).
+    pub fn start(root: &Path) -> Result<Self> {
         let onnx = root.join("runtime/ort/libonnxruntime.so");
-        let model_dir = root.join(".cache/onnx/embeddinggemma-2");
-        for need in [&onnx, &model_dir.join("onnx/model_fp16.onnx"), &model_dir.join("tokenizer.json")] {
-            if !need.exists() {
-                return Err(format!("missing {}", need.display()));
-            }
+        if !onnx.exists() {
+            return Err(format!("missing {}", onnx.display()));
         }
-        // the CUDA libraries, by full path (a missing one just means no GPU)
         let cuda_dir: PathBuf = root.join("runtime/cuda");
         let on_gpu = CUDA_LIBS.iter().all(|l| ort::util::preload_dylib(cuda_dir.join(l)).is_ok())
             && CUDNN_LIBS.iter().all(|l| ort::util::preload_dylib(root.join("runtime/cudnn").join(l)).is_ok());
@@ -154,14 +157,27 @@ impl Gemma {
             env = env.with_execution_providers([ep::CUDA::default().with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested).build()]); // allocate what is needed, not the next power of two (the card is shared with the map)
         }
         let env = env.build().map_err(err("starting ONNX Runtime"))?;
+        let tensorrt = on_gpu && TENSORRT_LIBS.iter().all(|l| ort::util::preload_dylib(root.join("runtime/tensorrt").join(l)).is_ok());
+        Ok(Self { env, on_gpu, tensorrt })
+    }
+}
+
+impl Gemma {
+    /// Load the model into a running ONNX Runtime. `root`: the project folder (with runtime/ and .cache/).
+    pub fn load_with(rt: &Runtime, root: &Path) -> Result<Self> {
+        let model_dir = root.join(".cache/onnx/embeddinggemma-2");
+        for need in [&model_dir.join("onnx/model_fp16.onnx"), &model_dir.join("tokenizer.json")] {
+            if !need.exists() {
+                return Err(format!("missing {}", need.display()));
+            }
+        }
+        let env = rt.env.clone();
         let session = Session::builder(&env)
             .and_then(|mut b| b.commit_from_file(model_dir.join("onnx/model_fp16.onnx")))
             .map_err(err("loading the model"))?;
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
-        let tensorrt = on_gpu
-            && model_dir.join("onnx/vision_encoder_fp16_trt.onnx").exists()
-            && model_dir.join("onnx/vision_pool.onnx").exists()
-            && TENSORRT_LIBS.iter().all(|l| ort::util::preload_dylib(root.join("runtime/tensorrt").join(l)).is_ok());
+        let on_gpu = rt.on_gpu;
+        let tensorrt = rt.tensorrt && model_dir.join("onnx/vision_encoder_fp16_trt.onnx").exists() && model_dir.join("onnx/vision_pool.onnx").exists();
         Ok(Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt })
     }
 
@@ -365,14 +381,8 @@ impl Gemma {
 
 /// The one model all the tests share: ONNX Runtime allows one environment per process, and a copy takes 1.7 GB of the card.
 #[cfg(test)]
-pub fn shared_model() -> std::sync::Arc<std::sync::Mutex<Option<Gemma>>> {
-    static MODEL: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Option<Gemma>>>> = std::sync::OnceLock::new();
-    MODEL
-        .get_or_init(|| {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-            std::sync::Arc::new(std::sync::Mutex::new(Some(Gemma::load(root).unwrap())))
-        })
-        .clone()
+pub fn shared_model() -> std::sync::Arc<crate::models::Hub> {
+    crate::models::test_hub()
 }
 
 #[cfg(test)]
@@ -386,8 +396,8 @@ mod tests {
         let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("photo-map/tests/query_vectors.json")).unwrap()).unwrap();
         assert_eq!(fixture["prompt"].as_str().unwrap(), QUERY_PROMPT);
         let shared = shared_model();
-        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let model = guard.as_mut().unwrap();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap().gemma();
         eprintln!("on the GPU: {}", model.on_gpu);
         for (k, text) in fixture["texts"].as_array().unwrap().iter().enumerate() {
             let text = text.as_str().unwrap();
@@ -407,8 +417,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("photo-map/tests/image_vectors.json")).unwrap()).unwrap();
         let shared = shared_model();
-        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let model = guard.as_mut().unwrap();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap().gemma();
         for (k, file) in fixture["files"].as_array().unwrap().iter().enumerate() {
             let path = root.join("maps/wikivoyage.photomap/originals").join(file.as_str().unwrap());
             let Some(img) = crate::photo::load(&path) else { return };
@@ -446,8 +456,8 @@ mod tests {
         let cuts: Vec<Patches> = imgs.iter().map(|i| patches(i).unwrap()).collect();
         assert!(cuts.iter().map(|c| c.soft_tokens).collect::<std::collections::HashSet<_>>().len() > 1, "the photos should differ in length");
         let shared = shared_model();
-        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let model = guard.as_mut().unwrap();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap().gemma();
         let together = model.embed_patches(cuts.iter().take(4).map(&copy).collect());
         for (i, got) in together.into_iter().enumerate() {
             let alone = model.embed_patches(vec![copy(&cuts[i])]).pop().unwrap().unwrap();
@@ -523,8 +533,8 @@ mod tests {
         let small = crate::photo::load_for(&paths[0], longest_side_needed).unwrap();
         eprintln!("scaled decode gave {} x {} (the full photo is 6000 x 4000)", small.width(), small.height());
         let shared = shared_model();
-        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let model = guard.as_mut().unwrap();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap().gemma();
         let a = model.embed_image(&crate::photo::load(&paths[0]).unwrap()).unwrap();
         let b = model.embed_image(&small).unwrap();
         let cos: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
@@ -543,7 +553,7 @@ mod tests {
         let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
         files.sort();
         let cuts: Vec<Patches> = files.iter().take(8).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
-        let mut model = Gemma::load(root).unwrap();
+        let mut model = Gemma::load_with(&Runtime::start(root).unwrap(), root).unwrap();
         for r in model.embed_patches(cuts) {
             r.unwrap();
         }
@@ -564,8 +574,8 @@ mod tests {
         files.sort();
         let cuts: Vec<Patches> = files.iter().take(96).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
         let shared = shared_model();
-        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let model = guard.as_mut().unwrap();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap().gemma();
         let copy = |chunk: &[Patches]| -> Vec<Patches> { chunk.iter().map(|c| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens }).collect() };
         model.embed_patches(copy(&cuts[..4])); // warm up
         let (mut encoder, mut text) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
@@ -604,8 +614,8 @@ mod tests {
         files.sort();
         let cuts: Vec<Patches> = files.iter().take(96).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
         let shared = shared_model();
-        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let model = guard.as_mut().unwrap();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap().gemma();
         model.embed_patches(cuts[..4].iter().map(|c| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens }).collect()); // warm up
         for batch in [1usize, 2, 4, 8, 12, 16] {
             let started = std::time::Instant::now();
