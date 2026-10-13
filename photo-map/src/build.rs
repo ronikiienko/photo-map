@@ -206,6 +206,20 @@ pub struct State {
     pub samples: std::collections::VecDeque<(Instant, usize)>,
     pub error: Option<String>,
     pub finished: bool,
+    /// The photos the model finished last, newest at the back, as small squares (id, pixels), for the card to show.
+    pub recent: std::collections::VecDeque<(u64, Arc<image::RgbaImage>)>,
+}
+
+/// How many of the latest photos the card shows.
+pub const RECENT: usize = 9;
+/// A thumbnail's side.
+const THUMB: u32 = 64;
+
+/// The middle square of a photo, small.
+fn thumbnail(img: &image::RgbaImage) -> image::RgbaImage {
+    let side = img.width().min(img.height());
+    let square = image::imageops::crop_imm(img, (img.width() - side) / 2, (img.height() - side) / 2, side, side).to_image();
+    image::imageops::thumbnail(&square, THUMB, THUMB)
 }
 
 /// How far back the speed looks.
@@ -258,6 +272,18 @@ impl Ctx {
         s.message = message.into();
     }
 
+    /// Photos the model has just finished: the card shows them going by.
+    fn show_recent(&self, thumbs: impl IntoIterator<Item = image::RgbaImage>) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut s = self.shared.state.lock().unwrap();
+        for t in thumbs {
+            s.recent.push_back((NEXT.fetch_add(1, Ordering::Relaxed), Arc::new(t)));
+        }
+        while s.recent.len() > RECENT {
+            s.recent.pop_front();
+        }
+    }
+
     fn set_done(&self, done: usize) {
         let mut s = self.shared.state.lock().unwrap();
         s.done = done;
@@ -293,7 +319,7 @@ impl Run {
     pub fn start(dir: PathBuf, root: PathBuf, model: Arc<Mutex<Option<Gemma>>>, wake: impl Fn() + Send + 'static) -> Option<Run> {
         let job = Job::read(&dir)?;
         let lock = lock(&dir)?;
-        let state = State { stage: job.stage, done: 0, total: 0, message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false };
+        let state = State { stage: job.stage, done: 0, total: 0, message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false, recent: Default::default() };
         let shared = Arc::new(Shared { pause: AtomicBool::new(false), state: Mutex::new(state) });
         let ctx = Ctx { dir: dir.clone(), root, job, shared: shared.clone(), model };
         let handle = std::thread::spawn(move || {
@@ -570,16 +596,16 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     // CPU side ahead of the GPU: the next shard's photos are decoded and cut into patches while this one is embedded
     let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let files: Vec<PathBuf> = photos.iter().map(|p| ctx.dir.join(p["file"].as_str().unwrap_or_default())).collect();
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<Option<embed::Patches>>)>(1);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<Option<(embed::Patches, image::RgbaImage)>>)>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let producer = {
         let (todo, files, stop, reused) = (todo.clone(), files.clone(), stop.clone(), reused.clone());
         std::thread::spawn(move || {
             for k in todo {
                 let range = k * SHARD..k * SHARD + shard_len(n, k);
-                let cuts: Vec<Option<embed::Patches>> = range
+                let cuts: Vec<Option<(embed::Patches, image::RgbaImage)>> = range
                     .into_par_iter()
-                    .map(|i| if stop.load(Ordering::Relaxed) || reused[i] { None } else { crate::photo::load(&files[i]).and_then(|img| embed::patches(&img).ok()) })
+                    .map(|i| if stop.load(Ordering::Relaxed) || reused[i] { None } else { crate::photo::load(&files[i]).and_then(|img| Some((embed::patches(&img).ok()?, thumbnail(&img)))) })
                     .collect();
                 if stop.load(Ordering::Relaxed) || tx.send((k, cuts)).is_err() {
                     return;
@@ -606,9 +632,10 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                 break 'shards;
             }
             let end = (at + BATCH).min(cuts.len());
-            let group: Vec<(usize, embed::Patches)> = (at..end).filter_map(|i| cuts[i].take().map(|p| (i, p))).collect();
+            let group: Vec<(usize, (embed::Patches, image::RgbaImage))> = (at..end).filter_map(|i| cuts[i].take().map(|p| (i, p))).collect();
             if !group.is_empty() {
-                let (idx, patches): (Vec<usize>, Vec<embed::Patches>) = group.into_iter().unzip();
+                let (idx, cut): (Vec<usize>, Vec<(embed::Patches, image::RgbaImage)>) = group.into_iter().unzip();
+                let (patches, thumbs): (Vec<embed::Patches>, Vec<image::RgbaImage>) = cut.into_iter().unzip();
                 let results = match ctx.model.lock().unwrap().as_mut() {
                     Some(m) => m.embed_patches(patches),
                     None => idx.iter().map(|_| Err("the model is gone".to_string())).collect(),
@@ -623,6 +650,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                         Err(_) => {} // a photo it couldn't embed keeps a zero vector
                     }
                 }
+                ctx.show_recent(thumbs);
             }
             processed += (at..end).filter(|&i| hits[k * SHARD + i].is_none()).count();
             at = end;

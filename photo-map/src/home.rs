@@ -75,6 +75,8 @@ impl NewMap {
 
 pub struct Home {
     covers: HashMap<PathBuf, Cover>,
+    /// The little photos on a running build's card, by the id the build gave them.
+    recent: HashMap<u64, TextureHandle>,
     sizes: HashMap<PathBuf, Measured>,
     /// The map whose breakdown is open.
     details: Option<PathBuf>,
@@ -89,7 +91,7 @@ const COVER: f32 = 200.0;
 
 impl Home {
     pub fn new() -> Self {
-        Self { covers: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None }
+        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None }
     }
 
     pub fn open_new_map(&mut self) {
@@ -263,6 +265,9 @@ impl Home {
                 }
                 Some(s) if b.running => {
                     let frac = if s.total > 0 { (s.done as f32 / s.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                    if b.stage == Stage::Embed {
+                        self.film(ui, s);
+                    }
                     ui.add(egui::ProgressBar::new(frac).desired_height(8.0).fill(theme::ACCENT));
                     let mut line = format!("{}", b.stage.label());
                     if s.total > 0 {
@@ -297,6 +302,43 @@ impl Home {
                 }
             }
         });
+    }
+
+    /// The photos the model has just read, as a row of little squares; the newest comes in on the right and the oldest drops off the left.
+    fn film(&mut self, ui: &mut Ui, s: &State) {
+        let ctx = ui.ctx().clone();
+        self.recent.retain(|id, _| s.recent.iter().any(|(r, _)| r == id));
+        for (id, img) in &s.recent {
+            self.recent.entry(*id).or_insert_with(|| {
+                let size = [img.width() as usize, img.height() as usize];
+                ctx.load_texture(format!("recent-{id}"), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR)
+            });
+        }
+        if s.recent.is_empty() {
+            return;
+        }
+        let side = 52.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            // fixed slots, so the row doesn't jump while it fills up
+            for slot in 0..build::RECENT {
+                let i = (slot + s.recent.len()).checked_sub(build::RECENT);
+                let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+                match i.and_then(|i| s.recent.get(i)).and_then(|(id, _)| self.recent.get(id)) {
+                    Some(tex) => {
+                        // older ones fade
+                        let age = (slot + 1) as f32 / build::RECENT as f32;
+                        egui::Image::new(tex).corner_radius(6.0).tint(Color32::WHITE.gamma_multiply(0.35 + 0.65 * age)).paint_at(ui, rect);
+                    }
+                    None => {
+                        ui.painter().rect_filled(rect, 6.0, Color32::from_rgb(28, 31, 39));
+                    }
+                }
+            }
+            ui.label(theme::muted("just read by the model"));
+        });
+        ui.add_space(6.0);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
 
     fn map_card(&mut self, ui: &mut Ui, e: &crate::library::Entry, actions: &mut Vec<Action>) {
