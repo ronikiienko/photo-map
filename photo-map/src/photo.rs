@@ -1,8 +1,7 @@
 //! Reading a photo file the same way everywhere (baking, streaming): EXIF orientation applied,
 //! transparent parts filled with the viewer's background.
 
-use image::{DynamicImage, GrayImage, ImageDecoder, ImageReader, RgbImage, RgbaImage};
-use std::io::BufReader;
+use image::{DynamicImage, ImageDecoder, ImageReader, RgbaImage};
 use std::path::Path;
 
 pub const BG: [u8; 3] = [21, 23, 28];
@@ -25,8 +24,8 @@ pub fn load(path: &Path) -> Option<RgbaImage> {
     Some(rgba)
 }
 
-/// Like `load`, for when the photo is going to be made smaller anyway: a JPEG that is at least twice as big as needed is decoded
-/// at 1/2, 1/4 or 1/8 of its size (the decoder leaves out the fine detail while it decodes, which is many times faster than
+/// Like `load`, for when the photo is going to be made smaller anyway: a JPEG that is bigger than needed is decoded
+/// at 1/8 to 7/8 of its size (the decoder leaves out the fine detail while it decodes, which is many times faster than
 /// decoding everything and shrinking after). `needed(width, height)` gets the photo's size as it is shown (turned upright) and
 /// says how long the longer side must be at least; the result is never smaller than twice that (or it is the full size). Other files are read as `load` does.
 pub fn load_for(path: &Path, needed: impl Fn(u32, u32) -> u32) -> Option<RgbaImage> {
@@ -35,38 +34,34 @@ pub fn load_for(path: &Path, needed: impl Fn(u32, u32) -> u32) -> Option<RgbaIma
 
 fn scaled_jpeg(path: &Path, needed: &dyn Fn(u32, u32) -> u32) -> Option<RgbaImage> {
     use image::metadata::Orientation::*;
-    let reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    let reader = ImageReader::new(std::io::Cursor::new(&bytes[..])).with_guessed_format().ok()?;
     if reader.format() != Some(image::ImageFormat::Jpeg) {
         return None;
     }
-    let mut decoder = reader.into_decoder().ok()?;
-    let orientation = decoder.orientation().ok()?;
-    let (w, h) = decoder.dimensions();
+    let orientation = reader.into_decoder().ok()?.orientation().ok()?;
+    let mut decompressor = turbojpeg::Decompressor::new().ok()?;
+    let header = decompressor.read_header(&bytes).ok()?;
+    let (w, h) = (header.width as u32, header.height as u32);
     let (shown_w, shown_h) = if matches!(orientation, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH) { (h, w) } else { (w, h) };
     // twice what is needed is kept: the shrink that follows then has something to average, and the picture stays as sharp as it
     // would be from the full size (decoded at exactly the needed size it comes out a little aliased)
     let need = needed(shown_w, shown_h) * 2;
-    let long = w.max(h);
-    if need == 0 || long < need * 2 {
-        return None; // not even a halving fits
-    }
-    let k = need as f64 / long as f64;
-    let (ask_w, ask_h) = (((w as f64 * k).ceil() as u16).max(1), ((h as f64 * k).ceil() as u16).max(1));
-    let mut jpeg = jpeg_decoder::Decoder::new(BufReader::new(std::fs::File::open(path).ok()?));
-    jpeg.scale(ask_w, ask_h).ok()?;
-    let pixels = jpeg.decode().ok()?;
-    let info = jpeg.info()?;
-    let (sw, sh) = (info.width as u32, info.height as u32);
-    if sw.max(sh) < need {
+    if need == 0 {
         return None;
     }
-    let mut img = match info.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => DynamicImage::ImageRgb8(RgbImage::from_raw(sw, sh, pixels)?),
-        jpeg_decoder::PixelFormat::L8 => DynamicImage::ImageLuma8(GrayImage::from_raw(sw, sh, pixels)?),
-        _ => return None, // CMYK and 16-bit grey: the general reader
-    };
+    // the smallest size, in eighths, whose longer side is still enough
+    let long = w.max(h);
+    let eighths = (1..=8u32).find(|&n| (long * n).div_ceil(8) >= need).unwrap_or(8);
+    let factor = turbojpeg::ScalingFactor::new(eighths as usize, 8);
+    decompressor.set_scaling_factor(factor).ok()?;
+    let size = header.scaled(factor);
+    let mut pixels = vec![0u8; size.width * size.height * 4];
+    let image = turbojpeg::Image { pixels: &mut pixels[..], width: size.width, pitch: size.width * 4, height: size.height, format: turbojpeg::PixelFormat::RGBA };
+    decompressor.decompress(&bytes, image).ok()?;
+    let mut img = DynamicImage::ImageRgba8(RgbaImage::from_raw(size.width as u32, size.height as u32, pixels)?);
     img.apply_orientation(orientation);
-    Some(img.to_rgba8())
+    Some(img.into_rgba8())
 }
 
 /// Scaled so the longer side is `long` px (smaller photos are enlarged only if `enlarge`).
