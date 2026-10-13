@@ -55,14 +55,15 @@ impl Gallery {
             self.textures.insert(i, (texture, self.frame));
         }
         let mut clicked = None;
-        let mut open = self.open;
-        egui::Window::new(format!("matches ({})", order.len()))
+        let mut closed = false;
+        egui::Window::new("matches")
             .id(egui::Id::new("gallery"))
-            .open(&mut open)
+            .title_bar(false)
             .default_pos([ctx.content_rect().right() - 580.0, 60.0])
             .default_size([560.0, 620.0])
             .resizable(true)
             .show(ctx, |ui| {
+                closed = crate::theme::window_header(ui, &format!("Matches ({})", order.len()));
                 if order.is_empty() {
                     ui.weak("no matches: search first");
                     return;
@@ -122,7 +123,9 @@ impl Gallery {
                     }
                 });
             });
-        self.open = open;
+        if closed {
+            self.open = false;
+        }
         if self.textures.len() > KEEP {
             let mut ages: Vec<u64> = self.textures.values().map(|t| t.1).collect();
             ages.sort_unstable();

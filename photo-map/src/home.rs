@@ -110,7 +110,7 @@ impl Home {
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             ui.label(RichText::new("Maps").size(26.0).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("+  New map").strong()).fill(theme::ACCENT.gamma_multiply(0.6)).min_size(vec2(112.0, 34.0))).clicked() {
+                if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("+  New map").strong()).min_size(vec2(112.0, 34.0))).clicked() {
                     self.open_new_map();
                 }
             });
@@ -143,7 +143,7 @@ impl Home {
                         ui.add_space(4.0);
                         ui.label(theme::muted("Pick a folder of photos and they are laid out so that similar ones sit together."));
                         ui.add_space(12.0);
-                        if ui.add(egui::Button::new(RichText::new("Make your first map").strong()).fill(theme::ACCENT.gamma_multiply(0.6)).min_size(vec2(180.0, 34.0))).clicked() {
+                        if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("Make your first map").strong()).min_size(vec2(180.0, 34.0))).clicked() {
                             self.open_new_map();
                         }
                     });
@@ -192,7 +192,7 @@ impl Home {
                         if ui.button("Cancel").clicked() {
                             actions.push(Action::Pause(b.dir.clone()));
                         }
-                    } else if ui.add(egui::Button::new(if failed { "Try again" } else { "Continue" }).fill(theme::ACCENT.gamma_multiply(0.5))).clicked() {
+                    } else if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.5), true, egui::Button::new(if failed { "Try again" } else { "Continue" })).clicked() {
                         actions.push(Action::Continue(b.dir.clone()));
                     }
                 });
@@ -333,8 +333,9 @@ impl Home {
             return;
         };
         let Some(sizes) = self.sizes(ctx, &path) else { return };
-        let mut open = true;
-        egui::Window::new(format!("What takes space in “{}”", entry.name)).open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).fixed_size([480.0, 0.0]).show(ctx, |ui| {
+        let mut closed = false;
+        egui::Window::new("storage").title_bar(false).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).fixed_size([480.0, 0.0]).show(ctx, |ui| {
+            closed = theme::window_header(ui, &format!("What takes space in “{}”", entry.name));
             ui.label(RichText::new(format!("{} on disk", storage::human(sizes.total()))).size(17.0));
             ui.label(theme::muted(format!("for {} photos", thousands(entry.photos))));
             ui.add_space(8.0);
@@ -360,7 +361,7 @@ impl Home {
                 ui.label(theme::muted("The map was made from photos on the same disk, so instead of copying them it points at the originals. They take no extra space here, and they are not counted above. If you delete or move the originals, the map keeps its own link to the data, so it still works."));
             }
         });
-        if !open {
+        if closed {
             self.details = None;
         }
     }
@@ -397,7 +398,7 @@ impl Home {
                 ui.label(format!("“{name}” and the work done on it so far will be deleted. Your photos are not touched."));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new("Discard").fill(Color32::from_rgb(150, 60, 55))).clicked() {
+                    if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Discard")).clicked() {
                         actions.push(Action::Discard(dir.clone()));
                         close = true;
                     }
@@ -417,7 +418,7 @@ impl Home {
                 ui.label(format!("“{name}” will be deleted, with the copies of its photos inside it. The photos you made it from are not touched."));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new("Delete").fill(Color32::from_rgb(150, 60, 55))).clicked() {
+                    if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Delete")).clicked() {
                         actions.push(Action::Delete(path.clone()));
                         close = true;
                     }
@@ -507,7 +508,7 @@ impl Home {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let ok = problem.is_none() && folder.is_dir() && nm.photos != Some(0);
-                if ui.add_enabled(ok, egui::Button::new(RichText::new("Create").strong()).fill(theme::ACCENT.gamma_multiply(0.6))).clicked() {
+                if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
                     create = Some(Action::Create { name: clean.clone(), folder: folder.clone(), names_as_captions: nm.names_as_captions });
                 }
                 if ui.button("Cancel").clicked() {

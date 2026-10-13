@@ -21,6 +21,9 @@ pub const CARD_STROKE: Color32 = Color32::from_rgba_premultiplied(40, 44, 54, 25
 const CONTROL: Color32 = Color32::from_rgb(38, 42, 52);
 const CONTROL_HOVER: Color32 = Color32::from_rgb(52, 58, 73);
 
+/// A button that deletes something.
+pub const DANGER: Color32 = Color32::from_rgb(150, 60, 55);
+
 pub const GAP: f32 = 8.0;
 pub const RADIUS: u8 = 10; // cards and windows
 pub const RADIUS_SMALL: u8 = 7; // controls
@@ -113,10 +116,56 @@ pub fn dot(ui: &mut Ui, colour: Color32) {
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str, &str)]) -> bool {
     let before = *value;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().button_padding = vec2(12.0, 5.0); // room round the text, so the chosen one doesn't hug it
         for &(v, text, tip) in options {
             ui.selectable_value(value, v, text).on_hover_text(tip);
         }
     });
     *value != before
+}
+
+/// A button in a colour of its own (the main action, a delete). egui's `Button::fill` is one colour for every state, so it never
+/// shows hover or press; this sets all three.
+pub fn tinted(ui: &mut Ui, colour: Color32, enabled: bool, button: egui::Button) -> egui::Response {
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        for (state, fill) in [(&mut w.inactive, colour), (&mut w.hovered, colour.lerp_to_gamma(Color32::WHITE, 0.16)), (&mut w.active, colour.lerp_to_gamma(Color32::WHITE, 0.3))] {
+            state.bg_fill = fill;
+            state.weak_bg_fill = fill;
+        }
+        ui.add_enabled(enabled, button)
+    })
+    .inner
+}
+
+/// A close cross that lights up when the pointer is on it and again when it is pressed.
+pub fn close_button(ui: &mut Ui) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
+    let (fill, cross) = if response.is_pointer_button_down_on() {
+        (ACCENT.gamma_multiply(0.5), Color32::WHITE)
+    } else if response.hovered() {
+        (CONTROL_HOVER, Color32::WHITE)
+    } else {
+        (Color32::TRANSPARENT, MUTED)
+    };
+    ui.painter().rect_filled(rect, CornerRadius::from(RADIUS_SMALL), fill);
+    let c = rect.center();
+    let stroke = Stroke::new(1.6, cross);
+    ui.painter().line_segment([c + vec2(-5.0, -5.0), c + vec2(5.0, 5.0)], stroke);
+    ui.painter().line_segment([c + vec2(5.0, -5.0), c + vec2(-5.0, 5.0)], stroke);
+    response.on_hover_text("close").clicked()
+}
+
+/// The top of a window that has no title bar of egui's: the title and a close button. True when it was closed.
+pub fn window_header(ui: &mut Ui, title: &str) -> bool {
+    let mut closed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(17.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            closed = close_button(ui);
+        });
+    });
+    ui.add_space(4.0);
+    closed
 }
