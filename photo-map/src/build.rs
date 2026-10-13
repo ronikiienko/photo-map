@@ -58,6 +58,20 @@ impl Stage {
         }
     }
 
+    /// What the stage does and why, in plain words, for the card of a map being made.
+    pub fn explain(self) -> &'static str {
+        match self {
+            Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on) and counts them. Nothing is changed in your folders.",
+            Stage::Copy => "Makes the map its own list of the photos. Where it can, a photo is a hard link to your file (the same data, no second copy), so this takes almost no space. The map also notes each photo's size and where it came from.",
+            Stage::Embed => "The model looks at every photo and turns it into a vector: 768 numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. This is the slow part, because every photo goes through the model on the graphics card.",
+            Stage::Layout => "768 numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP).",
+            Stage::Regions => "Groups the photos on the map into areas, from a few big ones down to small ones of about 10 photos. The groups are made from neighbours on the map, so each area is one connected piece. Zooming in shows the finer ones.",
+            Stage::Names => "Gives each area a name. About 4,500 common phrases (\"a beach\", \"old buildings\"...) are run through the same model; the phrase whose vector is closest to the area's average vector is its name.",
+            Stage::Bake => "Makes small copies of every photo at several sizes (from 32 px down to 1 px) and packs them into big pictures the graphics card can draw directly. This is what lets the viewer show thousands of photos at once, and it is done now so the map opens at once.",
+            Stage::Finish => "Writes the map's description, tidies away the working files and moves the map to the list.",
+        }
+    }
+
     fn next(self) -> Option<Stage> {
         Stage::ALL.get(Stage::ALL.iter().position(|&s| s == self)? + 1).copied()
     }
@@ -208,7 +222,12 @@ pub struct State {
     pub finished: bool,
     /// The photos the model finished last, newest at the back, as small squares (id, pixels), for the card to show.
     pub recent: std::collections::VecDeque<(u64, Arc<image::RgbaImage>)>,
+    /// The first few of the 768 numbers the model gave the last photo.
+    pub vector_head: Vec<f32>,
 }
+
+/// How many numbers of a vector the card shows.
+pub const HEAD: usize = 8;
 
 /// How many of the latest photos the card shows.
 pub const RECENT: usize = 9;
@@ -273,7 +292,7 @@ impl Ctx {
     }
 
     /// Photos the model has just finished: the card shows them going by.
-    fn show_recent(&self, thumbs: impl IntoIterator<Item = image::RgbaImage>) {
+    fn show_recent(&self, thumbs: impl IntoIterator<Item = image::RgbaImage>, head: Option<Vec<f32>>) {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut s = self.shared.state.lock().unwrap();
         for t in thumbs {
@@ -281,6 +300,9 @@ impl Ctx {
         }
         while s.recent.len() > RECENT {
             s.recent.pop_front();
+        }
+        if let Some(head) = head {
+            s.vector_head = head;
         }
     }
 
@@ -319,7 +341,7 @@ impl Run {
     pub fn start(dir: PathBuf, root: PathBuf, model: Arc<Mutex<Option<Gemma>>>, wake: impl Fn() + Send + 'static) -> Option<Run> {
         let job = Job::read(&dir)?;
         let lock = lock(&dir)?;
-        let state = State { stage: job.stage, done: 0, total: 0, message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false, recent: Default::default() };
+        let state = State { stage: job.stage, done: 0, total: 0, message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false, recent: Default::default(), vector_head: Vec::new() };
         let shared = Arc::new(Shared { pause: AtomicBool::new(false), state: Mutex::new(state) });
         let ctx = Ctx { dir: dir.clone(), root, job, shared: shared.clone(), model };
         let handle = std::thread::spawn(move || {
@@ -640,9 +662,13 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                     Some(m) => m.embed_patches(patches),
                     None => idx.iter().map(|_| Err("the model is gone".to_string())).collect(),
                 };
+                let mut head = None;
                 for (i, r) in idx.into_iter().zip(results) {
                     match r {
-                        Ok(v) => vectors[i * DIM..(i + 1) * DIM].copy_from_slice(&v),
+                        Ok(v) => {
+                            vectors[i * DIM..(i + 1) * DIM].copy_from_slice(&v);
+                            head = Some(v[..HEAD].to_vec());
+                        }
                         Err(e) if e.contains("running") || e.contains("loading") => {
                             outcome = Err(e);
                             break 'shards;
@@ -650,7 +676,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                         Err(_) => {} // a photo it couldn't embed keeps a zero vector
                     }
                 }
-                ctx.show_recent(thumbs);
+                ctx.show_recent(thumbs, head);
             }
             processed += (at..end).filter(|&i| hits[k * SHARD + i].is_none()).count();
             at = end;

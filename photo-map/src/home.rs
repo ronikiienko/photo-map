@@ -224,83 +224,92 @@ impl Home {
     fn build_card(&mut self, ui: &mut Ui, b: &BuildView, actions: &mut Vec<Action>) {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let failed = b.state.as_ref().is_some_and(|s| s.error.is_some());
-            ui.horizontal(|ui| {
-                let colour = if failed { Color32::from_rgb(235, 110, 100) } else if b.running { theme::ACCENT } else { theme::MUTED };
-                theme::dot(ui, colour);
-                ui.label(RichText::new(&b.name).size(17.0));
-                ui.label(theme::muted(format!("from {}", b.source)));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add_enabled(!b.elsewhere, egui::Button::new("Discard")).clicked() {
-                        self.confirm_discard = Some(b.dir.clone());
-                    }
-                    if b.elsewhere {
-                        // nothing to press: another window runs it
-                    } else if b.running {
-                        if ui.button("Pause").clicked() {
-                            actions.push(Action::Pause(b.dir.clone()));
+            // the page centres its content; the card reads from the left
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                let failed = b.state.as_ref().is_some_and(|s| s.error.is_some());
+                ui.horizontal(|ui| {
+                    let colour = if failed { Color32::from_rgb(235, 110, 100) } else if b.running { theme::ACCENT } else { theme::MUTED };
+                    theme::dot(ui, colour);
+                    ui.label(RichText::new(&b.name).size(17.0));
+                    ui.label(theme::muted(format!("from {}", b.source)));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add_enabled(!b.elsewhere, egui::Button::new("Discard")).clicked() {
+                            self.confirm_discard = Some(b.dir.clone());
                         }
-                    } else if b.queued {
-                        if ui.button("Cancel").clicked() {
-                            actions.push(Action::Pause(b.dir.clone()));
+                        if b.elsewhere {
+                            // nothing to press: another window runs it
+                        } else if b.running {
+                            if ui.button("Pause").clicked() {
+                                actions.push(Action::Pause(b.dir.clone()));
+                            }
+                        } else if b.queued {
+                            if ui.button("Cancel").clicked() {
+                                actions.push(Action::Pause(b.dir.clone()));
+                            }
+                        } else if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.5), true, egui::Button::new(if failed { "Try again" } else { "Continue" })).clicked() {
+                            actions.push(Action::Continue(b.dir.clone()));
                         }
-                    } else if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.5), true, egui::Button::new(if failed { "Try again" } else { "Continue" })).clicked() {
-                        actions.push(Action::Continue(b.dir.clone()));
+                    });
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let steps: Vec<Stage> = Stage::ALL.into_iter().filter(|&s| s != Stage::Finish).collect();
+                    for (i, s) in steps.iter().enumerate() {
+                        step(ui, *s, b.stage, i + 1 == steps.len());
                     }
                 });
+                ui.add_space(6.0);
+                match &b.state {
+                    Some(s) if s.error.is_some() => {
+                        ui.label(RichText::new(s.error.clone().unwrap_or_default()).color(Color32::from_rgb(235, 110, 100)));
+                        ui.label(theme::muted("Nothing is lost: it carries on from the last finished piece."));
+                    }
+                    Some(s) if b.running => {
+                        let frac = if s.total > 0 { (s.done as f32 / s.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                        if b.stage == Stage::Embed {
+                            self.film(ui, s);
+                        }
+                        ui.add(egui::ProgressBar::new(frac).desired_height(8.0).fill(theme::ACCENT));
+                        let mut line = format!("{}", b.stage.label());
+                        if s.total > 0 {
+                            // only these stages count photos; the others count steps of their own (shown as a percentage)
+                            let by_photo = matches!(b.stage, Stage::Scan | Stage::Copy | Stage::Embed);
+                            if by_photo {
+                                line += &format!(" · {} of {}", thousands(s.done), thousands(s.total));
+                            } else {
+                                line += &format!(" · {:.0}%", frac * 100.0);
+                            }
+                            let rate = s.rate().unwrap_or(0.0);
+                            if rate > 0.0 && by_photo {
+                                line += &format!(" · {rate:.1} photos/s");
+                            }
+                            if rate > 0.0 && s.done < s.total {
+                                line += &format!(" · about {} left", duration((s.total - s.done) as f32 / rate));
+                            }
+                        }
+                        if !s.message.is_empty() {
+                            line += &format!(" · {}", s.message);
+                        }
+                        ui.label(theme::muted(line));
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(RichText::new(b.stage.explain()).size(13.0).color(theme::MUTED));
+                    }
+                    _ if b.elsewhere => {
+                        ui.label(theme::muted("This map is being made in another window of the app. It shows here when it is finished."));
+                    }
+                    _ if b.queued => {
+                        ui.label(theme::muted("Waiting for the map before it to finish"));
+                    }
+                    _ => {
+                        ui.label(theme::muted(format!("Paused at: {}. Nothing is lost — continue any time, or discard it.", b.stage.label())));
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(RichText::new(b.stage.explain()).size(13.0).color(theme::MUTED));
+                    }
+                }
             });
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let steps: Vec<Stage> = Stage::ALL.into_iter().filter(|&s| s != Stage::Finish).collect();
-                for (i, s) in steps.iter().enumerate() {
-                    step(ui, *s, b.stage, i + 1 == steps.len());
-                }
-            });
-            ui.add_space(6.0);
-            match &b.state {
-                Some(s) if s.error.is_some() => {
-                    ui.label(RichText::new(s.error.clone().unwrap_or_default()).color(Color32::from_rgb(235, 110, 100)));
-                    ui.label(theme::muted("Nothing is lost: it carries on from the last finished piece."));
-                }
-                Some(s) if b.running => {
-                    let frac = if s.total > 0 { (s.done as f32 / s.total as f32).clamp(0.0, 1.0) } else { 0.0 };
-                    if b.stage == Stage::Embed {
-                        self.film(ui, s);
-                    }
-                    ui.add(egui::ProgressBar::new(frac).desired_height(8.0).fill(theme::ACCENT));
-                    let mut line = format!("{}", b.stage.label());
-                    if s.total > 0 {
-                        // only these stages count photos; the others count steps of their own (shown as a percentage)
-                        let by_photo = matches!(b.stage, Stage::Scan | Stage::Copy | Stage::Embed);
-                        if by_photo {
-                            line += &format!(" · {} of {}", thousands(s.done), thousands(s.total));
-                        } else {
-                            line += &format!(" · {:.0}%", frac * 100.0);
-                        }
-                        let rate = s.rate().unwrap_or(0.0);
-                        if rate > 0.0 && by_photo {
-                            line += &format!(" · {rate:.1} photos/s");
-                        }
-                        if rate > 0.0 && s.done < s.total {
-                            line += &format!(" · about {} left", duration((s.total - s.done) as f32 / rate));
-                        }
-                    }
-                    if !s.message.is_empty() {
-                        line += &format!(" · {}", s.message);
-                    }
-                    ui.label(theme::muted(line));
-                }
-                _ if b.elsewhere => {
-                    ui.label(theme::muted("This map is being made in another window of the app. It shows here when it is finished."));
-                }
-                _ if b.queued => {
-                    ui.label(theme::muted("Waiting for the map before it to finish"));
-                }
-                _ => {
-                    ui.label(theme::muted(format!("Paused at: {}. Nothing is lost — continue any time, or discard it.", b.stage.label())));
-                }
-            }
         });
     }
 
@@ -335,7 +344,17 @@ impl Home {
                     }
                 }
             }
-            ui.label(theme::muted("just read by the model"));
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.label(theme::muted("Just read by the model. This is what it made of the last photo:"));
+                if !s.vector_head.is_empty() {
+                    // every number is printed with a sign and three decimals, in a font where all characters are as wide: the line never changes width
+                    let numbers: Vec<String> = s.vector_head.iter().map(|x| format!("{x:+.3}")).collect();
+                    ui.label(RichText::new(format!("[ {}  … ]", numbers.join("  "))).monospace().size(13.0).color(theme::ACCENT));
+                    ui.label(theme::muted(format!("the first {} of its 768 numbers", build::HEAD)));
+                }
+            });
         });
         ui.add_space(6.0);
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
