@@ -43,28 +43,30 @@ so = ort.SessionOptions()
 so.log_severity_level = 3
 
 
-def run(name, file, providers):
+def run(name, step, warm):
     t0 = time.time()
-    session = ort.InferenceSession(str(ONNX / file), so, providers=providers)
-    session.run(None, batches[0])  # the first run: engine build / warm-up
+    step(batches[0])  # the first run: engine build / warm-up
     print(f"{name}: ready in {time.time() - t0:.0f} s", flush=True)
     t0 = time.time()
-    out = [session.run(None, b)[0] for b in batches]
+    out = [step(b) for b in batches]
     seconds = time.time() - t0
     print(f"RESULT {name}: {BATCHES * BATCH / seconds:.1f} photos/s (encoder only)", flush=True)
     return out
 
 
-cuda = run("cuda fused", "vision_encoder_fp16_fused.onnx", [("CUDAExecutionProvider", {"device_id": 0})])
+cuda_session = ort.InferenceSession(str(ONNX / "vision_encoder_fp16_fused.onnx"), so, providers=[("CUDAExecutionProvider", {"device_id": 0})])
+cuda = run("cuda fused", lambda feed: cuda_session.run(None, feed)[0], None)
 cache = config.ROOT / ".cache" / "trt_plain"
 cache.mkdir(parents=True, exist_ok=True)
 shapes = lambda n: ",".join(f"{k}:{n}x{PADDED}x{d}" for k, d in (("pixel_values", PATCH_VALUES), ("pixel_position_ids", 2)))
-trt = run("tensorrt plain", "vision_encoder_fp16_trt.onnx", [
+layers = ort.InferenceSession(str(ONNX / "vision_encoder_fp16_trt.onnx"), so, providers=[
     ("TensorrtExecutionProvider", {
         "device_id": 0, "trt_fp16_enable": True, "trt_max_workspace_size": 1 << 30, "trt_engine_cache_enable": True, "trt_engine_cache_path": str(cache),
         "trt_timing_cache_enable": True, "trt_timing_cache_path": str(cache),
         "trt_profile_min_shapes": shapes(1), "trt_profile_opt_shapes": shapes(BATCH), "trt_profile_max_shapes": shapes(BATCH)}),
     ("CUDAExecutionProvider", {"device_id": 0})])
+pool = ort.InferenceSession(str(ONNX / "vision_pool.onnx"), so, providers=[("CUDAExecutionProvider", {"device_id": 0})])
+trt = run("tensorrt layers + cuda pooling", lambda feed: pool.run(None, {"hidden": layers.run(None, feed)[0], "pixel_position_ids": feed["pixel_position_ids"]})[0], None)
 
 cos = []
 for a, b in zip(cuda, trt):

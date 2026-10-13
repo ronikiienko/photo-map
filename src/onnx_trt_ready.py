@@ -3,23 +3,39 @@
 TensorRT cannot read two of ONNX Runtime's own operators that the fused encoder uses, and would hand those nodes back to the CUDA
 provider, cutting the graph into ~130 pieces. This replaces them with plain operators, which TensorRT fuses and tunes by itself:
 
-  SimplifiedLayerNormalization (113)  ->  x * 1/sqrt(mean(x^2) + eps) * scale, the mean in float32
+  SimplifiedLayerNormalization (113)  ->  RMSNormalization (ONNX opset 23)
   MultiHeadAttention (16)             ->  split heads, Q.K^T (+ the mask bias), softmax, .V, merge heads
 
     python src/onnx_trt_ready.py     # writes vision_encoder_fp16_trt.onnx next to the fused one (weights are shared)
 """
 
+import os
+
 import numpy as np
 import onnx
+import onnx.utils
 from onnx import TensorProto as T, helper, numpy_helper
 
 import config
 
 DIR = config.ROOT / ".cache" / "onnx" / "embeddinggemma-2" / "onnx"
+SHRINK = 16.0
 
 
 def ints(name, values):
     return numpy_helper.from_array(np.array(values, dtype=np.int64), name)
+
+
+def prune(g):
+    """Drop the nodes nothing reads."""
+    used = {i for n in g.node for i in n.input} | {o.name for o in g.output}
+    while True:
+        dead = [n for n in g.node if not any(o in used for o in n.output)]
+        if not dead:
+            return
+        for n in dead:
+            g.node.remove(n)
+        used = {i for n in g.node for i in n.input} | {o.name for o in g.output}
 
 
 def main():
@@ -27,8 +43,7 @@ def main():
     g = m.graph
     prod = {o: n for n in g.node for o in n.output}
     new_init, nodes = [], []
-    eps_name = "trt_eps"
-    new_init += [numpy_helper.from_array(np.array(1e-6, dtype=np.float32), eps_name), ints("trt_last", [-1])]
+    new_init.append(numpy_helper.from_array(np.array(1 / SHRINK, dtype=np.float16), "trt_shrink"))
     counts = {"norm": 0, "attention": 0}
 
     for n in g.node:
@@ -36,19 +51,12 @@ def main():
             k = counts["norm"] = counts["norm"] + 1
             eps = next(a.f for a in n.attribute if a.name == "epsilon")
             assert next(a.i for a in n.attribute if a.name == "axis") == -1
-            p = f"trt_norm{k}_"
-            x, scale = n.input[0], n.input[1]
-            new_init.append(numpy_helper.from_array(np.array(eps, dtype=np.float32), p + "eps"))
-            nodes += [
-                helper.make_node("Cast", [x], [p + "xf"], to=T.FLOAT, name=p + "cast_in"),
-                helper.make_node("Mul", [p + "xf", p + "xf"], [p + "sq"], name=p + "sq"),
-                helper.make_node("ReduceMean", [p + "sq", "trt_last"], [p + "mean"], keepdims=1, name=p + "mean"),
-                helper.make_node("Add", [p + "mean", p + "eps"], [p + "var"], name=p + "add"),
-                helper.make_node("Sqrt", [p + "var"], [p + "std"], name=p + "sqrt"),
-                helper.make_node("Div", [p + "xf", p + "std"], [p + "normed"], name=p + "div"),
-                helper.make_node("Cast", [p + "normed"], [p + "half"], to=T.FLOAT16, name=p + "cast_out"),
-                helper.make_node("Mul", [p + "half", scale], [n.output[0]], name=p + "scale"),
-            ]
+            # One RMSNormalization (ONNX opset 23). Its input is first divided by SHRINK: the sum of squares inside TensorRT's float16
+            # engine overflows once a value is above 256, and the row comes out as zeros. The result does not change: dividing x by s
+            # and epsilon by s*s gives x / sqrt(mean(x^2) + epsilon) exactly.
+            small = f"trt_norm{k}_small"
+            nodes.append(helper.make_node("Mul", [n.input[0], "trt_shrink"], [small], name=f"trt_norm{k}_shrink"))
+            nodes.append(helper.make_node("RMSNormalization", [small, n.input[1]], [n.output[0]], axis=-1, epsilon=eps / SHRINK**2, stash_type=1, name=f"trt_norm{k}"))
         elif n.op_type == "MultiHeadAttention":
             k = counts["attention"] = counts["attention"] + 1
             heads = next(a.i for a in n.attribute if a.name == "num_heads")
@@ -78,23 +86,39 @@ def main():
         else:
             nodes.append(n)
 
+    for o in m.opset_import:
+        if o.domain == "":
+            o.version = 23  # RMSNormalization is new in opset 23
     del g.node[:]
     g.node.extend(nodes)
     g.initializer.extend(new_init)
-    # nodes that only fed the replaced attention's Expand are now unused; drop what nothing reads
-    used = {i for n in g.node for i in n.input} | {o.name for o in g.output}
-    while True:
-        dead = [n for n in g.node if not any(o in used for o in n.output)]
-        if not dead:
-            break
-        for n in dead:
-            g.node.remove(n)
-        used = {i for n in g.node for i in n.input} | {o.name for o in g.output}
+    prune(g)  # nodes that only fed the replaced attention's Expand are now unused
     del g.value_info[:]
+
+    # TensorRT gets the transformer layers; the pooling that follows them (integer position arithmetic: floor-divide, ReduceMax, Range)
+    # comes out wrong in TensorRT for some rows, so it stays on the CUDA provider as a second small model.
+    hidden = "add_7097"
+    whole = str(DIR / "_vision_whole.onnx")
+    onnx.save(m, whole)
+    pool = str(DIR / "vision_pool.onnx")
+    onnx.utils.extract_model(whole, pool, [hidden, "pixel_position_ids"], ["image_features"], check_model=False)
+    os.remove(whole)
+    # the two parts hand over the hidden states as float32, so the program never has to handle float16 tensors
+    p = onnx.load(pool, load_external_data=False)
+    for i in p.graph.input:
+        if i.name == hidden:
+            i.name = "hidden"
+            i.type.tensor_type.elem_type = T.FLOAT
+    p.graph.node.insert(0, helper.make_node("Cast", ["hidden"], [hidden], to=T.FLOAT16, name="trt_pool_cast_in"))
+    onnx.save(p, pool)
+    del g.output[:]
+    g.node.append(helper.make_node("Cast", [hidden], ["hidden"], to=T.FLOAT, name="trt_layers_cast_out"))
+    g.output.append(helper.make_tensor_value_info("hidden", T.FLOAT, ["batch", "length", 768]))
+    prune(g)
     out = str(DIR / "vision_encoder_fp16_trt.onnx")
     onnx.save(m, out)
     onnx.checker.check_model(out)  # by path: it looks for the weights next to the file
-    print(f"{counts['norm']} norms and {counts['attention']} attentions rewritten, {len(g.node)} nodes in all")
+    print(f"{counts['norm']} norms and {counts['attention']} attentions rewritten; transformer part {len(g.node)} nodes (TensorRT), pooling in vision_pool.onnx (CUDA)")
 
 
 if __name__ == "__main__":
