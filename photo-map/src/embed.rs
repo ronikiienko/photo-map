@@ -533,6 +533,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// How long freeing the model takes, and whether the process ends cleanly after it (run by hand, alone:
+    /// cargo test --release closing_is_clean -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn closing_is_clean() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let dir = root.join("maps/wikivoyage.photomap/originals");
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        let cuts: Vec<Patches> = files.iter().take(8).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
+        let mut model = Gemma::load(root).unwrap();
+        for r in model.embed_patches(cuts) {
+            r.unwrap();
+        }
+        eprintln!("model used; freeing it");
+        let started = std::time::Instant::now();
+        drop(model);
+        eprintln!("model freed in {:.2} s", started.elapsed().as_secs_f32());
+    }
+
     /// Where the time goes for real photos in groups of 4: the photo encoder, or the text model after it (run by hand:
     /// cargo test --release where_the_time_goes -- --ignored --nocapture).
     #[test]

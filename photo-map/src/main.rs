@@ -1327,4 +1327,9 @@ fn main() {
     }
     let event_loop = EventLoop::new().unwrap();
     event_loop.run_app(&mut App { maps, first, viewer: None }).unwrap();
+    // The window is closed and the builds are stopped (what they did is on disk). Ending the process the usual way would run the
+    // exit code of the CUDA and TensorRT libraries, which after a build takes tens of seconds and then crashes (SIGSEGV); the
+    // system frees the video memory by itself, so this ends the process at once.
+    // SAFETY: `_exit` only ends the process.
+    unsafe { libc::_exit(0) };
 }
