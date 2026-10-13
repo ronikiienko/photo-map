@@ -1,6 +1,6 @@
 """The Wikivoyage photo map: maps/wikivoyage.photomap, from what embed_images.py already made (no new embedding).
     python src/map_wikivoyage.py
-Per photo: its caption as the title (else its article's title), plus the caption, article(s) and article link as
+Per photo: its caption as the title (else its article's title) and as the caption, plus the article(s) and article link as
 metadata, so all of them are searchable in the viewer. Small uncaptioned images (inline icons) are left out.
 """
 
@@ -27,9 +27,10 @@ def gather():
     chunks, vectors = [chunks[i] for i in keep], vectors[keep]
     photos, files = [], []
     for c in chunks:
-        meta = {"caption": c["text"], "article": ", ".join(c["articles"]), "url": c["url"]}
+        meta = {"article": ", ".join(c["articles"]), "url": c["url"]}
         photos.append({
             "title": c["text"] or c["title"],
+            "caption": c["text"],
             "source": c["image"].removeprefix("data/wikivoyage/"),
             "meta": {k: v for k, v in meta.items() if v},
         })

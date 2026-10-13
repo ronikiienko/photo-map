@@ -1,12 +1,12 @@
 //! A map bundle, plus a spatial grid for "which photo is under the mouse". Bundles are made in Python
 //! (src/photomap.py: maps/<name>.photomap/):
 //!     manifest.json   name, photo count
-//!     photos.json     per photo: file (originals/NNNNNN.ext), source, width, height, title, meta (any strings)
+//!     photos.json     per photo: file (originals/NNNNNN.ext), source, width, height, title, caption (optional), meta (any strings, for people to read)
 //!     originals/      the images; photo i = position i in photos.json
 //!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
 //!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
 //!     embeddings.bin  per photo: float16 vector (not used by the viewer)
-//!     pages_bc7.bin   made by the viewer on first open (bake.rs)
+//!     pages_bc7.bin   the always-loaded levels, made while the map is built (bake.rs)
 
 use memmap2::Mmap;
 use serde::Deserialize;
@@ -63,6 +63,9 @@ pub struct Photo {
     pub width: u32,
     pub height: u32,
     pub title: String,
+    /// Shown above the photo when zoomed in, and searched along with the picture (captions.bin); empty if the photo has none.
+    #[serde(default)]
+    pub caption: String,
     /// Whatever the image file said about itself: description, date taken, camera, location...
     #[serde(default)]
     #[allow(dead_code)] // not shown yet
@@ -117,12 +120,10 @@ impl MapData {
         if photos.len() != n || points.len() != n {
             return Err(std::io::Error::other("bundle files don't match"));
         }
-        // the always-loaded level: baked the first time (and again if the file is from when more levels were kept)
-        let baked = std::fs::metadata(bundle.join("pages_bc7.bin")).map(|m| m.len()).ok();
-        if baked != Some(crate::pages::resident_bytes(n) as u64) {
-            crate::bake::bake(bundle, &photos, progress)?;
-        }
         let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
+        if pages.len() != crate::pages::resident_bytes(n) {
+            return Err(std::io::Error::other("pages_bc7.bin is not the size of the photos"));
+        }
         let grid = Grid::new(&points);
         let mut regions: Regions = read("region_names.json").or_else(|_| read("regions.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for level in &mut regions.levels {

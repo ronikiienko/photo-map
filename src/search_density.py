@@ -30,7 +30,7 @@ if __name__ == "__main__":
     cap = np.load(CACHE).astype(np.float32)
     xy = np.fromfile(BUNDLE / "layout.bin", np.float32).reshape(n, 2)
     photos = json.loads((BUNDLE / "photos.json").read_text())
-    texts = [p["meta"].get("caption", "") for p in photos]
+    texts = [p.get("caption", "") for p in photos]
     has = np.array([bool(t) for t in texts])
     levels = photomap.cluster(xy)
     named = json.loads((BUNDLE / "regions.json").read_text())["levels"]

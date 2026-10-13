@@ -78,17 +78,4 @@ impl Library {
     pub fn root(&self) -> PathBuf {
         self.dir.parent().map(PathBuf::from).unwrap_or_default()
     }
-
-    /// The map opened last time, else the first one.
-    pub fn last(&self) -> Option<PathBuf> {
-        let last = std::fs::read_to_string(self.dir.join(".last")).ok();
-        let found = last.and_then(|name| self.maps.iter().find(|m| m.path.file_name().is_some_and(|f| f == name.trim())));
-        found.or(self.maps.first()).map(|m| m.path.clone())
-    }
-
-    pub fn remember(&self, bundle: &Path) {
-        if let Some(name) = bundle.file_name() {
-            let _ = std::fs::write(self.dir.join(".last"), name.to_string_lossy().as_bytes());
-        }
-    }
 }

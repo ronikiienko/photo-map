@@ -87,7 +87,7 @@ if __name__ == "__main__":
     bundle = config.ROOT / "maps/wikivoyage.photomap"
     n = json.loads((bundle / "manifest.json").read_text())["photos"]
     xy = np.fromfile(bundle / "layout.bin", np.float32).reshape(n, 2)
-    texts = [p["meta"].get("caption", "") for p in json.loads((bundle / "photos.json").read_text())]
+    texts = [p.get("caption", "") for p in json.loads((bundle / "photos.json").read_text())]
     levels = photomap.cluster(xy)
     named = json.loads((bundle / "regions.json").read_text())["levels"]
     rng = np.random.default_rng(1)

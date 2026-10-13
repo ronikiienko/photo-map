@@ -14,6 +14,8 @@ use tokenizers::Tokenizer;
 
 /// What the model sees in front of a search query (the model's own prompt for queries).
 pub const QUERY_PROMPT: &str = "task: search result | query: ";
+/// The model's default for a text that is searched (a caption), when it has no title.
+pub const DOCUMENT_PROMPT: &str = "title: none | text: ";
 /// CUDA libraries to load, dependencies first (ONNX Runtime's CUDA provider needs these four).
 const CUDA_LIBS: [&str; 4] = ["libcudart.so.13", "libcublasLt.so.13", "libcublas.so.13", "libcurand.so.10"];
 /// cuDNN (its softmax and attention helpers), also dependencies first.
@@ -155,6 +157,12 @@ impl Gemma {
         self.run(ids, Vec::new())
     }
 
+    /// A caption's vector (768 numbers, length 1), as the maps' captions were embedded.
+    pub fn embed_document(&mut self, text: &str) -> Result<Vec<f32>> {
+        let ids = self.tokens(&format!("{DOCUMENT_PROMPT}{text}"))?;
+        self.run(ids, Vec::new())
+    }
+
     /// A photo's vector (768 numbers, length 1), as the maps' photos were embedded: no prompt, at most 140 soft tokens.
     pub fn embed_image(&mut self, img: &RgbaImage) -> Result<Vec<f32>> {
         let cut = patches(img)?;
@@ -281,6 +289,31 @@ mod tests {
             let cos: f32 = want.iter().zip(&got).map(|(a, b)| a * b).sum();
             eprintln!("{file}: cosine with Python {cos:.5} ({:?})", started.elapsed());
             assert!(cos > 0.99, "{file}: cosine {cos}");
+        }
+    }
+
+    /// Speed of embedding real photos at different batch sizes (run by hand: cargo test --release batch_sizes -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn batch_sizes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let dir = root.join("maps/wikivoyage.photomap/originals");
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        let cuts: Vec<Patches> = files.iter().take(96).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
+        let mut model = Gemma::load(root).unwrap();
+        model.embed_patches(cuts[..4].iter().map(|c| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens }).collect()); // warm up
+        for batch in [1usize, 2, 4, 8, 12, 16] {
+            let started = std::time::Instant::now();
+            let mut done = 0;
+            for chunk in cuts.chunks(batch) {
+                let group: Vec<Patches> = chunk.iter().map(|c| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens }).collect();
+                for r in model.embed_patches(group) {
+                    r.unwrap();
+                    done += 1;
+                }
+            }
+            eprintln!("batch {batch:2}: {:.1} photos/s", done as f32 / started.elapsed().as_secs_f32());
         }
     }
 }

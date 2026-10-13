@@ -1,13 +1,13 @@
 """Photo map bundles for the photo-map viewer (photo-map/): made here, the viewer only shows them.
     python src/photomap.py regions maps/<name>.photomap     (re)name the regions of a bundle
-Region names come from the photos' captions (meta "caption") where there are any, checked against the photos by the
+Region names come from the photos' captions ("caption") where there are any, checked against the photos by the
 model, and from a big general vocabulary where captions don't give one.
 Data-specific scripts (map_wikivoyage.py) gather photos, vectors and text, then call make().
 
 A bundle, maps/<name>.photomap/:
     manifest.json     name, photo count, model
-    photos.json       per photo: file (originals/NNNNNN.ext), source, width, height, title, meta (strings: caption,
-                      article, ... shown in search)
+    photos.json       per photo: file (originals/NNNNNN.ext), source, width, height, title, caption (optional: shown above the photo,
+                      searched), meta (strings to read: article, url, ...)
     originals/        the images, flat: photo i is originals/<i, 6 digits>.<ext> (hard links where possible)
     embeddings.bin    per photo: vector, float16
     captions.bin      optional: per photo, the vector of its caption (float16); search and naming use it with the image's
@@ -50,7 +50,7 @@ def size(path):
 
 
 def make(bundle, photos, files, vectors, model=config.MODEL_ID):
-    """photos: per photo {title, source, meta}; files: the image files; vectors: n x dim (normalized).
+    """photos: per photo {title, source, caption (optional), meta}; files: the image files; vectors: n x dim (normalized).
     Unreadable images are left out. Writes a new bundle (an old one at the same path is replaced)."""
     bundle = Path(bundle)
     new = bundle.with_name(bundle.name + ".new")
@@ -80,7 +80,7 @@ def make(bundle, photos, files, vectors, model=config.MODEL_ID):
     vectors.astype(np.float16).tofile(new / "embeddings.bin")
     xy = lay_out(vectors)
     xy.tofile(new / "layout.bin")
-    regions(new, vectors, xy, [p["meta"].get("caption", "") for p in out])
+    regions(new, vectors, xy, [p.get("caption", "") for p in out])
     manifest = {"format": 1, "name": bundle.name.removesuffix(".photomap"), "created": time.strftime("%Y-%m-%d %H:%M"),
                 "photos": len(out), "world": WORLD, "embedding": {"model": model, "dim": vectors.shape[1], "dtype": "float16"}}
     (new / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -355,5 +355,5 @@ if __name__ == "__main__":
     b = Path(sys.argv[2])
     n = json.loads((b / "manifest.json").read_text())["photos"]
     vecs = np.fromfile(b / "embeddings.bin", np.float16).reshape(n, -1).astype(np.float32)
-    texts = [p["meta"].get("caption", "") for p in json.loads((b / "photos.json").read_text())]
+    texts = [p.get("caption", "") for p in json.loads((b / "photos.json").read_text())]
     regions(b, vecs, np.fromfile(b / "layout.bin", np.float32).reshape(n, 2), texts)

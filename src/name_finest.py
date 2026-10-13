@@ -24,7 +24,7 @@ if __name__ == "__main__":
     level = int(sys.argv[3]) if len(sys.argv) > 3 else 6
     n = json.loads((bundle / "manifest.json").read_text())["photos"]
     xy = np.fromfile(bundle / "layout.bin", np.float32).reshape(n, 2)
-    texts = [p["meta"].get("caption", "") for p in json.loads((bundle / "photos.json").read_text())]
+    texts = [p.get("caption", "") for p in json.loads((bundle / "photos.json").read_text())]
     levels = photomap.cluster(xy)
     lab = levels[level - 1]
     members = photomap.members(lab, lab.max() + 1)

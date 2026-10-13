@@ -39,7 +39,7 @@ def load_vectors(bundle):
     n = json.loads((bundle / "manifest.json").read_text())["photos"]
     img = np.fromfile(bundle / "embeddings.bin", np.float16).reshape(n, -1).astype(np.float32)
     photos = json.loads((bundle / "photos.json").read_text())
-    has = np.array([bool(p["meta"].get("caption", "")) for p in photos])
+    has = np.array([bool(p.get("caption", "")) for p in photos])
     cap_file = bundle / "captions.bin"
     cap = np.fromfile(cap_file, np.float16).reshape(n, -1).astype(np.float32) if has.any() and cap_file.exists() else np.zeros_like(img)
     if not cap.any():

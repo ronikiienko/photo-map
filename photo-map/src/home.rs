@@ -2,6 +2,7 @@
 
 use crate::build::{self, Stage, State};
 use crate::library::Library;
+use crate::storage::{self, Sizes};
 use crate::theme;
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, TextureHandle, Ui, vec2};
 use std::collections::HashMap;
@@ -10,7 +11,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 pub enum Action {
     Open(PathBuf),
-    Create { name: String, folder: PathBuf },
+    Create { name: String, folder: PathBuf, names_as_captions: bool },
     Pause(PathBuf),
     Continue(PathBuf),
     Discard(PathBuf),
@@ -36,6 +37,12 @@ enum Cover {
     None,
 }
 
+/// A map's sizes, measured on a thread (a big map has many files).
+enum Measured {
+    Loading(Receiver<Sizes>),
+    Ready(Sizes),
+}
+
 struct NewMap {
     folder: String,
     name: String,
@@ -43,10 +50,14 @@ struct NewMap {
     counted: String,
     count: Option<Receiver<usize>>,
     photos: Option<usize>,
+    names_as_captions: bool,
 }
 
 pub struct Home {
     covers: HashMap<PathBuf, Cover>,
+    sizes: HashMap<PathBuf, Measured>,
+    /// The map whose breakdown is open.
+    details: Option<PathBuf>,
     new_map: Option<NewMap>,
     confirm_discard: Option<PathBuf>,
     confirm_delete: Option<PathBuf>,
@@ -56,15 +67,16 @@ const COVER: f32 = 200.0;
 
 impl Home {
     pub fn new() -> Self {
-        Self { covers: HashMap::new(), new_map: None, confirm_discard: None, confirm_delete: None }
+        Self { covers: HashMap::new(), sizes: HashMap::new(), details: None, new_map: None, confirm_discard: None, confirm_delete: None }
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { folder: String::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None });
+        self.new_map = Some(NewMap { folder: String::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, names_as_captions: false });
     }
 
     pub fn forget_cover(&mut self, map: &Path) {
         self.covers.remove(map);
+        self.sizes.remove(map);
     }
 
     pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>) -> Vec<Action> {
@@ -187,12 +199,10 @@ impl Home {
             });
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                for s in Stage::ALL {
-                    if s == Stage::Finish {
-                        continue;
-                    }
-                    step_chip(ui, s, b.stage);
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let steps: Vec<Stage> = Stage::ALL.into_iter().filter(|&s| s != Stage::Finish).collect();
+                for (i, s) in steps.iter().enumerate() {
+                    step(ui, *s, b.stage, i + 1 == steps.len());
                 }
             });
             ui.add_space(6.0);
@@ -207,9 +217,12 @@ impl Home {
                     let mut line = format!("{}", b.stage.label());
                     if s.total > 0 {
                         line += &format!(" · {} of {}", thousands(s.done), thousands(s.total));
-                        let secs = s.stage_started.elapsed().as_secs_f32();
-                        if s.done > 0 && secs > 5.0 && s.done < s.total {
-                            line += &format!(" · about {} left", duration(secs * (s.total - s.done) as f32 / s.done as f32));
+                        let rate = s.rate().unwrap_or(0.0);
+                        if rate > 0.0 && matches!(b.stage, Stage::Scan | Stage::Copy | Stage::Embed) {
+                            line += &format!(" · {rate:.1} photos/s");
+                        }
+                        if rate > 0.0 && s.done < s.total {
+                            line += &format!(" · about {} left", duration((s.total - s.done) as f32 / rate));
                         }
                     }
                     if !s.message.is_empty() {
@@ -232,7 +245,7 @@ impl Home {
         let response = ui
             .allocate_ui(vec2(COVER, 0.0), |ui| {
                 ui.set_width(COVER);
-                let (rect, response) = ui.allocate_exact_size(vec2(COVER, COVER + 52.0), Sense::click());
+                let (rect, response) = ui.allocate_exact_size(vec2(COVER, COVER + 76.0), Sense::click());
                 let hovered = response.hovered();
                 let p = ui.painter();
                 p.rect_filled(rect, theme::RADIUS, if hovered { Color32::from_rgb(30, 33, 42) } else { Color32::from_rgb(24, 26, 33) });
@@ -249,10 +262,34 @@ impl Home {
                 p.text(rect.min + vec2(12.0, COVER + 6.0), Align2::LEFT_TOP, &e.name, egui::FontId::proportional(15.0), theme::TEXT);
                 let detail = if e.created.is_empty() { format!("{} photos", thousands(e.photos)) } else { format!("{} photos · {}", thousands(e.photos), e.created) };
                 p.text(rect.min + vec2(12.0, COVER + 28.0), Align2::LEFT_TOP, detail, egui::FontId::proportional(12.0), theme::MUTED);
-                response
+                // total on disk, and a bar of what it is made of; "details" opens the explanation
+                let sizes = self.sizes(&ctx, &e.path);
+                let text = sizes.map_or("measuring…".to_string(), |s| format!("{} on disk", storage::human(s.total())));
+                let line = rect.min + vec2(12.0, COVER + 50.0);
+                let p = ui.painter();
+                p.text(line, Align2::LEFT_TOP, text, egui::FontId::proportional(12.0), theme::TEXT);
+                let bar = egui::Rect::from_min_size(rect.min + vec2(12.0, COVER + 68.0), vec2(COVER - 24.0, 4.0));
+                p.rect_filled(bar, 2.0, Color32::from_rgb(38, 42, 52));
+                if let Some(s) = sizes {
+                    let total = s.total().max(1) as f32;
+                    let mut x = bar.left();
+                    for (i, part) in s.parts().iter().enumerate() {
+                        let w = bar.width() * part.bytes as f32 / total;
+                        p.rect_filled(egui::Rect::from_min_size(egui::pos2(x, bar.top()), vec2(w.max(1.0), 4.0)), 0.0, part_colour(i));
+                        x += w;
+                    }
+                }
+                let details = egui::Rect::from_min_size(rect.min + vec2(COVER - 62.0, COVER + 44.0), vec2(56.0, 20.0));
+                let more = ui.interact(details, ui.id().with(("details", &e.path)), Sense::click());
+                ui.painter().text(details.right_center() - vec2(4.0, 0.0), Align2::RIGHT_CENTER, "Details", egui::FontId::proportional(12.0), if more.hovered() { theme::ACCENT } else { theme::MUTED });
+                if more.clicked() {
+                    self.details = Some(e.path.clone());
+                }
+                (response, more)
             })
             .inner;
-        if response.clicked() {
+        let (response, more) = response;
+        if response.clicked() && !more.hovered() {
             actions.push(Action::Open(e.path.clone()));
         }
         response.context_menu(|ui| {
@@ -261,6 +298,63 @@ impl Home {
                 ui.close();
             }
         });
+    }
+
+    fn sizes(&mut self, ctx: &egui::Context, map: &Path) -> Option<Sizes> {
+        let entry = self.sizes.entry(map.to_path_buf()).or_insert_with(|| {
+            let (tx, rx) = channel();
+            let (path, ctx) = (map.to_path_buf(), ctx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(storage::measure(&path));
+                ctx.request_repaint();
+            });
+            Measured::Loading(rx)
+        });
+        if let Measured::Loading(rx) = entry {
+            if let Ok(s) = rx.try_recv() {
+                *entry = Measured::Ready(s);
+            }
+        }
+        match entry {
+            Measured::Ready(s) => Some(*s),
+            Measured::Loading(_) => None,
+        }
+    }
+
+    /// What takes the space in one map, part by part, with what each part is.
+    fn details_window(&mut self, ctx: &egui::Context, lib: &Library) {
+        let Some(path) = self.details.clone() else { return };
+        let Some(entry) = lib.maps.iter().find(|m| m.path == path) else {
+            self.details = None;
+            return;
+        };
+        let Some(sizes) = self.sizes(ctx, &path) else { return };
+        let mut open = true;
+        egui::Window::new(format!("What takes space in “{}”", entry.name)).open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).fixed_size([480.0, 0.0]).show(ctx, |ui| {
+            ui.label(RichText::new(format!("{} on disk", storage::human(sizes.total()))).size(17.0));
+            ui.label(theme::muted(format!("for {} photos", thousands(entry.photos))));
+            ui.add_space(8.0);
+            let total = sizes.total().max(1) as f32;
+            for (i, part) in sizes.parts().iter().enumerate() {
+                ui.horizontal(|ui| {
+                    theme::dot(ui, part_colour(i));
+                    ui.label(RichText::new(part.name).strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(theme::muted(format!("{} · {:.0}%", storage::human(part.bytes), 100.0 * part.bytes as f32 / total)));
+                    });
+                });
+                ui.label(theme::muted(part.about));
+                ui.add_space(6.0);
+            }
+            if sizes.linked > 0 {
+                ui.separator();
+                ui.label(RichText::new(format!("{} of photos are links, not copies", storage::human(sizes.linked))).strong());
+                ui.label(theme::muted("The map was made from photos on the same disk, so instead of copying them it points at the originals. They take no extra space here, and they are not counted above. If you delete or move the originals, the map keeps its own link to the data, so it still works."));
+            }
+        });
+        if !open {
+            self.details = None;
+        }
     }
 
     /// A 2 x 2 mosaic of the map's first photos, made once and kept in the map as cover.png.
@@ -328,6 +422,7 @@ impl Home {
                 self.confirm_delete = None;
             }
         }
+        self.details_window(ctx, lib);
         self.new_map_dialog(ctx, lib, actions);
     }
 
@@ -398,12 +493,14 @@ impl Home {
                 ui.label(theme::muted(p));
             }
             ui.add_space(8.0);
+            ui.checkbox(&mut nm.names_as_captions, "Use file names as captions").on_hover_text("Each photo's file name (without the extension) is shown above it when you zoom in, and search looks at it as well as at the picture. Only worth it if the names describe the photos.");
+            ui.add_space(8.0);
             ui.label(theme::muted("It can take a while for many photos. You can pause, close the app and carry on later."));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let ok = problem.is_none() && folder.is_dir() && nm.photos != Some(0);
                 if ui.add_enabled(ok, egui::Button::new(RichText::new("Create").strong()).fill(theme::ACCENT.gamma_multiply(0.6))).clicked() {
-                    create = Some(Action::Create { name: clean.clone(), folder: folder.clone() });
+                    create = Some(Action::Create { name: clean.clone(), folder: folder.clone(), names_as_captions: nm.names_as_captions });
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;
@@ -420,14 +517,9 @@ impl Home {
     }
 }
 
-fn step_chip(ui: &mut Ui, step: Stage, current: Stage) {
-    let (fill, text, mark) = if step < current {
-        (Color32::from_rgb(30, 45, 38), theme::OK, "✓ ")
-    } else if step == current {
-        (theme::ACCENT.gamma_multiply(0.3), theme::TEXT, "")
-    } else {
-        (Color32::from_rgb(30, 33, 41), theme::MUTED, "")
-    };
+/// One step of the list of steps: a dot (filled when done, ringed when current, empty when still to come) and its name.
+/// Plain text on the card, joined by a thin line, so it reads as a path and not as buttons.
+fn step(ui: &mut Ui, step: Stage, current: Stage, last: bool) {
     let short = match step {
         Stage::Scan => "Find",
         Stage::Copy => "Copy",
@@ -438,9 +530,27 @@ fn step_chip(ui: &mut Ui, step: Stage, current: Stage) {
         Stage::Bake => "Prepare",
         Stage::Finish => "Finish",
     };
-    egui::Frame::new().fill(fill).corner_radius(10).inner_margin(egui::Margin::symmetric(8, 2)).show(ui, |ui| {
-        ui.label(RichText::new(format!("{mark}{short}")).size(12.0).color(text));
-    });
+    let colour = if step < current { theme::OK } else if step == current { theme::ACCENT } else { theme::MUTED.gamma_multiply(0.6) };
+    let (dot, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+    let p = ui.painter();
+    if step < current {
+        p.circle_filled(dot.center(), 5.0, colour);
+    } else {
+        p.circle_stroke(dot.center(), 4.5, egui::Stroke::new(1.5, colour));
+        if step == current {
+            p.circle_filled(dot.center(), 2.5, colour);
+        }
+    }
+    let text = RichText::new(short).size(12.0).color(if step == current { theme::TEXT } else if step < current { theme::MUTED } else { theme::MUTED.gamma_multiply(0.7) });
+    ui.label(if step == current { text.strong() } else { text });
+    if !last {
+        let (line, _) = ui.allocate_exact_size(vec2(18.0, 12.0), Sense::hover());
+        ui.painter().hline(line.x_range(), line.center().y, egui::Stroke::new(1.0, if step < current { theme::OK.gamma_multiply(0.6) } else { theme::CARD_STROKE }));
+    }
+}
+
+fn part_colour(i: usize) -> Color32 {
+    [theme::ACCENT, theme::OK, Color32::from_rgb(230, 170, 90), Color32::from_rgb(200, 130, 220), Color32::from_rgb(110, 200, 210), theme::MUTED][i % 6]
 }
 
 /// 28 014 style grouping.

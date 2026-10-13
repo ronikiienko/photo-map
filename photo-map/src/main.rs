@@ -17,6 +17,7 @@ mod pages;
 mod regions;
 mod photo;
 mod search;
+mod storage;
 mod stream;
 mod theme;
 
@@ -35,7 +36,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 // intel_tex_2's precompiled ISPC kernels (BC7 encoding in stream.rs and bake.rs) need the C++ runtime
 #[link(name = "stdc++")]
@@ -128,6 +129,8 @@ struct Viewer {
     opening: Option<(PathBuf, JoinHandle<std::io::Result<MapData>>, Arc<Progress>)>,
     camera: Camera,
     keys: Keys,
+    alt: bool,
+    help_open: bool,
     cursor: Option<Vec2>,
     hovered: Option<usize>,
     /// The window with every match together.
@@ -184,6 +187,8 @@ impl Viewer {
             opening: None,
             camera,
             keys: Keys::default(),
+            alt: false,
+            help_open: false,
             cursor: None,
             hovered: None,
             gallery: Gallery::new(),
@@ -228,7 +233,6 @@ impl Viewer {
         let renderer = MapRenderer::new(&self.gpu, &data, &streamer);
         eprintln!("{}: {} photos opened in {:.1}s", data.manifest.name, data.n(), started.elapsed().as_secs_f32());
         self.window.set_title(&format!("{} — photo map", data.manifest.name));
-        self.library.remember(&path);
         self.camera.jump(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
         let n = data.n();
         let photo_world = median_neighbour_distance(&data.points);
@@ -329,7 +333,7 @@ impl Viewer {
         use home::Action;
         match action {
             Action::Open(path) => self.open(path),
-            Action::Create { name, folder } => match build::create(self.library.dir(), &name, &folder) {
+            Action::Create { name, folder, names_as_captions } => match build::create(self.library.dir(), &name, &folder, names_as_captions) {
                 Ok(dir) => {
                     self.library.refresh();
                     self.queue.push(dir);
@@ -371,6 +375,8 @@ impl Viewer {
 
     fn go_to_maps(&mut self) {
         self.page = Page::Maps;
+        self.gallery.clear();
+        self.map = None; // the Maps page needs none of it: give back its GPU memory
         self.library.refresh();
     }
 
@@ -528,12 +534,23 @@ impl Viewer {
         self.camera.fly_to((Vec2::new(p.x, p.y), self.camera.scale.max(wanted_scale)));
     }
 
+    /// Borderless, like mote-control: exclusive forces a modeset and Wayland ignores it.
+    fn toggle_fullscreen(&self) {
+        let on = self.window.fullscreen().is_none();
+        self.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
+    }
+
     fn key(&mut self, key: &Key, down: bool) {
+        if let (true, Key::Named(NamedKey::F11)) = (down, key) {
+            return self.toggle_fullscreen();
+        }
         if self.page != Page::Viewer {
             return;
         }
         if let (true, Key::Named(NamedKey::Escape)) = (down, key) {
-            if self.gallery.open {
+            if self.help_open {
+                self.help_open = false;
+            } else if self.gallery.open {
                 self.gallery.open = false;
             } else {
                 self.go_to_maps();
@@ -544,6 +561,10 @@ impl Viewer {
             match c.as_str() {
                 "n" | "N" | "]" => return self.step_match(1),
                 "p" | "P" | "[" => return self.step_match(-1),
+                "h" | "H" => {
+                    self.help_open = !self.help_open;
+                    return;
+                }
                 "g" | "G" => {
                     self.gallery.open = !self.gallery.open;
                     return;
@@ -609,7 +630,11 @@ impl Viewer {
                 MouseScrollDelta::LineDelta(_, y) => self.camera.scroll_lines(y),
                 MouseScrollDelta::PixelDelta(p) => self.camera.scroll_pixels(p.y as f32),
             },
+            WindowEvent::ModifiersChanged(m) => self.alt = m.state().alt_key(),
             WindowEvent::KeyboardInput { event, .. } => {
+                if self.alt && event.state == ElementState::Pressed && !event.repeat && event.logical_key == Key::Named(NamedKey::Enter) {
+                    return self.toggle_fullscreen();
+                }
                 let typing = self.ui.ctx.egui_wants_keyboard_input() && event.state == ElementState::Pressed;
                 if !typing && !egui_took {
                     self.key(&event.logical_key, event.state == ElementState::Pressed);
@@ -881,7 +906,7 @@ impl Viewer {
         });
         for i in visible.into_iter().take(200) {
             let photo = &m.data.photos[i];
-            let text = photo.meta.get("caption").and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()).unwrap_or(&photo.title).trim().to_string();
+            let text = (if photo.caption.trim().is_empty() { &photo.title } else { &photo.caption }).trim().to_string();
             // while a search is showing: the photo's similarity to it first, in the colour of its match (grey if it is no match)
             let score = (m.sims.len() == 2 * m.flags.len()).then(|| similarity(&m.sims, m.flags.len(), i, self.on)).flatten().map(|sim| (sim, m.flags[i]));
             if text.is_empty() && score.is_none() {
@@ -956,7 +981,7 @@ impl Viewer {
                     &|i| (m.sims.len() == 2 * n).then(|| similarity(&m.sims, n, i, on)).flatten(),
                     &|i| {
                         let photo = &m.data.photos[i];
-                        photo.meta.get("caption").and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()).unwrap_or(&photo.title).trim().to_string()
+                        (if photo.caption.trim().is_empty() { &photo.title } else { &photo.caption }).trim().to_string()
                     },
                 );
             }
@@ -968,9 +993,22 @@ impl Viewer {
                 ui.set_width(width - 24.0);
                 // row 1: the map, the search (takes what is left), whether search is up, options
                 ui.horizontal(|ui| {
-                    if ui.button("Maps").on_hover_text("back to your maps (Esc)").clicked() {
+                    // the way out, set apart from the search: a back arrow, a divider, then which map this is
+                    let (rect, back) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+                    let colour = if back.hovered() { egui::Color32::WHITE } else { theme::MUTED };
+                    if back.hovered() {
+                        ui.painter().rect_filled(rect, theme::RADIUS_SMALL, egui::Color32::from_white_alpha(14));
+                    }
+                    let c = rect.center();
+                    let stroke = egui::Stroke::new(1.8, colour);
+                    ui.painter().line_segment([c + egui::vec2(6.0, 0.0), c + egui::vec2(-6.0, 0.0)], stroke);
+                    ui.painter().line_segment([c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.0, -5.0)], stroke);
+                    ui.painter().line_segment([c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.0, 5.0)], stroke);
+                    if back.on_hover_text("back to your maps (Esc)").clicked() {
                         actions.back = true;
                     }
+                    let (line, _) = ui.allocate_exact_size(egui::vec2(1.0, 20.0), egui::Sense::hover());
+                    ui.painter().rect_filled(line, 0.0, theme::CARD_STROKE);
                     if let Some(m) = &self.map {
                         ui.label(theme::muted(&m.data.manifest.name));
                     }
@@ -1057,27 +1095,51 @@ impl Viewer {
 
         self.opening_card(&ctx);
 
-        // bottom left: the controls, as keys; bottom right: speed
+        // bottom left: a "?" that opens how the map works and the controls
         egui::Area::new("help".into()).anchor(egui::Align2::LEFT_BOTTOM, [12.0, -12.0]).show(&ctx, |ui| {
-            theme::card().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for (keys, what) in [
-                        (&["scroll", "Q", "E"][..], "zoom"),
-                        (&["drag", "W", "A", "S", "D"][..], "move"),
-                        (&["F"][..], "photos like the one under the mouse"),
-                        (&["N", "P"][..], "next / previous match"),
-                        (&["G"][..], "gallery"),
-                    ] {
-                        for k in keys {
-                            theme::key(ui, k);
-                        }
-                        ui.label(theme::muted(what));
-                        ui.add_space(8.0);
-                    }
-                });
-            });
+            let button = egui::Button::new(egui::RichText::new("?").strong()).min_size(egui::vec2(28.0, 28.0)).selected(self.help_open);
+            if ui.add(button).on_hover_text("how this works (H)").clicked() {
+                self.help_open = !self.help_open;
+            }
         });
+        if self.help_open {
+            egui::Area::new("help-card".into()).anchor(egui::Align2::LEFT_BOTTOM, [12.0, -52.0]).show(&ctx, |ui| {
+                {
+                    theme::card().show(ui, |ui| {
+                        ui.set_max_width(400.0);
+                        ui.label(egui::RichText::new("How the map works").size(17.0));
+                        ui.add_space(4.0);
+                        ui.label(theme::muted(
+                            "Every photo is turned into numbers that describe what it shows, and photos that look alike are placed close together. \
+                             Zoom in and similar photos sit side by side; the names mark regions of the map. \
+                             Search compares your words, or a photo you drop in, with every photo and highlights the best matches.",
+                        ));
+                        ui.add_space(8.0);
+                        egui::Grid::new("keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                            for (keys, what) in [
+                                (&["scroll", "Q", "E"][..], "zoom"),
+                                (&["drag", "W", "A", "S", "D"][..], "move"),
+                                (&["F"][..], "photos like the one under the mouse"),
+                                (&["N", "P"][..], "next / previous match"),
+                                (&["G"][..], "gallery of matches"),
+                                (&["F11", "Alt", "Enter"][..], "fullscreen"),
+                                (&["Esc"][..], "back to your maps"),
+                                (&["H"][..], "show / hide this help"),
+                            ] {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    for k in keys {
+                                        theme::key(ui, k);
+                                    }
+                                });
+                                ui.label(theme::muted(what));
+                                ui.end_row();
+                            }
+                        });
+                    });
+                }
+            });
+        }
         let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len().max(1) as f32;
         if let Some(m) = &self.map {
             egui::Area::new("fps".into()).anchor(egui::Align2::RIGHT_BOTTOM, [-14.0, -14.0]).show(&ctx, |ui| {
@@ -1118,7 +1180,7 @@ struct UiActions {
     /// A thumbnail in the gallery was clicked: its position among the matches.
     goto: Option<usize>,
     clear_photo: bool,
-    /// The "Maps" button.
+    /// The back arrow.
     back: bool,
     /// What the Maps page asked for.
     home: Vec<home::Action>,
@@ -1139,7 +1201,7 @@ impl Drop for Viewer {
 
 struct App {
     maps: PathBuf,
-    /// The bundle to open first (from the command line), else the one opened last.
+    /// The bundle to open first, if one was named on the command line; otherwise the app starts on the Maps page.
     first: Option<PathBuf>,
     viewer: Option<Viewer>,
 }
@@ -1152,7 +1214,7 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes().with_title("photo map").with_maximized(true);
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         let library = Library::new(self.maps.clone());
-        let first = self.first.take().or_else(|| library.last());
+        let first = self.first.take();
         self.viewer = Some(Viewer::new(window, library, first));
     }
 

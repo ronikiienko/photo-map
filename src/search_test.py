@@ -29,7 +29,7 @@ if __name__ == "__main__":
     n = json.loads((BUNDLE / "manifest.json").read_text())["photos"]
     img = np.fromfile(BUNDLE / "embeddings.bin", np.float16).reshape(n, -1).astype(np.float32)
     photos = json.loads((BUNDLE / "photos.json").read_text())
-    texts = [p["meta"].get("caption", "") for p in photos]
+    texts = [p.get("caption", "") for p in photos]
     has = np.array([bool(t) for t in texts])
     model = config.load_model()
     model.max_seq_length = 128  # captions are 8 tokens on average; the few very long ones are cut

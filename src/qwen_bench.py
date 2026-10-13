@@ -22,7 +22,7 @@ SIZES = (300, 1000, 3000, 6000)  # prompt tokens, about
 
 if __name__ == "__main__":
     photos = json.loads((config.ROOT / "maps/wikivoyage.photomap/photos.json").read_text())
-    captions = [p["meta"]["caption"] for p in photos if p["meta"].get("caption")]
+    captions = [p["caption"] for p in photos if p.get("caption")]
     tok = AutoTokenizer.from_pretrained(MODEL)
     t0 = time.time()
     model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16).cuda().eval()

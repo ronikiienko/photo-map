@@ -13,7 +13,7 @@ use crate::embed::{self, Gemma};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -73,6 +73,9 @@ pub struct Job {
     /// Set by the scan.
     #[serde(default)]
     pub photos: usize,
+    /// Every photo's file name is its caption (shown above it, and searched along with the picture).
+    #[serde(default)]
+    pub names_as_captions: bool,
 }
 
 impl Job {
@@ -107,7 +110,7 @@ pub fn clean_name(name: &str) -> String {
 }
 
 /// Start a new build: its folder with job.json. Err with what is wrong (name taken, folder missing).
-pub fn create(maps: &Path, name: &str, source: &Path) -> Result<PathBuf, String> {
+pub fn create(maps: &Path, name: &str, source: &Path, names_as_captions: bool) -> Result<PathBuf, String> {
     let name = clean_name(name);
     if name.is_empty() {
         return Err("give the map a name".into());
@@ -121,7 +124,7 @@ pub fn create(maps: &Path, name: &str, source: &Path) -> Result<PathBuf, String>
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, source: source.to_path_buf(), created, stage: Stage::Scan, photos: 0 }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, source: source.to_path_buf(), created, stage: Stage::Scan, photos: 0, names_as_captions }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -151,8 +154,24 @@ pub struct State {
     pub total: usize,
     pub message: String,
     pub stage_started: Instant,
+    /// Where the current piece of work began (time, count done then): speed and time left are measured from here, so a resumed stage is not fooled by what was already done.
+    pub base: (Instant, usize),
+    /// (time, count done) a few times a second over the last `WINDOW`, for the current speed.
+    pub samples: std::collections::VecDeque<(Instant, usize)>,
     pub error: Option<String>,
     pub finished: bool,
+}
+
+/// How far back the speed looks.
+const WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl State {
+    /// Items per second over the last 30 seconds (or since the work began, if that is shorter); None until there is 3 s to go by.
+    pub fn rate(&self) -> Option<f32> {
+        let &(first_at, first_done) = self.samples.front().unwrap_or(&self.base);
+        let secs = first_at.elapsed().as_secs_f32();
+        (secs >= 3.0 && self.done > first_done).then(|| (self.done - first_done) as f32 / secs)
+    }
 }
 
 struct Shared {
@@ -188,11 +207,21 @@ impl Ctx {
         let mut s = self.shared.state.lock().unwrap();
         s.done = done;
         s.total = total;
+        s.base = (Instant::now(), done);
+        s.samples.clear();
         s.message = message.into();
     }
 
     fn set_done(&self, done: usize) {
-        self.shared.state.lock().unwrap().done = done;
+        let mut s = self.shared.state.lock().unwrap();
+        s.done = done;
+        let now = Instant::now();
+        if s.samples.back().is_none_or(|&(t, _)| now.duration_since(t).as_millis() >= 500) {
+            s.samples.push_back((now, done));
+        }
+        while s.samples.len() > 2 && now.duration_since(s.samples[1].0) >= WINDOW {
+            s.samples.pop_front();
+        }
     }
 }
 
@@ -200,7 +229,7 @@ impl Run {
     /// Run (or go on with) the build in `dir` on a thread. `wake`: called when something changed, to redraw.
     pub fn start(dir: PathBuf, root: PathBuf, model: Arc<Mutex<Option<Gemma>>>, wake: impl Fn() + Send + 'static) -> Option<Run> {
         let job = Job::read(&dir)?;
-        let state = State { stage: job.stage, done: 0, total: 0, message: String::new(), stage_started: Instant::now(), error: None, finished: false };
+        let state = State { stage: job.stage, done: 0, total: 0, message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false };
         let shared = Arc::new(Shared { pause: AtomicBool::new(false), state: Mutex::new(state) });
         let ctx = Ctx { dir: dir.clone(), root, job, shared: shared.clone(), model };
         let handle = std::thread::spawn(move || {
@@ -388,22 +417,31 @@ fn copy(ctx: &mut Ctx) -> Result<Flow, String> {
         Err(Some(e)) => return Err(e),
         Ok(()) => {}
     }
+    let names = ctx.job.names_as_captions;
     let photos: Vec<serde_json::Value> = found
         .iter()
         .enumerate()
         .map(|(i, f)| {
+            let caption = if names { name_as_caption(&f.src) } else { String::new() };
             serde_json::json!({
                 "file": original_name(i, &f.src),
                 "source": f.src.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
                 "width": f.width,
                 "height": f.height,
                 "title": f.src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                "caption": caption,
                 "meta": {},
             })
         })
         .collect();
     write_atomic(&ctx.dir.join("photos.json"), &serde_json::to_vec(&photos).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     Ok(Flow::Done)
+}
+
+/// A file name read as words: no folders or extension, separators as spaces ("red_fox-02.jpg" -> "red fox 02").
+fn name_as_caption(path: &Path) -> String {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    stem.split(|c: char| c == '_' || c == '-' || c == '.' || c.is_whitespace()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 fn shard_path(dir: &Path, k: usize) -> PathBuf {
@@ -507,6 +545,45 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         all.extend(fs::read(shard_path(&ctx.dir, k)).map_err(|e| e.to_string())?);
     }
     write_atomic(&ctx.dir.join("embeddings.bin"), &all).map_err(|e| e.to_string())?;
+    if ctx.job.names_as_captions {
+        return embed_captions(ctx);
+    }
+    Ok(Flow::Done)
+}
+
+/// captions.bin: the vector of every photo's caption (zeros for a photo with none). Written in pieces as it goes, so a pause loses little.
+fn embed_captions(ctx: &mut Ctx) -> Result<Flow, String> {
+    let n = ctx.job.photos;
+    let target = ctx.dir.join("captions.bin");
+    if fs::metadata(&target).is_ok_and(|m| m.len() as usize == n * DIM * 2) {
+        return Ok(Flow::Done);
+    }
+    let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let part = ctx.dir.join("captions.part");
+    let row = DIM * 2;
+    // go on from the rows already written
+    let have = (fs::metadata(&part).map_or(0, |m| m.len() as usize) / row).min(n);
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&part).map_err(|e| e.to_string())?;
+    file.set_len((have * row) as u64).map_err(|e| e.to_string())?;
+    ctx.progress(have, n, "reading the captions");
+    for chunk_start in (have..n).step_by(64) {
+        if ctx.paused() {
+            return Ok(Flow::Paused);
+        }
+        let mut bytes = Vec::with_capacity(64 * row);
+        for photo in &photos[chunk_start..(chunk_start + 64).min(n)] {
+            let text = photo["caption"].as_str().unwrap_or("");
+            let vector = if text.is_empty() { None } else { ctx.model.lock().unwrap().as_mut().ok_or("the model is gone")?.embed_document(text).ok() };
+            match vector {
+                Some(v) => bytes.extend(v.iter().flat_map(|&x| half::f16::from_f32(x).to_le_bytes())),
+                None => bytes.extend(std::iter::repeat_n(0u8, row)),
+            }
+        }
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+        ctx.set_done((chunk_start + 64).min(n));
+    }
+    drop(file);
+    fs::rename(&part, &target).map_err(|e| e.to_string())?;
     Ok(Flow::Done)
 }
 
@@ -655,8 +732,8 @@ mod tests {
         fs::write(source.join("notes.txt"), "not a photo").unwrap();
 
         let model = Arc::new(Mutex::new(Some(Gemma::load(&root).unwrap())));
-        let dir = create(&maps, "test map", &source).unwrap();
-        assert!(create(&maps, "test map", &source).is_err(), "a second map with the same name");
+        let dir = create(&maps, "test map", &source, true).unwrap();
+        assert!(create(&maps, "test map", &source, true).is_err(), "a second map with the same name");
         // stop and go on a few times at arbitrary moments
         for pause_after_ms in [0u64, 150, 900, 2500] {
             let run = Run::start(dir.clone(), root.clone(), model.clone(), || {}).unwrap();
@@ -682,6 +759,8 @@ mod tests {
         assert_eq!(fs::metadata(done.join("embeddings.bin")).unwrap().len() as usize, count * DIM * 2);
         let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(done.join("photos.json")).unwrap()).unwrap();
         assert_eq!(photos.len(), count);
+        assert!(photos.iter().all(|p| p["caption"] == p["title"]), "every photo's caption is its file name");
+        assert_eq!(fs::metadata(done.join("captions.bin")).unwrap().len() as usize, count * DIM * 2);
         assert!(done.join(photos[count - 1]["file"].as_str().unwrap()).exists());
         // the vectors are unit length and not all alike
         let raw = fs::read(done.join("embeddings.bin")).unwrap();

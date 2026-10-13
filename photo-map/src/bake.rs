@@ -1,6 +1,5 @@
 //! The always-loaded levels (1 px ... 32 px) as BC7 pages: pages_bc7.bin, uploaded to the GPU as it is.
-//! Made by the viewer the first time it opens a bundle without one (bundles come from Python, which has no fast
-//! BC7 encoder), then kept in the bundle.
+//! Made as the last step of building a map (build.rs), and kept in the bundle.
 //! Every level L holds each photo in a slot of 2^L px (photo fitted into the top-left corner, real shape kept,
 //! small photos enlarged). Slots sit on PAGE x PAGE pages in a grid of PAGE / 2^L per row; slot = photo index.
 //! Pages are written level 0 first, each as BC7 blocks (16 bytes per 4 x 4 pixels).
@@ -26,7 +25,7 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     let step = |msg: String| eprintln!("[{:5.0}s] {msg}", started.elapsed().as_secs_f32());
     step(format!("{}: baking the always-loaded levels of {n} photos", bundle.display()));
 
-    progress.stage("first time this map is opened: baking its small pictures (step 1 of 2, reading every photo)", n);
+    progress.stage("preparing small pictures (step 1 of 2, reading every photo)", n);
     // 1. every photo fitted to 32 px (longer side) in the corner of a 32 x 32 tile
     let done = AtomicUsize::new(0);
     let mut tiles = vec![0u8; n * TOP * TOP * 4];
@@ -50,7 +49,7 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     let settings = intel_tex_2::bc7::opaque_basic_settings();
     let mut levels: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
     for level in (0..LEVELS).rev() {
-        progress.stage("first time this map is opened: baking its small pictures (step 2 of 2, compressing them)", LEVELS);
+        progress.stage("preparing small pictures (step 2 of 2, compressing them)", LEVELS);
         progress.set_done(LEVELS - 1 - level);
         let s = 1 << level;
         let per_row = PAGE / s;

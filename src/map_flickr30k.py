@@ -1,7 +1,7 @@
 """The Flickr30k photo map: maps/flickr30k.photomap (31,014 photos with five human-written captions each, from
 data/flickr30k: huggingface.co/datasets/nlphuji/flickr30k, the images zip extracted to data/flickr30k/images/).
     python src/map_flickr30k.py
-The first caption is each photo's caption (shown above it, searched); all five go in the metadata, and the caption vector
+The first caption is each photo's caption (shown above it, searched); all five go in the metadata ("captions"), and the caption vector
 (captions.bin) is the average of the five captions' vectors. The image vectors are kept in index/flickr30k/.
 """
 
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     photomap.step(f"{len(recs):,} photos")
     vectors = embed([r["file"] for r in recs])
     photos = [
-        {"title": r["captions"][0], "source": f"flickr30k/{r['file'].name}", "meta": {"caption": r["captions"][0], "captions": SEP.join(r["captions"])}}
+        {"title": r["captions"][0], "source": f"flickr30k/{r['file'].name}", "caption": r["captions"][0], "meta": {"captions": SEP.join(r["captions"])}}
         for r in recs
     ]
     photomap.make(BUNDLE, photos, [r["file"] for r in recs], vectors)
