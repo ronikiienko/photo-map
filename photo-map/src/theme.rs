@@ -169,3 +169,22 @@ pub fn window_header(ui: &mut Ui, title: &str) -> bool {
     ui.add_space(4.0);
     closed
 }
+
+/// A dialog over a dimmed page that blocks the page behind it (egui's `Modal`): it can't be covered by a click outside it.
+/// The caller says what closes it: `should_close` on the response is true for a click on the backdrop or Esc.
+pub fn modal<T>(ctx: &egui::Context, id: &str, width: f32, title: Option<&str>, content: impl FnOnce(&mut Ui) -> T) -> egui::ModalResponse<T> {
+    let frame = egui::Frame::new()
+        .fill(Color32::from_rgb(20, 22, 29))
+        .stroke(Stroke::new(1.0, CARD_STROKE))
+        .corner_radius(CornerRadius::from(RADIUS))
+        .inner_margin(Margin::same(16))
+        .shadow(egui::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(110) });
+    egui::Modal::new(egui::Id::new(id)).frame(frame).backdrop_color(Color32::from_black_alpha(130)).show(ctx, |ui| {
+        ui.set_width(width);
+        if let Some(title) = title {
+            ui.label(RichText::new(title).size(17.0));
+            ui.add_space(6.0);
+        }
+        content(ui)
+    })
+}

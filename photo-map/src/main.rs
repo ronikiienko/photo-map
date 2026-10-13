@@ -131,6 +131,8 @@ struct Viewer {
     keys: Keys,
     alt: bool,
     help_open: bool,
+    /// Files and folders dropped on the Maps page this frame.
+    dropped: Vec<PathBuf>,
     cursor: Option<Vec2>,
     hovered: Option<usize>,
     /// The window with every match together.
@@ -189,6 +191,7 @@ impl Viewer {
             keys: Keys::default(),
             alt: false,
             help_open: false,
+            dropped: Vec::new(),
             cursor: None,
             hovered: None,
             gallery: Gallery::new(),
@@ -265,7 +268,7 @@ impl Viewer {
                 home::BuildView {
                     dir: b.dir.clone(),
                     name: b.job.name.clone(),
-                    source: b.job.source.clone(),
+                    source: build::describe(&b.job.sources),
                     stage: state.as_ref().map_or(b.job.stage, |s| s.stage),
                     running: run.is_some_and(|r| r.running()),
                     queued: self.queue.contains(&b.dir),
@@ -336,7 +339,7 @@ impl Viewer {
         use home::Action;
         match action {
             Action::Open(path) => self.open(path),
-            Action::Create { name, folder, names_as_captions } => match build::create(self.library.dir(), &name, &folder, names_as_captions) {
+            Action::Create { name, sources, names_as_captions } => match build::create(self.library.dir(), &name, &sources, names_as_captions) {
                 Ok(dir) => {
                     self.library.refresh();
                     self.queue.push(dir);
@@ -644,6 +647,19 @@ impl Viewer {
                 } else if event.state == ElementState::Released {
                     self.key(&event.logical_key, false); // never leave a key stuck down
                 }
+            }
+            WindowEvent::HoveredFile(_) if self.page == Page::Maps => {
+                self.home.set_drag_over(true);
+                self.window.request_redraw();
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.home.set_drag_over(false);
+                self.window.request_redraw();
+            }
+            // one event per dropped file: kept until the next frame, then handed over together
+            WindowEvent::DroppedFile(path) if self.page == Page::Maps => {
+                self.dropped.push(path);
+                self.window.request_redraw();
             }
             WindowEvent::DroppedFile(path) if self.page == Page::Viewer => {
                 if path.extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_TYPES.contains(&e.to_lowercase().as_str())) {
@@ -957,6 +973,10 @@ impl Viewer {
     fn build_ui(&mut self, ui: &mut egui::Ui, actions: &mut UiActions) {
         let ctx = ui.ctx().clone();
         if self.page == Page::Maps {
+            let dropped = std::mem::take(&mut self.dropped);
+            if !dropped.is_empty() && !self.home.dropped(dropped) {
+                self.notice = Some(("that isn't a folder or a photo I can use (jpg, png, webp, gif, bmp)".into(), false));
+            }
             let views = self.build_views();
             let notice = self.notice.clone();
             let ready_msg = notice.as_ref().filter(|(_, good)| *good).map(|(m, _)| m.as_str());

@@ -66,7 +66,10 @@ impl Stage {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Job {
     pub name: String,
-    pub source: PathBuf,
+    /// What the photos come from: folders (their sub-folders too) and single photo files. A job file from before this
+    /// had a single folder here as a string.
+    #[serde(rename = "source", deserialize_with = "one_or_many")]
+    pub sources: Vec<PathBuf>,
     pub created: String,
     /// The stage to run next (everything before it is done).
     pub stage: Stage,
@@ -76,6 +79,36 @@ pub struct Job {
     /// Every photo's file name is its caption (shown above it, and searched along with the picture).
     #[serde(default)]
     pub names_as_captions: bool,
+}
+
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PathBuf>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Sources {
+        One(PathBuf),
+        Many(Vec<PathBuf>),
+    }
+    Ok(match Sources::deserialize(d)? {
+        Sources::One(p) => vec![p],
+        Sources::Many(v) => v,
+    })
+}
+
+/// A few words for where the photos come from: the folder, or how many folders and photos.
+pub fn describe(sources: &[PathBuf]) -> String {
+    match sources {
+        [one] => one.display().to_string(),
+        _ => {
+            let folders = sources.iter().filter(|p| p.is_dir()).count();
+            let photos = sources.len() - folders;
+            let part = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+            match (folders, photos) {
+                (0, p) => part(p, "photo"),
+                (f, 0) => part(f, "folder"),
+                (f, p) => format!("{} and {}", part(f, "folder"), part(p, "photo")),
+            }
+        }
+    }
 }
 
 impl Job {
@@ -110,13 +143,13 @@ pub fn clean_name(name: &str) -> String {
 }
 
 /// Start a new build: its folder with job.json. Err with what is wrong (name taken, folder missing).
-pub fn create(maps: &Path, name: &str, source: &Path, names_as_captions: bool) -> Result<PathBuf, String> {
+pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: bool) -> Result<PathBuf, String> {
     let name = clean_name(name);
     if name.is_empty() {
         return Err("give the map a name".into());
     }
-    if !source.is_dir() {
-        return Err("that folder doesn't exist".into());
+    if sources.is_empty() || sources.iter().any(|s| !s.exists()) {
+        return Err("that folder or photo doesn't exist".into());
     }
     if building_dir(maps, &name).exists() || finished_dir(maps, &name).exists() {
         return Err(format!("there is already a map called {name}"));
@@ -124,7 +157,7 @@ pub fn create(maps: &Path, name: &str, source: &Path, names_as_captions: bool) -
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, source: source.to_path_buf(), created, stage: Stage::Scan, photos: 0, names_as_captions }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, sources: sources.to_vec(), created, stage: Stage::Scan, photos: 0, names_as_captions }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -311,9 +344,24 @@ struct Found {
     height: u32,
 }
 
-/// Every photo file in a folder and the folders inside it (not hidden ones).
-pub fn walk_public(dir: &Path, out: &mut Vec<PathBuf>) {
-    walk(dir, 0, out);
+pub fn is_photo(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| TYPES.contains(&e.to_lowercase().as_str()))
+}
+
+/// Every photo among the sources: the photo files themselves, and those in the folders and the folders inside them (not hidden
+/// ones). Sorted, each once.
+pub fn collect_photos(sources: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for source in sources {
+        if source.is_dir() {
+            walk(source, 0, &mut out);
+        } else if is_photo(source) {
+            out.push(source.clone());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -328,7 +376,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             if depth < 16 {
                 walk(&path, depth + 1, out);
             }
-        } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| TYPES.contains(&e.to_lowercase().as_str())) {
+        } else if is_photo(&path) {
             out.push(path);
         }
     }
@@ -347,10 +395,8 @@ fn shown_size(path: &Path) -> Option<(u32, u32)> {
 }
 
 fn scan(ctx: &mut Ctx) -> Result<Flow, String> {
-    ctx.progress(0, 0, "looking through the folder");
-    let mut files = Vec::new();
-    walk(&ctx.job.source, 0, &mut files);
-    files.sort();
+    ctx.progress(0, 0, "looking for photos");
+    let files = collect_photos(&ctx.job.sources);
     let total = files.len();
     ctx.progress(0, total, format!("{total} photo files, checking them"));
     let done = AtomicUsize::new(0);
@@ -715,6 +761,26 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
 mod tests {
     use super::*;
 
+    /// Photos come from folders and single files, each once; a job file from before the list reads as one folder.
+    #[test]
+    fn sources_can_be_folders_and_files() {
+        let temp = std::env::temp_dir().join(format!("photo-map-sources-test-{}", std::process::id()));
+        fs::create_dir_all(temp.join("a/inner")).unwrap();
+        fs::create_dir_all(temp.join("b")).unwrap();
+        for f in ["a/1.jpg", "a/inner/2.png", "a/notes.txt", "b/3.jpg", "b/4.jpg"] {
+            fs::write(temp.join(f), b"x").unwrap();
+        }
+        let found = collect_photos(&[temp.join("a"), temp.join("a/1.jpg"), temp.join("b/3.jpg"), temp.join("b/notes.txt")]);
+        let names: Vec<String> = found.iter().map(|p| p.strip_prefix(&temp).unwrap().display().to_string()).collect();
+        assert_eq!(names, ["a/1.jpg", "a/inner/2.png", "b/3.jpg"]);
+        assert_eq!(describe(&[temp.join("a"), temp.join("b/3.jpg"), temp.join("b/4.jpg")]), "1 folder and 2 photos");
+        let old: Job = serde_json::from_str(r#"{"name":"x","source":"/photos","created":"","stage":"scan"}"#).unwrap();
+        assert_eq!(old.sources, [PathBuf::from("/photos")]);
+        let new: Job = serde_json::from_str(r#"{"name":"x","source":["/a","/b/c.jpg"],"created":"","stage":"scan"}"#).unwrap();
+        assert_eq!(new.sources.len(), 2);
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
     /// A folder of photos becomes a map's vectors, also when the build is paused and continued several times on the way.
     #[test]
     fn builds_from_a_folder_and_resumes() {
@@ -732,8 +798,8 @@ mod tests {
         fs::write(source.join("notes.txt"), "not a photo").unwrap();
 
         let model = Arc::new(Mutex::new(Some(Gemma::load(&root).unwrap())));
-        let dir = create(&maps, "test map", &source, true).unwrap();
-        assert!(create(&maps, "test map", &source, true).is_err(), "a second map with the same name");
+        let dir = create(&maps, "test map", &[source.clone()], true).unwrap();
+        assert!(create(&maps, "test map", &[source.clone()], true).is_err(), "a second map with the same name");
         // stop and go on a few times at arbitrary moments
         for pause_after_ms in [0u64, 150, 900, 2500] {
             let run = Run::start(dir.clone(), root.clone(), model.clone(), || {}).unwrap();
