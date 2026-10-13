@@ -51,11 +51,14 @@ pub fn prepare(img: &RgbaImage, size: u32) -> Result<Vec<f32>> {
     if img.width() == 0 || img.height() == 0 {
         return Err("empty photo".into());
     }
-    let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
-    let rgb = image::imageops::resize(&rgb, size, size, image::imageops::FilterType::Triangle);
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer, images::{Image, ImageRef}};
+    let from = ImageRef::new(img.width(), img.height(), img.as_raw(), PixelType::U8x4).map_err(|e| e.to_string())?;
+    let mut to = Image::new(size, size, PixelType::U8x4);
+    // the bilinear filter, widened when the photo shrinks, is the triangle filter: every source pixel counts
+    Resizer::new().resize(&from, &mut to, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))).map_err(|e| e.to_string())?;
     let plane = (size * size) as usize;
     let mut out = vec![0f32; 3 * plane];
-    for (i, p) in rgb.pixels().enumerate() {
+    for (i, p) in to.buffer().chunks_exact(4).enumerate() {
         for c in 0..3 {
             out[c * plane + i] = p[c] as f32 / 127.5 - 1.0;
         }
@@ -287,7 +290,7 @@ mod tests {
                 spec.prepare(&img).unwrap();
                 prepare += t.elapsed().as_secs_f32();
                 let t = std::time::Instant::now();
-                image::imageops::thumbnail(&img, 64, 64);
+                crate::build::thumbnail(&img);
                 small += t.elapsed().as_secs_f32();
                 done += 1;
             }

@@ -28,3 +28,4 @@ umap-rs = "0.4.5"
 ndarray = { version = "0.17", features = ["rayon"] }
 delaunator = "1.1.0"
 rfd = "0.17"
+fast_image_resize = "6.1.0"

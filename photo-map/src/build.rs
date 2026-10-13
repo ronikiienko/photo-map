@@ -245,10 +245,16 @@ pub const RECENT: usize = 9;
 const THUMB: u32 = 64;
 
 /// The middle square of a photo, small.
-fn thumbnail(img: &image::RgbaImage) -> image::RgbaImage {
+pub(crate) fn thumbnail(img: &image::RgbaImage) -> image::RgbaImage {
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer, images::{Image, ImageRef}};
     let side = img.width().min(img.height());
-    let square = image::imageops::crop_imm(img, (img.width() - side) / 2, (img.height() - side) / 2, side, side).to_image();
-    image::imageops::thumbnail(&square, THUMB, THUMB)
+    let (x, y) = ((img.width() - side) / 2, (img.height() - side) / 2);
+    let from = ImageRef::new(img.width(), img.height(), img.as_raw(), PixelType::U8x4).expect("the buffer is the photo's");
+    let mut to = Image::new(THUMB, THUMB, PixelType::U8x4);
+    // the middle square, shrunk with the box filter (every source pixel counts equally, like `imageops::thumbnail`)
+    let options = ResizeOptions::new().crop(x as f64, y as f64, side as f64, side as f64).resize_alg(ResizeAlg::Convolution(FilterType::Box));
+    Resizer::new().resize(&from, &mut to, &options).expect("same pixel type");
+    image::RgbaImage::from_raw(THUMB, THUMB, to.into_vec()).expect("THUMB squared pixels")
 }
 
 /// How far back the speed looks.
