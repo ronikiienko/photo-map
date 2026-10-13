@@ -112,7 +112,7 @@ pub fn dot(ui: &mut Ui, colour: Color32) {
 /// Pick one of several values, side by side as one block. Returns true when the pick changed.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str, &str)]) -> bool {
     let before = *value;
-    ui.scope(|ui| {
+    ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         for &(v, text, tip) in options {
             ui.selectable_value(value, v, text).on_hover_text(tip);

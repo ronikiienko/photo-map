@@ -238,6 +238,9 @@ impl Viewer {
         let photo_world = median_neighbour_distance(&data.points);
         self.status.clear();
         let vectors = search::Vectors::open(&path, n);
+        if !vectors.as_ref().is_some_and(|v| v.has_captions()) {
+            self.on = SearchOn::Both; // the choice is hidden for a map without captions
+        }
         let in_process = vectors.is_some();
         self.asked = None;
         self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, photo_world, sims: Vec::new(), order: Vec::new(), at: None, vectors });
@@ -1013,23 +1016,40 @@ impl Viewer {
                         ui.label(theme::muted(&m.data.manifest.name));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.menu_button("Options", |ui| {
-                            ui.set_min_width(240.0);
-                            ui.label(theme::muted("SEARCH IN"));
-                            let options = [
-                                (SearchOn::Both, "Both", "a photo's similarity is the better of its image's and its caption's"),
-                                (SearchOn::Images, "Images", "only what the pictures look like"),
-                                (SearchOn::Captions, "Captions", "only the captions (photos without one don't match)"),
-                            ];
-                            if theme::segmented(ui, &mut self.on, &options) {
-                                actions.reblend = true;
-                            }
-                            ui.add_space(4.0);
-                            ui.label(theme::muted("MOST SIMILAR PHOTOS TO SHOW"));
-                            let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
-                            if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
-                                actions.reblend = true;
-                            }
+                        // stays open while you change things: it closes on a click outside it
+                        let stay_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                        egui::containers::menu::MenuButton::new("Options").config(stay_open).ui(ui, |ui| {
+                            ui.set_width(280.0);
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                let captioned = self.map.as_ref().and_then(|m| m.vectors.as_ref()).is_some_and(|v| v.has_captions());
+                                ui.label(theme::muted("SEARCH IN"));
+                                if captioned {
+                                    let options = [
+                                        (SearchOn::Both, "Both", "a photo's similarity is the better of its image's and its caption's"),
+                                        (SearchOn::Images, "Images", "only what the pictures look like"),
+                                        (SearchOn::Captions, "Captions", "only the captions (photos without one don't match)"),
+                                    ];
+                                    if theme::segmented(ui, &mut self.on, &options) {
+                                        actions.reblend = true;
+                                    }
+                                    ui.label(theme::muted(match self.on {
+                                        SearchOn::Both => "What a photo shows or what its caption says, whichever fits better.",
+                                        SearchOn::Images => "Only what the pictures show.",
+                                        SearchOn::Captions => "Only the written captions. Photos without one never match.",
+                                    }));
+                                } else {
+                                    ui.label("Pictures");
+                                    ui.label(theme::muted("This map has no captions, so your words are compared with what the pictures show."));
+                                }
+                                ui.add_space(10.0);
+                                ui.label(theme::muted("BEST MATCHES TO MARK"));
+                                let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
+                                if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
+                                    actions.reblend = true;
+                                }
+                                ui.label(theme::muted("Always marks exactly this many photos, best first, from yellow (strong) to red (weak). It does not judge whether they are good matches."));
+                                ui.label(theme::muted("Too few: good matches beyond the count are missed. Too many: poor matches get marked too."));
+                            });
                         });
                         // whether a search can run now
                         let searchable = self.map.as_ref().is_some_and(|m| m.vectors.is_some());
@@ -1040,7 +1060,7 @@ impl Viewer {
                             ui.label(theme::muted("map not searchable")).on_hover_text("it has no embeddings.bin of the right size");
                             theme::dot(ui, theme::MUTED);
                         } else if let Some(gpu) = self.engine.ready {
-                            ui.label(theme::muted(if gpu { "search ready" } else { "search ready (CPU)" }));
+                            ui.label(theme::muted(if gpu { "search ready" } else { "search ready (CPU)" })).on_hover_text("The AI model that turns your words or photo into numbers is loaded. It runs on this computer, nothing is sent anywhere.");
                             theme::dot(ui, theme::OK);
                         } else if self.map.is_some() {
                             ui.label(theme::muted("search starting"));
@@ -1049,7 +1069,7 @@ impl Viewer {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             let edit = ui.add(
                                 egui::TextEdit::singleline(&mut self.search)
-                                    .hint_text("Search the map: words, or drop in a photo")
+                                    .hint_text("Search the map: describe what you look for, or drop in a photo")
                                     .margin(egui::Margin::symmetric(10, 6))
                                     .desired_width(ui.available_width()),
                             );

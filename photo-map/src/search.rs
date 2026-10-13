@@ -128,6 +128,10 @@ impl Vectors {
         Some(Self { images: map("embeddings.bin")?, captions: map("captions.bin"), n })
     }
 
+    pub fn has_captions(&self) -> bool {
+        self.captions.is_some()
+    }
+
     /// The query's cosine with every photo's image, then with every photo's caption, as the viewer keeps them (u16: 0..1 as 0..65535;
     /// 0 for a photo with no caption). The query is a unit vector, so is each photo's.
     pub fn cosines(&self, query: &[f32]) -> Vec<u16> {
