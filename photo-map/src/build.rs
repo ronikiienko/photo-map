@@ -627,7 +627,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                 let range = k * SHARD..k * SHARD + shard_len(n, k);
                 let cuts: Vec<Option<(embed::Patches, image::RgbaImage)>> = range
                     .into_par_iter()
-                    .map(|i| if stop.load(Ordering::Relaxed) || reused[i] { None } else { crate::photo::load(&files[i]).and_then(|img| Some((embed::patches(&img).ok()?, thumbnail(&img)))) })
+                    .map(|i| if stop.load(Ordering::Relaxed) || reused[i] { None } else { crate::photo::load_for(&files[i], embed::longest_side_needed).and_then(|img| Some((embed::patches(&img).ok()?, thumbnail(&img)))) })
                     .collect();
                 if stop.load(Ordering::Relaxed) || tx.send((k, cuts)).is_err() {
                     return;

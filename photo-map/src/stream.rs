@@ -271,7 +271,7 @@ impl Streamer {
 /// whole 4 x 4 blocks by repeating the edge, and BC7-compress.
 fn decode(job: &Job) -> Loaded {
     let mut loaded = Loaded { id: job.id, levels: Vec::new() };
-    let Some(rgba) = photo::load(&job.path) else { return loaded };
+    let Some(rgba) = photo::load_for(&job.path, |_, _| slot_size(job.to)) else { return loaded };
     let long = rgba.width().max(rgba.height());
     let settings = intel_tex_2::bc7::opaque_ultra_fast_settings();
     for level in job.from..=job.to {

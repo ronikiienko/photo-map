@@ -94,7 +94,7 @@ impl Gallery {
                                 None if self.asked.insert(photo) => {
                                     let (tx, ctx, path) = (self.tx.clone(), ctx.clone(), file(photo));
                                     rayon::spawn(move || {
-                                        if let Some(image) = photo::load(&path) {
+                                        if let Some(image) = photo::load_for(&path, |_, _| READ_PX) {
                                             let small = photo::fit(&image, READ_PX, false);
                                             let color = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
                                             let _ = tx.send((photo, color));

@@ -33,7 +33,7 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     let mut tiles = vec![0u8; n * TOP * TOP * 4];
     let mut content = vec![(0usize, 0usize); n];
     tiles.par_chunks_mut(TOP * TOP * 4).zip(content.par_iter_mut()).enumerate().for_each(|(i, (tile, size))| {
-        if let Some(img) = photo::load(&bundle.join(&photos[i].file)) {
+        if let Some(img) = photo::load_for(&bundle.join(&photos[i].file), |_, _| TOP as u32) {
             let img = photo::fit(&img, TOP as u32, true);
             *size = (img.width() as usize, img.height() as usize);
             for (y, row) in img.as_raw().chunks(img.width() as usize * 4).enumerate() {

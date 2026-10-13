@@ -77,6 +77,11 @@ pub struct Patches {
 }
 
 /// The size a photo is scaled to: its shape kept, the most patches that fit the budget, both sides a multiple of 48.
+/// How long the longer side of a photo of this size must at least be for `patches` (what it is scaled to), 0 if it can't be cut.
+pub fn longest_side_needed(width: u32, height: u32) -> u32 {
+    scaled_size(height, width).map_or(0, |(h, w)| h.max(w))
+}
+
 fn scaled_size(height: u32, width: u32) -> Result<(u32, u32)> {
     let side = POOL * PATCH;
     let factor = ((MAX_PATCHES * PATCH * PATCH) as f64 / (height as f64 * width as f64)).sqrt();
@@ -192,17 +197,23 @@ impl Gemma {
             Ok(f) => f,
             Err(e) => return (0..n).map(|_| Err(e.clone())).collect(),
         };
+        // the text model takes the photos together as well: their token lists padded to the longest, the padding masked out
         let mut start = 0;
-        soft.into_iter()
+        let photos: Vec<(Vec<i64>, Vec<f32>)> = soft
+            .into_iter()
             .map(|tokens| {
                 let part = features[start * 512..(start + tokens) * 512].to_vec();
                 start += tokens;
                 let mut ids = vec![BOS, BOI];
                 ids.extend(std::iter::repeat_n(SOFT, tokens));
                 ids.extend([EOI, EOS]);
-                self.run(ids, part)
+                (ids, part)
             })
-            .collect()
+            .collect();
+        match self.run_together(photos) {
+            Ok(vectors) => vectors.into_iter().map(Ok).collect(),
+            Err(e) => (0..n).map(|_| Err(e.clone())).collect(),
+        }
     }
 
     /// Open the photo encoder: on TensorRT if it can, else on the CUDA provider. TensorRT builds its engine the first time (about a
@@ -301,6 +312,38 @@ impl Gemma {
         Ok(features)
     }
 
+    /// Run the text model on several photos at once: (token ids, soft token features) each. The ids are padded on the right to the
+    /// longest and the padding is masked, so each result is what `run` gives for that photo alone.
+    fn run_together(&mut self, photos: Vec<(Vec<i64>, Vec<f32>)>) -> Result<Vec<Vec<f32>>> {
+        let batch = photos.len();
+        let longest = photos.iter().map(|(ids, _)| ids.len()).max().unwrap_or(0);
+        let mut ids = vec![0i64; batch * longest]; // 0 is the pad token
+        let mut mask = vec![0i64; batch * longest];
+        let mut features = Vec::new();
+        for (i, (photo_ids, photo_features)) in photos.into_iter().enumerate() {
+            ids[i * longest..i * longest + photo_ids.len()].copy_from_slice(&photo_ids);
+            mask[i * longest..i * longest + photo_ids.len()].fill(1);
+            features.extend(photo_features);
+        }
+        let soft = features.len() / 512;
+        let inputs = ort::inputs![
+            "input_ids" => Tensor::from_array(([batch, longest], ids)).map_err(err("tensor"))?,
+            "attention_mask" => Tensor::from_array(([batch, longest], mask)).map_err(err("tensor"))?,
+            "image_features" => Tensor::from_array(([soft, 512usize], features)).map_err(err("tensor"))?,
+            "video_features" => Tensor::from_array(([0usize, 512], Vec::<f32>::new())).map_err(err("tensor"))?,
+            "audio_features" => Tensor::from_array(([0usize, 512], Vec::<f32>::new())).map_err(err("tensor"))?,
+        ];
+        let outputs = self.session.run(inputs).map_err(err("running the model"))?;
+        let (_, data) = outputs["sentence_embedding"].try_extract_tensor::<f32>().map_err(err("reading the result"))?;
+        Ok(data
+            .chunks_exact(768)
+            .map(|row| {
+                let norm = row.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+                row.iter().map(|x| x / norm).collect()
+            })
+            .collect())
+    }
+
     /// Run the text model on token ids, with the photo's features if there are any: the sentence embedding, unit length.
     fn run(&mut self, ids: Vec<i64>, image_features: Vec<f32>) -> Result<Vec<f32>> {
         let n = ids.len();
@@ -389,6 +432,146 @@ mod tests {
             eprintln!("{file}: cosine with Python {cos:.5} ({:?})", started.elapsed());
             assert!(cos > 0.99, "{file}: cosine {cos}");
         }
+    }
+
+    /// Photos embedded together (their token lists padded) give the same vectors as each one alone.
+    #[test]
+    fn together_is_the_same_as_alone() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let dir = root.join("maps/wikivoyage.photomap/originals");
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        let imgs: Vec<_> = files.iter().take(8).filter_map(|f| crate::photo::load(f)).collect();
+        let copy = |c: &Patches| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens };
+        let cuts: Vec<Patches> = imgs.iter().map(|i| patches(i).unwrap()).collect();
+        assert!(cuts.iter().map(|c| c.soft_tokens).collect::<std::collections::HashSet<_>>().len() > 1, "the photos should differ in length");
+        let shared = shared_model();
+        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap();
+        let together = model.embed_patches(cuts.iter().take(4).map(&copy).collect());
+        for (i, got) in together.into_iter().enumerate() {
+            let alone = model.embed_patches(vec![copy(&cuts[i])]).pop().unwrap().unwrap();
+            let cos: f32 = alone.iter().zip(got.unwrap()).map(|(a, b)| a * b).sum();
+            eprintln!("photo {i}: {} soft tokens, cosine together/alone {cos:.6}", cuts[i].soft_tokens);
+            assert!(cos > 0.9995, "photo {i}: {cos}");
+        }
+    }
+
+    /// How fast the CPU alone can decode photos and cut them into patches (what feeds the GPU), one at a time and on all cores
+    /// (run by hand: cargo test --release cpu_side_speed -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn cpu_side_speed() {
+        use rayon::prelude::*;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for name in ["data/wikiart/images", "maps/wikivoyage.photomap/originals"] {
+            let mut files: Vec<_> = std::fs::read_dir(root.join(name)).unwrap().flatten().map(|e| e.path()).collect();
+            files.sort();
+            let files: Vec<_> = files.into_iter().step_by(37).take(64).collect();
+            let bytes: u64 = files.iter().map(|f| std::fs::metadata(f).unwrap().len()).sum();
+            let work = |f: &PathBuf| crate::photo::load(f).map(|i| (i.width(), patches(&i).is_ok()));
+            let started = std::time::Instant::now();
+            let sizes: Vec<_> = files.iter().filter_map(work).collect();
+            let one = started.elapsed().as_secs_f32();
+            let started = std::time::Instant::now();
+            let _: Vec<_> = files.par_iter().filter_map(work).collect();
+            let all = started.elapsed().as_secs_f32();
+            let width = sizes.iter().map(|s| s.0 as f32).sum::<f32>() / sizes.len() as f32;
+            eprintln!(
+                "{name}: {} photos, {:.0} KB and {width:.0} px wide on average; one core {:.1} photos/s ({:.0} ms each), all cores {:.1} photos/s",
+                sizes.len(),
+                bytes as f32 / 1024.0 / files.len() as f32,
+                sizes.len() as f32 / one,
+                one * 1000.0 / sizes.len() as f32,
+                sizes.len() as f32 / all
+            );
+        }
+    }
+
+    /// The same for a 24-megapixel camera JPEG (made from a painting, scaled up), one core and all cores.
+    #[test]
+    #[ignore]
+    fn cpu_side_speed_camera_photo() {
+        use rayon::prelude::*;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files: Vec<_> = std::fs::read_dir(root.join("data/wikiart/images")).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        let base = crate::photo::load(&files[100]).unwrap();
+        let big = image::imageops::resize(&base, 6000, 4000, image::imageops::FilterType::Triangle);
+        let dir = root.join(".cache/cpu_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rgb = image::DynamicImage::ImageRgba8(big).to_rgb8();
+        let mut paths = Vec::new();
+        for i in 0..12 {
+            let path = dir.join(format!("{i}.jpg"));
+            image::codecs::jpeg::JpegEncoder::new_with_quality(std::fs::File::create(&path).unwrap(), 90).encode_image(&rgb).unwrap();
+            paths.push(path);
+        }
+        let kb = std::fs::metadata(&paths[0]).unwrap().len() / 1024;
+        let full = |f: &PathBuf| crate::photo::load(f).map(|i| patches(&i).is_ok());
+        let scaled = |f: &PathBuf| crate::photo::load_for(f, longest_side_needed).map(|i| patches(&i).is_ok());
+        for (name, work) in [("full decode", &full as &(dyn Fn(&PathBuf) -> Option<bool> + Sync)), ("scaled decode", &scaled)] {
+            let started = std::time::Instant::now();
+            let _: Vec<_> = paths.iter().take(3).filter_map(work).collect();
+            let one = started.elapsed().as_secs_f32() / 3.0;
+            let started = std::time::Instant::now();
+            let _: Vec<_> = paths.par_iter().filter_map(work).collect();
+            let all = started.elapsed().as_secs_f32();
+            eprintln!("24 MP JPEG ({kb} KB), {name}: one core {:.1} photos/s ({:.0} ms each), all cores {:.1} photos/s", 1.0 / one, one * 1000.0, paths.len() as f32 / all);
+        }
+        // the vectors from both ways
+        let small = crate::photo::load_for(&paths[0], longest_side_needed).unwrap();
+        eprintln!("scaled decode gave {} x {} (the full photo is 6000 x 4000)", small.width(), small.height());
+        let shared = shared_model();
+        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap();
+        let a = model.embed_image(&crate::photo::load(&paths[0]).unwrap()).unwrap();
+        let b = model.embed_image(&small).unwrap();
+        let cos: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+        eprintln!("cosine between the vectors of the full and the scaled decode: {cos:.5}");
+        assert!(cos > 0.998, "{cos}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Where the time goes for real photos in groups of 4: the photo encoder, or the text model after it (run by hand:
+    /// cargo test --release where_the_time_goes -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn where_the_time_goes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let dir = root.join("maps/wikivoyage.photomap/originals");
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        let cuts: Vec<Patches> = files.iter().take(96).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
+        let shared = shared_model();
+        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap();
+        let copy = |chunk: &[Patches]| -> Vec<Patches> { chunk.iter().map(|c| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens }).collect() };
+        model.embed_patches(copy(&cuts[..4])); // warm up
+        let (mut encoder, mut text) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        for chunk in cuts.chunks(4) {
+            let soft: Vec<usize> = chunk.iter().map(|c| c.soft_tokens).collect();
+            let started = std::time::Instant::now();
+            let features = model.encode_patches(copy(chunk)).unwrap();
+            encoder += started.elapsed();
+            let started = std::time::Instant::now();
+            let mut start = 0;
+            let photos: Vec<(Vec<i64>, Vec<f32>)> = soft
+                .into_iter()
+                .map(|tokens| {
+                    let mut ids = vec![BOS, BOI];
+                    ids.extend(std::iter::repeat_n(SOFT, tokens));
+                    ids.extend([EOI, EOS]);
+                    let part = features[start * 512..(start + tokens) * 512].to_vec();
+                    start += tokens;
+                    (ids, part)
+                })
+                .collect();
+            model.run_together(photos).unwrap();
+            text += started.elapsed();
+        }
+        let n = cuts.len() as f32;
+        eprintln!("per photo: encoder {:.1} ms, text model {:.1} ms, together {:.1} photos/s", encoder.as_secs_f32() * 1000.0 / n, text.as_secs_f32() * 1000.0 / n, n / (encoder + text).as_secs_f32());
     }
 
     /// Speed of embedding real photos at different batch sizes (run by hand: cargo test --release batch_sizes -- --ignored --nocapture).

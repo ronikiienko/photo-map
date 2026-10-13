@@ -96,7 +96,7 @@ fn query_vector(model: &mut Gemma, text: &str, photo: Option<&Path>) -> Result<V
         parts += 1;
     }
     if let Some(path) = photo {
-        let img = crate::photo::load(path).ok_or("can't read that photo")?;
+        let img = crate::photo::load_for(path, crate::embed::longest_side_needed).ok_or("can't read that photo")?;
         for (s, v) in sum.iter_mut().zip(model.embed_image(&img)?) {
             *s += v;
         }
