@@ -55,12 +55,18 @@ models = {}  # name -> (text(query), photo(PIL image)) -> vector: each model is 
 
 
 def gemma():
-    model = config.load_model(images=True)
-    model[0].processor.image_processor.max_soft_tokens = 140  # as when the photos were embedded
-    return (
-        lambda text: model.encode([text], prompt=config.QUERY_PROMPT, normalize_embeddings=True)[0],
-        lambda im: model.encode([{"image": im}], normalize_embeddings=True)[0],
-    )
+    """Text queries on the CPU (84 ms, none of the GPU's memory); photos on the GPU (0.14 s against 2-7 s on the CPU), loaded when
+    the first photo is searched, and on the CPU in float32 if there is no GPU."""
+    text_model = config.load_model(cpu=True)
+    seen = {}
+
+    def photo(im):
+        if "model" not in seen:
+            seen["model"] = config.load_model(images=True)  # the GPU if there is one
+            seen["model"][0].processor.image_processor.max_soft_tokens = 140  # as when the photos were embedded
+        return seen["model"].encode([{"image": im}], normalize_embeddings=True)[0]
+
+    return (lambda text: text_model.encode([text], prompt=config.QUERY_PROMPT, normalize_embeddings=True)[0], photo)
 
 
 def bioclip():
