@@ -259,7 +259,9 @@ impl Home {
                         step(ui, *s, b.stage, i + 1 == steps.len());
                     }
                 });
-                ui.add_space(6.0);
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
                 match &b.state {
                     Some(s) if s.error.is_some() => {
                         ui.label(RichText::new(s.error.clone().unwrap_or_default()).color(Color32::from_rgb(235, 110, 100)));
