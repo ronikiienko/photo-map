@@ -34,12 +34,23 @@ pub struct Gemma {
     // the environment must outlive the sessions
     env: Environment,
     session: Session,
-    /// The photo encoder, loaded when the first photo is searched (it costs video memory).
+    /// The photo encoder, loaded when the first photo is searched (it costs video memory). With TensorRT it is the transformer
+    /// layers only, and `pool` is what comes after them.
     vision: Option<Session>,
+    pool: Option<Session>,
     tokenizer: Tokenizer,
+    root: PathBuf,
     model_dir: PathBuf,
     pub on_gpu: bool,
+    /// Run the photo encoder's layers on TensorRT (about 1.5 times faster): its libraries and the two converted models are there.
+    /// Switched off if TensorRT fails to start, and the encoder runs on the CUDA provider as before.
+    tensorrt: bool,
 }
+
+/// TensorRT's libraries (runtime/tensorrt/), dependencies first.
+const TENSORRT_LIBS: [&str; 3] = ["libnvinfer.so.10", "libnvinfer_plugin.so.10", "libnvonnxparser.so.10"];
+/// The most photos TensorRT's engine takes at once (it is built for 1 to this many).
+const TENSORRT_BATCH: usize = 4;
 
 // Gemma's special tokens around a photo's soft tokens, and how a photo is cut up (its image processor's settings).
 const BOS: i64 = 2;
@@ -142,7 +153,11 @@ impl Gemma {
             .and_then(|mut b| b.commit_from_file(model_dir.join("onnx/model_fp16.onnx")))
             .map_err(err("loading the model"))?;
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
-        Ok(Self { env, session, vision: None, tokenizer, model_dir, on_gpu })
+        let tensorrt = on_gpu
+            && model_dir.join("onnx/vision_encoder_fp16_trt.onnx").exists()
+            && model_dir.join("onnx/vision_pool.onnx").exists()
+            && TENSORRT_LIBS.iter().all(|l| ort::util::preload_dylib(root.join("runtime/tensorrt").join(l)).is_ok());
+        Ok(Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt })
     }
 
     /// The token ids of a text, as the model gets them (its special tokens included).
@@ -190,14 +205,65 @@ impl Gemma {
             .collect()
     }
 
-    /// The encoder's soft tokens for the photos together, one after the other (512 numbers each).
-    fn encode_patches(&mut self, cuts: Vec<Patches>) -> Result<Vec<f32>> {
-        let batch = cuts.len();
-        if self.vision.is_none() {
-            let file = self.model_dir.join("onnx/vision_encoder_fp16_fused.onnx");
-            let session = Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
-            self.vision = Some(session);
+    /// Open the photo encoder: on TensorRT if it can, else on the CUDA provider. TensorRT builds its engine the first time (about a
+    /// minute) and keeps it in .cache/trt/.
+    fn open_vision(&mut self) -> Result<()> {
+        if self.tensorrt {
+            match self.open_tensorrt() {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    eprintln!("TensorRT is off, the photo encoder runs on CUDA: {e}");
+                    self.tensorrt = false;
+                }
+            }
         }
+        let file = self.model_dir.join("onnx/vision_encoder_fp16_fused.onnx");
+        let session = Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
+        self.vision = Some(session);
+        Ok(())
+    }
+
+    fn open_tensorrt(&mut self) -> Result<()> {
+        let cache = self.root.join(".cache/trt");
+        std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+        let shapes = |n: usize| format!("pixel_values:{n}x{PADDED}x{PATCH_VALUES},pixel_position_ids:{n}x{PADDED}x2");
+        let trt = ep::TensorRT::default()
+            .with_fp16(true)
+            .with_max_workspace_size(1 << 30) // the card is shared with the map: keep the engine's scratch space small
+            .with_engine_cache(true)
+            .with_engine_cache_path(cache.display())
+            .with_timing_cache(true)
+            .with_timing_cache_path(cache.display())
+            .with_profile_min_shapes(shapes(1))
+            .with_profile_opt_shapes(shapes(TENSORRT_BATCH))
+            .with_profile_max_shapes(shapes(TENSORRT_BATCH))
+            .build();
+        // (the CUDA provider is already registered for every session by the environment, and takes what TensorRT leaves)
+        let layers = Session::builder(&self.env)
+            .and_then(|b| b.with_execution_providers([trt]).map_err(|e| e.into()))
+            .and_then(|mut b| b.commit_from_file(self.model_dir.join("onnx/vision_encoder_fp16_trt.onnx")))
+            .map_err(err("loading the photo encoder on TensorRT"))?;
+        let pool = Session::builder(&self.env).and_then(|mut b| b.commit_from_file(self.model_dir.join("onnx/vision_pool.onnx"))).map_err(err("loading the photo pooling"))?;
+        self.vision = Some(layers);
+        self.pool = Some(pool);
+        Ok(())
+    }
+
+    /// The encoder's soft tokens for the photos together, one after the other (512 numbers each).
+    fn encode_patches(&mut self, mut cuts: Vec<Patches>) -> Result<Vec<f32>> {
+        if self.vision.is_none() {
+            self.open_vision()?;
+        }
+        if self.pool.is_some() && cuts.len() > TENSORRT_BATCH {
+            // more photos than the TensorRT engine takes at once: in turns
+            let mut out = Vec::new();
+            while !cuts.is_empty() {
+                let rest = cuts.split_off(TENSORRT_BATCH.min(cuts.len()));
+                out.extend(self.encode_patches(std::mem::replace(&mut cuts, rest))?);
+            }
+            return Ok(out);
+        }
+        let batch = cuts.len();
         let tokens: usize = cuts.iter().map(|c| c.soft_tokens).sum();
         let mut pixels = Vec::with_capacity(batch * PADDED * PATCH_VALUES);
         let mut positions = Vec::with_capacity(batch * PADDED * 2);
@@ -205,17 +271,34 @@ impl Gemma {
             pixels.extend(c.pixels);
             positions.extend(c.positions);
         }
+        let pool_positions = self.pool.is_some().then(|| positions.clone());
         let vision = self.vision.as_mut().unwrap();
         let inputs = ort::inputs![
             "pixel_values" => Tensor::from_array(([batch, PADDED, PATCH_VALUES], pixels)).map_err(err("tensor"))?,
             "pixel_position_ids" => Tensor::from_array(([batch, PADDED, 2], positions)).map_err(err("tensor"))?,
         ];
         let out = vision.run(inputs).map_err(err("running the photo encoder"))?;
-        let (shape, data) = out["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
-        if shape[0] as usize != tokens {
-            return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
-        }
-        Ok(data.to_vec())
+        let features: Vec<f32> = if let (Some(pool), Some(positions)) = (self.pool.as_mut(), pool_positions) {
+            // TensorRT ran the layers; the pooling after them runs on CUDA
+            let (_, hidden) = out["hidden"].try_extract_tensor::<f32>().map_err(err("reading the hidden states"))?;
+            let inputs = ort::inputs![
+                "hidden" => Tensor::from_array(([batch, PADDED, 768usize], hidden.to_vec())).map_err(err("tensor"))?,
+                "pixel_position_ids" => Tensor::from_array(([batch, PADDED, 2], positions)).map_err(err("tensor"))?,
+            ];
+            let pooled = pool.run(inputs).map_err(err("running the photo pooling"))?;
+            let (shape, data) = pooled["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
+            if shape[0] as usize != tokens {
+                return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
+            }
+            data.to_vec()
+        } else {
+            let (shape, data) = out["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
+            if shape[0] as usize != tokens {
+                return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
+            }
+            data.to_vec()
+        };
+        Ok(features)
     }
 
     /// Run the text model on token ids, with the photo's features if there are any: the sentence embedding, unit length.
