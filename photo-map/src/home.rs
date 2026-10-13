@@ -293,6 +293,10 @@ impl Home {
             actions.push(Action::Open(e.path.clone()));
         }
         response.context_menu(|ui| {
+            if ui.button("Show in file manager").clicked() {
+                show_in_file_manager(&e.path);
+                ui.close();
+            }
             if ui.button("Delete map…").clicked() {
                 self.confirm_delete = Some(e.path.clone());
                 ui.close();
@@ -345,6 +349,10 @@ impl Home {
                 });
                 ui.label(theme::muted(part.about));
                 ui.add_space(6.0);
+            }
+            ui.add_space(4.0);
+            if ui.button("Show in file manager").clicked() {
+                show_in_file_manager(&path);
             }
             if sizes.linked > 0 {
                 ui.separator();
@@ -546,6 +554,22 @@ fn step(ui: &mut Ui, step: Stage, current: Stage, last: bool) {
     if !last {
         let (line, _) = ui.allocate_exact_size(vec2(18.0, 12.0), Sense::hover());
         ui.painter().hline(line.x_range(), line.center().y, egui::Stroke::new(1.0, if step < current { theme::OK.gamma_multiply(0.6) } else { theme::CARD_STROKE }));
+    }
+}
+
+/// Open a folder in the system's file manager.
+fn show_in_file_manager(folder: &Path) {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    if let Ok(mut child) = std::process::Command::new(program).arg(folder).spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait(); // so it doesn't linger as a zombie
+        });
     }
 }
 
