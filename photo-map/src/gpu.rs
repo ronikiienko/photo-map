@@ -241,3 +241,13 @@ pub fn clear(encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         multiview_mask: None,
     });
 }
+
+#[cfg(test)]
+mod tests {
+    /// map.wgsl is only compiled when a window opens: parse and validate it here, so a slip shows in the tests.
+    #[test]
+    fn shader_is_valid() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("map.wgsl")).expect("map.wgsl does not parse");
+        wgpu::naga::valid::Validator::new(Default::default(), wgpu::naga::valid::Capabilities::all()).validate(&module).expect("map.wgsl is not valid");
+    }
+}

@@ -21,7 +21,6 @@ from pathlib import Path
 import numpy as np
 
 import config
-import map_search
 import photomap
 import vocab_embed
 
@@ -35,6 +34,19 @@ def unit(v):
     return v / np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), 1e-9)
 
 
+def load_vectors(bundle):
+    """A map's vectors: its photos' image vectors, the caption vectors (captions.bin, if the map has captions) and who has a caption."""
+    n = json.loads((bundle / "manifest.json").read_text())["photos"]
+    img = np.fromfile(bundle / "embeddings.bin", np.float16).reshape(n, -1).astype(np.float32)
+    photos = json.loads((bundle / "photos.json").read_text())
+    has = np.array([bool(p["meta"].get("caption", "")) for p in photos])
+    cap_file = bundle / "captions.bin"
+    cap = np.fromfile(cap_file, np.float16).reshape(n, -1).astype(np.float32) if has.any() and cap_file.exists() else np.zeros_like(img)
+    if not cap.any():
+        has = np.zeros(n, bool)
+    return {"img": img, "cap": cap, "has": has}
+
+
 def name(bundle, map_average=True, up=0):
     bundle = Path(bundle)
     manifest = json.loads((bundle / "manifest.json").read_text())
@@ -43,7 +55,7 @@ def name(bundle, map_average=True, up=0):
         return
     n = manifest["photos"]
     xy = np.fromfile(bundle / "layout.bin", np.float32).reshape(n, 2)
-    data = map_search.load(bundle)
+    data = load_vectors(bundle)
     items, V = vocab_embed.load()
     names = [i["name"] for i in items]
     V = unit(V - V.mean(0))

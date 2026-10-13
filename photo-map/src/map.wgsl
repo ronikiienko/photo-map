@@ -1,6 +1,6 @@
 // Every photo is one instanced quad with its real shape. Its pixels come from the level pools (pages.rs):
 // level L holds each photo in a 2^L px slot. The shader blends the two levels around the on-screen size,
-// using only levels the table says are loaded (always 1 ... 64 px, larger ones when streamed in).
+// using only levels the table says are loaded (always 1 ... 32 px, larger ones when streamed in).
 // Edges are antialiased analytically: the quad reaches AA px past the photo, and each pixel is covered by how much
 // of it lies inside the photo's rect (box filter, per axis), blended with premultiplied alpha.
 
@@ -14,8 +14,8 @@ struct Camera {
 }
 
 const PAGE: f32 = 4096.0;
-const ENTRY: u32 = 16u;   // table u32s per photo: loaded level count, original's longer side, 2 unused, slot per level
-const STREAMED: u32 = 7u; // levels from here on are streamed; below are fitted to the slot (small originals enlarged)
+const STREAMED: u32 = 6u; // levels from here on (64 px) are streamed; below are fitted to the slot (small originals enlarged)
+const ENTRY: u32 = 17u;   // table u32s per photo: loaded level count, original's longer side, 2 unused, slot per level (13 levels: 1 ... 4096 px)
 const COLD = vec3f(0.9, 0.15, 0.15);  // a match just above the cutoff ...
 const HOT = vec3f(1.0, 0.92, 0.25);   // ... the strongest ones (flags 1 ... 255)
 const TINT_FROM: f32 = 24.0;  // a match is tinted solid while it is smaller than this on screen (px) ...

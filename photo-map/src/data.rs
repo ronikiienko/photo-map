@@ -117,7 +117,9 @@ impl MapData {
         if photos.len() != n || points.len() != n {
             return Err(std::io::Error::other("bundle files don't match"));
         }
-        if !bundle.join("pages_bc7.bin").exists() {
+        // the always-loaded level: baked the first time (and again if the file is from when more levels were kept)
+        let baked = std::fs::metadata(bundle.join("pages_bc7.bin")).map(|m| m.len()).ok();
+        if baked != Some(crate::pages::resident_bytes(n) as u64) {
             crate::bake::bake(bundle, &photos, progress)?;
         }
         let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };

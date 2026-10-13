@@ -1,4 +1,4 @@
-//! The always-loaded levels (1 px ... 64 px) as BC7 pages: pages_bc7.bin, uploaded to the GPU as it is.
+//! The always-loaded levels (1 px ... 32 px) as BC7 pages: pages_bc7.bin, uploaded to the GPU as it is.
 //! Made by the viewer the first time it opens a bundle without one (bundles come from Python, which has no fast
 //! BC7 encoder), then kept in the bundle.
 //! Every level L holds each photo in a slot of 2^L px (photo fitted into the top-left corner, real shape kept,
@@ -6,7 +6,7 @@
 //! Pages are written level 0 first, each as BC7 blocks (16 bytes per 4 x 4 pixels).
 
 use crate::data::{Photo, Progress};
-use crate::pages::{PAGE as PAGE_U32, STREAMED};
+use crate::pages::{PAGE as PAGE_U32, RESIDENT};
 use crate::photo;
 use rayon::prelude::*;
 use std::io::{self, Write};
@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 const PAGE: usize = PAGE_U32 as usize;
-const LEVELS: usize = STREAMED; // 1, 2, 4, ... 64 px
+const LEVELS: usize = RESIDENT; // 1, 2, 4, ... 32 px
 const TOP: usize = 1 << (LEVELS - 1);
 /// Rows compressed per task: a multiple of 4 (a BC7 block row).
 const STRIP: usize = 64;
@@ -27,7 +27,7 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     step(format!("{}: baking the always-loaded levels of {n} photos", bundle.display()));
 
     progress.stage("first time this map is opened: baking its small pictures (step 1 of 2, reading every photo)", n);
-    // 1. every photo fitted to 64 px (longer side) in the corner of a 64 x 64 tile
+    // 1. every photo fitted to 32 px (longer side) in the corner of a 32 x 32 tile
     let done = AtomicUsize::new(0);
     let mut tiles = vec![0u8; n * TOP * TOP * 4];
     tiles.par_chunks_mut(TOP * TOP * 4).enumerate().for_each(|(i, tile)| {
@@ -46,7 +46,7 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
         }
     });
 
-    // 2. from 64 px down: pack each level's tiles onto pages and compress; halve the tiles for the next level
+    // 2. from 32 px down: pack each level's tiles onto pages and compress; halve the tiles for the next level
     let settings = intel_tex_2::bc7::opaque_basic_settings();
     let mut levels: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
     for level in (0..LEVELS).rev() {
@@ -107,4 +107,28 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     std::fs::rename(tmp, bundle.join("pages_bc7.bin"))?;
     step("pages_bc7.bin written".into());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::Progress;
+
+    /// Baking a few photos writes the always-loaded levels, in pages.rs's size.
+    #[test]
+    fn bakes_the_resident_levels() {
+        let dir = std::env::temp_dir().join(format!("photo-map-bake-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("originals")).unwrap();
+        let photos: Vec<Photo> = (0..5)
+            .map(|i| {
+                let file = format!("originals/{i}.png");
+                image::RgbaImage::from_pixel(100 + i * 20, 80, image::Rgba([50 * i as u8, 120, 200, 255])).save(dir.join(&file)).unwrap();
+                serde_json::from_value(serde_json::json!({ "file": file, "width": 100 + i * 20, "height": 80, "title": "t" })).unwrap()
+            })
+            .collect();
+        bake(&dir, &photos, &Progress::default()).unwrap();
+        let len = std::fs::metadata(dir.join("pages_bc7.bin")).unwrap().len() as usize;
+        assert_eq!(len, crate::pages::resident_bytes(photos.len()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

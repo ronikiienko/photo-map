@@ -1,6 +1,7 @@
 """Image embedding speed: PyTorch bf16 (sentence-transformers, what we use) vs ONNX Runtime fp16 on the GPU.
 Both get exactly the same preprocessed inputs, so this compares the runtimes only. Also checks the vectors agree.
-    python src/bench_onnx.py [n_images] [onnx_batch] [cuda|trt]   (default 200 4 cuda; ONNX files in .cache/onnx/embeddinggemma-2/)
+    python src/bench_onnx.py [n_images] [onnx_batch] [cuda|fused|trt]   (default 200 4 cuda; ONNX files in .cache/onnx/embeddinggemma-2/)
+fused: the CUDA provider with the vision encoder rewritten for fused attention (onnx_fuse_attention.py).
 trt: TensorRT fp16, engines cached in .cache/trt/ (the first run compiles them, which takes a while).
 """
 
@@ -76,7 +77,7 @@ if EP == "trt":
 t0 = time.time()
 # trt: copies with every size fixed for batch 4 and all shapes written in (TensorRT needs them; this export lacks some)
 suffix = "_b4" if EP == "trt" else ""
-vision = ort.InferenceSession(str(ONNX / f"vision_encoder_fp16{suffix}.onnx"), so, providers=providers)
+vision = ort.InferenceSession(str(ONNX / f"vision_encoder_fp16{'_fused' if EP == 'fused' else suffix}.onnx"), so, providers=providers)
 text = ort.InferenceSession(str(ONNX / f"model_fp16{suffix}.onnx"), so, providers=providers)
 print(f"onnx sessions ready in {time.time() - t0:.0f}s, providers: {vision.get_providers()}", flush=True)
 empty = np.zeros((0, 512), np.float32)
@@ -89,7 +90,12 @@ def run_onnx(f):
     outs = []
     for s in range(0, len(f["input_ids"]), ONNX_BATCH):
         part = {k: v[s : s + ONNX_BATCH] for k, v in f.items() if hasattr(v, "shape")}
-        img = vision.run(None, {"pixel_values": part["pixel_values"].float().numpy(), "pixel_position_ids": part["image_position_ids"].numpy()})[0]
+        pixels, positions = part["pixel_values"].float().numpy(), part["image_position_ids"].numpy()
+        if EP == "fused":  # the fused attention kernel needs a sequence length that is a multiple of 8: pad with masked patches
+            extra = -pixels.shape[1] % 8
+            pixels = np.pad(pixels, ((0, 0), (0, extra), (0, 0)))
+            positions = np.pad(positions, ((0, 0), (0, extra), (0, 0)), constant_values=-1)
+        img = vision.run(None, {"pixel_values": pixels, "pixel_position_ids": positions})[0]
         outs.append(text.run(["sentence_embedding"], {"input_ids": part["input_ids"].numpy(), "attention_mask": part["attention_mask"].numpy(),
                                                        "image_features": img.astype(np.float32), "video_features": empty, "audio_features": empty})[0])
     out = np.concatenate(outs)

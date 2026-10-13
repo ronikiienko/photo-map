@@ -1,13 +1,15 @@
 //! All photo pixels on the GPU, one unified system: every level (1 px ... 1024 px) of every photo is a picture
 //! in a slot of that level's pool (see pages.rs). A table gives, per photo, how many levels are loaded and the
-//! slot of each. Levels up to 64 px are always loaded; larger ones are streamed for the photos on screen:
+//! slot of each. Only level 0 (1 px, the photo's colour) is always loaded; levels from 64 px up are streamed for the photos on
+//! screen (from 32 px, when the 64 px picture starts to fade in):
 //! worker threads decode the original file, fit each wanted level and BC7-compress it, and the main thread copies
-//! the blocks into a free or least-recently-seen slot. Loaded levels are always contiguous from level 0 up,
-//! so evicting a level also drops the ones above it. The table is re-uploaded whole whenever it changed.
+//! the blocks into a free or least-recently-seen slot. A photo's streamed levels are always contiguous from 64 px up, so
+//! evicting a level also drops the ones above it. The table's first entry is the loaded level count: 1 (just the colour),
+//! or the top streamed level + 1 (levels 1 ... 5 never exist). The table is re-uploaded whole whenever it changed.
 
 use crate::data::MapData;
 use crate::photo;
-use crate::pages::{LEVELS, Layout, PAGE, STREAMED, slot_size};
+use crate::pages::{LEVELS, Layout, PAGE, RESIDENT, STREAMED, slot_size};
 use glam::Vec2;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
@@ -15,7 +17,7 @@ use std::sync::{Arc, Mutex, mpsc};
 const WORKERS: usize = 6;
 const MAX_IN_FLIGHT: usize = 24;
 /// u32s per photo in the table: loaded level count, original's longer side, 2 unused, then one slot per level.
-pub const ENTRY: usize = 16;
+pub const ENTRY: usize = 4 + LEVELS;
 const NONE: u32 = u32::MAX;
 
 /// Slot bookkeeping of one streamed level.
@@ -112,12 +114,12 @@ impl Streamer {
         let mut table_cpu = vec![NONE; n * ENTRY];
         for i in 0..n {
             let e = &mut table_cpu[i * ENTRY..(i + 1) * ENTRY];
-            e[0] = STREAMED as u32;
+            e[0] = RESIDENT as u32;
             e[1] = data.native_long(i);
             e[2] = 0;
             e[3] = 0;
-            for l in 0..STREAMED {
-                e[4 + l] = i as u32; // always-loaded levels: slot = photo id
+            for l in 0..RESIDENT {
+                e[4 + l] = i as u32; // the always-loaded levels: slot = photo id
             }
         }
         let table = device.create_buffer(&wgpu::BufferDescriptor {
@@ -173,7 +175,7 @@ impl Streamer {
     /// The sharpest level worth having: the one whose slot size is closest to the original's longer side.
     fn max_level(&self, id: usize) -> usize {
         let long = self.table_cpu[id * ENTRY + 1].max(1) as f32;
-        (long.log2().round() as usize).clamp(STREAMED - 1, LEVELS - 1)
+        (long.log2().round() as usize).clamp(STREAMED, LEVELS - 1)
     }
 
     /// Drop levels `from..` of a photo (keeps its loaded levels contiguous).
@@ -185,7 +187,7 @@ impl Streamer {
             self.table_cpu[id * ENTRY + 4 + l] = NONE;
         }
         if from < count {
-            self.table_cpu[id * ENTRY] = from as u32;
+            self.table_cpu[id * ENTRY] = if from <= STREAMED { RESIDENT as u32 } else { from as u32 };
             self.dirty = true;
         }
     }
@@ -209,7 +211,7 @@ impl Streamer {
                     self.pools[l - STREAMED].last_seen[slot] = frame;
                 }
                 let need = want.min(self.max_level(i));
-                if count <= need && !self.loading[i] {
+                if need >= STREAMED && count <= need && !self.loading[i] {
                     let p = data.points[i];
                     wanted.push((Vec2::new(p.x, p.y).distance_squared(center), i, count, need));
                 }
@@ -222,7 +224,7 @@ impl Streamer {
             self.loading[done.id] = false;
             for lv in done.levels {
                 let id = done.id;
-                if self.table_cpu[id * ENTRY] as usize != lv.level {
+                if self.table_cpu[id * ENTRY].max(STREAMED as u32) as usize != lv.level {
                     break; // a level below went missing meanwhile: the rest would leave a gap
                 }
                 let pool = lv.level - STREAMED;
@@ -252,7 +254,7 @@ impl Streamer {
             if self.in_flight >= MAX_IN_FLIGHT {
                 break;
             }
-            if self.jobs.send(Job { id, path: data.path(id), from, to }).is_ok() {
+            if self.jobs.send(Job { id, path: data.path(id), from: from.max(STREAMED), to }).is_ok() {
                 self.in_flight += 1;
                 self.loading[id] = true;
             }

@@ -3,14 +3,22 @@
 //!     photo-map [bundle]      default: the one opened last in maps/
 
 mod bake;
+mod build;
 mod camera;
 mod data;
+mod embed;
 mod gallery;
 mod gpu;
+mod home;
+mod layout;
 mod library;
+mod naming;
 mod pages;
+mod regions;
 mod photo;
+mod search;
 mod stream;
+mod theme;
 
 use camera::{Camera, Keys};
 use data::{MapData, Progress, WORLD};
@@ -21,7 +29,7 @@ use library::Library;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 use stream::Streamer;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -47,6 +55,13 @@ const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
 const STEP_TO: f32 = 240.0;
 const LABEL_IN: (f32, f32) = (25.0, 50.0);
 const LABEL_OUT: (f32, f32) = (300.0, 500.0);
+
+/// The two screens: your maps (and the ones being made), and a map.
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Maps,
+    Viewer,
+}
 
 /// Which of a photo's two cosines with the search count: its image's, its caption's, or the better of them.
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -90,14 +105,23 @@ struct OpenMap {
     /// The photos that match the search, best first, and which of them the last next/previous step went to.
     order: Vec<usize>,
     at: Option<usize>,
-    /// When the bundle's search.json (written by src/map_search.py) was last read.
-    search_file: Option<SystemTime>,
+    /// The photos' vectors, if the map has them.
+    vectors: Option<search::Vectors>,
 }
 
 struct Viewer {
     window: Arc<Window>,
     gpu: Gpu,
     ui: Ui,
+    page: Page,
+    home: home::Home,
+    /// Maps being made that have a thread (running, or stopped with an error to show).
+    runs: Vec<build::Run>,
+    /// Maps waiting for the one being made to finish or pause.
+    queue: Vec<PathBuf>,
+    /// A line for the Maps page: what happened (text, is it good news).
+    notice: Option<(String, bool)>,
+    last_refresh: Instant,
     map: Option<OpenMap>,
     library: Library,
     /// A bundle being read from disk (and baked, the first time) on a thread; it becomes `map` when ready.
@@ -111,10 +135,10 @@ struct Viewer {
     /// The region names drawn last frame, where on screen (points) and which (level, number in the level): a click on one zooms to its region.
     label_rects: Vec<(egui::Rect, usize, usize)>,
     search: String,
-    /// The search helper this viewer started: one for the whole session, it follows the open map.
-    helper: Option<Helper>,
-    /// Enter was pressed while the helper was still starting: search as soon as it is up.
-    ask_when_ready: bool,
+    /// The text model, on a thread of its own.
+    engine: search::Engine,
+    /// The query it is working on.
+    asked: Option<u64>,
     /// A photo dropped on the window: searched for together with the text.
     photo: Option<PathBuf>,
     /// What the last search did, next to the box.
@@ -123,7 +147,7 @@ struct Viewer {
     wanted: f32,
     /// What the search looks at: the photos' images, their captions, or both.
     on: SearchOn,
-    /// What the shown search was for (words and/or a photo's name), from the helper's answer.
+    /// What the shown search was for (words and/or a photo's name).
     shown: String,
     /// The photo in the box, as a small picture.
     photo_tex: Option<egui::TextureHandle>,
@@ -136,7 +160,11 @@ impl Viewer {
     fn new(window: Arc<Window>, library: Library, first: Option<PathBuf>) -> Self {
         let gpu = Gpu::new(window.clone());
         let ctx = egui::Context::default();
-        ctx.set_visuals(egui::Visuals::dark());
+        theme::apply(&ctx);
+        let engine = {
+            let window = window.clone();
+            search::Engine::start(library.root(), move || window.request_redraw())
+        };
         let state = egui_winit::State::new(ctx.clone(), ctx.viewport_id(), &window, None, None, None);
         let renderer = egui_wgpu::Renderer::new(&gpu.device, gpu.config.format, Default::default());
         let size = window.inner_size();
@@ -145,6 +173,12 @@ impl Viewer {
             window,
             gpu,
             ui: Ui { ctx, state, renderer },
+            page: if first.is_some() { Page::Viewer } else { Page::Maps },
+            home: home::Home::new(),
+            runs: Vec::new(),
+            queue: Vec::new(),
+            notice: None,
+            last_refresh: Instant::now(),
             map: None,
             library,
             opening: None,
@@ -155,8 +189,8 @@ impl Viewer {
             gallery: Gallery::new(),
             label_rects: Vec::new(),
             search: String::new(),
-            helper: None,
-            ask_when_ready: false,
+            engine,
+            asked: None,
             photo: None,
             status: String::new(),
             wanted: 100.0,
@@ -169,6 +203,9 @@ impl Viewer {
         };
         if let Some(path) = first {
             viewer.open(path);
+        }
+        if viewer.library.resume_on_start() {
+            viewer.queue = viewer.library.builds.iter().map(|b| b.dir.clone()).collect();
         }
         viewer
     }
@@ -184,6 +221,7 @@ impl Viewer {
     /// The bundle has been read: let go of the old map, put the new one on the GPU and show all of it.
     fn opened(&mut self, path: PathBuf, data: MapData) {
         self.gallery.clear();
+        self.page = Page::Viewer;
         self.map = None; // free the old map's GPU memory first
         let started = Instant::now();
         let streamer = Streamer::new(&self.gpu.device, &self.gpu.queue, &data);
@@ -194,10 +232,146 @@ impl Viewer {
         self.camera.jump(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
         let n = data.n();
         let photo_world = median_neighbour_distance(&data.points);
-        let search_file = search_file_time(&path);  // one from before this opening is old news
         self.status.clear();
-        self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, photo_world, sims: Vec::new(), order: Vec::new(), at: None, search_file });
-        self.follow_map();
+        let vectors = search::Vectors::open(&path, n);
+        let in_process = vectors.is_some();
+        self.asked = None;
+        self.map = Some(OpenMap { path, data, renderer, streamer, flags: vec![0; n], flags_dirty: true, photo_world, sims: Vec::new(), order: Vec::new(), at: None, vectors });
+        if !in_process {
+            self.status = "this map has no search vectors (embeddings.bin)".into();
+        }
+    }
+
+    fn wake(&self) -> impl Fn() + Send + 'static {
+        let window = self.window.clone();
+        move || window.request_redraw()
+    }
+
+    /// Maps being made, as the Maps page shows them.
+    fn build_views(&self) -> Vec<home::BuildView> {
+        self.library
+            .builds
+            .iter()
+            .map(|b| {
+                let run = self.runs.iter().find(|r| r.dir == b.dir);
+                let state = run.map(|r| r.state());
+                home::BuildView {
+                    dir: b.dir.clone(),
+                    name: b.job.name.clone(),
+                    source: b.job.source.clone(),
+                    stage: state.as_ref().map_or(b.job.stage, |s| s.stage),
+                    running: run.is_some_and(|r| r.running()),
+                    queued: self.queue.contains(&b.dir),
+                    state,
+                }
+            })
+            .collect()
+    }
+
+    /// One map is made at a time (they share the model and the card); the next waits its turn. Finished and stopped ones are tidied away.
+    fn pump_builds(&mut self) {
+        let mut refresh = false;
+        let mut finished = Vec::new();
+        self.runs.retain(|r| {
+            if r.running() {
+                return true;
+            }
+            let s = r.state();
+            if s.finished {
+                finished.push(r.dir.clone());
+                refresh = true;
+                return false;
+            }
+            s.error.is_some() // a stopped build with an error stays, to show it; a paused one just goes
+        });
+        for dir in finished {
+            let name = dir.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            self.notice = Some((format!("{name} is ready."), true));
+        }
+        if !self.runs.iter().any(|r| r.running()) {
+            while !self.queue.is_empty() {
+                let dir = self.queue.remove(0);
+                if !dir.exists() {
+                    continue;
+                }
+                self.runs.retain(|r| r.dir != dir);
+                if let Some(run) = build::Run::start(dir, self.library.root(), self.engine.model.clone(), self.wake()) {
+                    self.runs.push(run);
+                    refresh = true;
+                    break;
+                }
+            }
+        }
+        if refresh || (self.page == Page::Maps && self.runs.iter().any(|r| r.running()) && self.last_refresh.elapsed().as_secs_f32() > 1.5) {
+            self.library.refresh();
+            self.last_refresh = Instant::now();
+        }
+    }
+
+    /// Stop a build and wait until it has (a few seconds at most).
+    fn stop_build(&mut self, dir: &std::path::Path) -> bool {
+        self.queue.retain(|d| d != dir);
+        if let Some(run) = self.runs.iter().find(|r| r.dir == dir) {
+            run.pause();
+            let waited = Instant::now();
+            while run.running() && waited.elapsed().as_secs() < 20 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if run.running() {
+                return false;
+            }
+        }
+        self.runs.retain(|r| r.dir != dir);
+        true
+    }
+
+    fn handle_home(&mut self, action: home::Action) {
+        use home::Action;
+        match action {
+            Action::Open(path) => self.open(path),
+            Action::Create { name, folder } => match build::create(self.library.dir(), &name, &folder) {
+                Ok(dir) => {
+                    self.library.refresh();
+                    self.queue.push(dir);
+                    self.notice = None;
+                }
+                Err(e) => self.notice = Some((e, false)),
+            },
+            Action::Pause(dir) => {
+                if let Some(run) = self.runs.iter().find(|r| r.dir == dir) {
+                    run.pause();
+                }
+                self.queue.retain(|d| *d != dir);
+            }
+            Action::Continue(dir) => {
+                self.runs.retain(|r| r.dir != dir || r.running());
+                if !self.queue.contains(&dir) && !self.runs.iter().any(|r| r.dir == dir) {
+                    self.queue.push(dir);
+                }
+            }
+            Action::Discard(dir) => {
+                if self.stop_build(&dir) {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    self.library.refresh();
+                } else {
+                    self.notice = Some(("it is still stopping, try again in a moment".into(), false));
+                }
+            }
+            Action::Delete(path) => {
+                if self.map.as_ref().is_some_and(|m| m.path == path) {
+                    self.map = None;
+                }
+                let _ = std::fs::remove_dir_all(&path);
+                self.home.forget_cover(&path);
+                self.library.refresh();
+            }
+            Action::Resume(on) => self.library.set_resume_on_start(on),
+        }
+    }
+
+    fn go_to_maps(&mut self) {
+        self.page = Page::Maps;
+        self.library.refresh();
     }
 
     fn size_px(&self) -> f32 {
@@ -235,35 +409,8 @@ impl Viewer {
         true
     }
 
-    /// Make sure a search helper runs and works on the open map: it is started once, and told when the map changes
-    /// (the project's logs/search.bundle holds the map's path) so it keeps its model loaded and just loads the map's vectors.
-    fn follow_map(&mut self) {
-        let Some(path) = self.map.as_ref().map(|m| m.path.clone()) else { return };
-        match std::fs::canonicalize(&path).map_err(|e| e.to_string()).and_then(|b| project_root(&b).map(|r| (b, r))) {
-            Ok((bundle, root)) => {
-                let _ = std::fs::create_dir_all(root.join("logs"));
-                let _ = std::fs::write(root.join("logs/search.bundle"), bundle.to_string_lossy().as_bytes());
-            }
-            Err(e) => {
-                self.status = format!("search can't start: {e}");
-                return;
-            }
-        }
-        let running = self.helper.as_mut().is_some_and(|h| h.0.try_wait().ok().flatten().is_none());
-        if !running {
-            self.helper = None; // a dead one's leftovers
-            if !helper_alive(&path) {  // not one started by hand
-                match start_helper(&path) {
-                    Ok(h) => self.helper = Some(h),
-                    Err(e) => self.status = format!("search can't start: {e}"),
-                }
-            }
-        }
-    }
-
-    /// Enter in the search box, or a photo dropped on the window: ask the helper (src/map_search.py) for the best photos
-    /// for the text and/or the photo (query.txt, as JSON); its answer comes back in search.json (poll_search_file).
-    /// Nothing to search for clears the last search.
+    /// Enter in the search box, or a photo dropped on the window: the words and/or the photo go to the model, whose answer
+    /// comes back through poll_engine. Nothing to search for clears the last search.
     fn ask(&mut self) {
         let text = self.search.trim().to_string();
         // a path to a photo typed or pasted in the box (from a file manager, or dragged on a terminal) is a photo search
@@ -273,53 +420,49 @@ impl Viewer {
             }
         }
         let text = self.search.trim().to_string();
-        let Some(path) = self.map.as_ref().map(|m| m.path.clone()) else { return };
+        let Some(m) = &mut self.map else { return };
         if text.is_empty() && self.photo.is_none() {
-            if let Some(m) = &mut self.map {
-                m.flags.fill(0);
-                m.flags_dirty = true;
-                m.sims.clear();
-                m.order.clear();
-                m.at = None;
-            }
+            m.flags.fill(0);
+            m.flags_dirty = true;
+            m.sims.clear();
+            m.order.clear();
+            m.at = None;
             self.shown.clear();
             self.status.clear();
-        } else if helper_alive(&path) {
-            let query = serde_json::json!({ "text": text, "image": self.photo });
-            let _ = std::fs::write(path.join("query.txt"), query.to_string());
-            self.status = "searching…".into();
-            self.ask_when_ready = false;
+        } else if m.vectors.is_none() {
+            self.status = "this map has no search vectors (embeddings.bin)".into();
+        } else if let Some(why) = &self.engine.failed {
+            self.status = format!("search can't start: {why}");
         } else {
-            // not answering: still starting (it takes about 30 s the first time), or stopped: start it again
-            self.follow_map();
-            if self.helper.is_none() && !helper_alive(&path) {
-                return; // follow_map said why
-            }
-            self.ask_when_ready = true;
-            self.status = "starting the search (a few seconds, 30 s the first time), it will run when ready…".into();
+            self.asked = Some(self.engine.ask(&text, self.photo.as_deref()));
+            self.shown = [text, self.photo.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()]
+                .into_iter()
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" + ");
+            self.status = if self.engine.ready.is_some() { "searching…".into() } else { "loading the search model, it will run when ready…".into() };
         }
     }
 
-    /// The answer of src/map_search.py ({"query", "file"}: two u16 cosines per photo): shown (apply_search) and the
-    /// camera pulls back to show the matches.
-    fn poll_search_file(&mut self) {
-        let Some(m) = &mut self.map else { return };
-        let time = search_file_time(&m.path);
-        if time.is_none() || time == m.search_file {
-            return;
-        }
-        m.search_file = time;
-        let Ok(text) = std::fs::read_to_string(m.path.join("search.json")) else { return };
-        let Ok(found) = serde_json::from_str::<serde_json::Value>(&text) else { return };
-        if let Some(error) = found["error"].as_str() {
-            self.status = error.to_string();
-            return;
-        }
-        let Some(bytes) = found["file"].as_str().and_then(|f| std::fs::read(m.path.join(f)).ok()).filter(|r| r.len() == 4 * m.flags.len()) else { return };
-        self.shown = found["query"].as_str().unwrap_or_default().to_string();
-        m.sims = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        if let Some((min, max)) = self.apply_search() {
-            self.camera.fly_to(self.camera.fit(min, max));
+    /// What the text model has said: a query's vector becomes the photos' cosines, shown at once.
+    fn poll_engine(&mut self) {
+        for event in self.engine.poll() {
+            let search::Event::Vector { id, vector } = event else { continue };
+            if self.asked != Some(id) {
+                continue; // an older query, or the map changed
+            }
+            self.asked = None;
+            let Some(m) = &mut self.map else { continue };
+            match (vector, &m.vectors) {
+                (Ok(v), Some(vectors)) => {
+                    m.sims = vectors.cosines(&v);
+                    if let Some((min, max)) = self.apply_search() {
+                        self.camera.fly_to(self.camera.fit(min, max));
+                    }
+                }
+                (Err(e), _) => self.status = format!("couldn't search: {e}"),
+                _ => {}
+            }
         }
     }
 
@@ -386,6 +529,17 @@ impl Viewer {
     }
 
     fn key(&mut self, key: &Key, down: bool) {
+        if self.page != Page::Viewer {
+            return;
+        }
+        if let (true, Key::Named(NamedKey::Escape)) = (down, key) {
+            if self.gallery.open {
+                self.gallery.open = false;
+            } else {
+                self.go_to_maps();
+            }
+            return;
+        }
         if let (true, Key::Character(c)) = (down, key) {
             match c.as_str() {
                 "n" | "N" | "]" => return self.step_match(1),
@@ -441,7 +595,7 @@ impl Viewer {
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
-                ElementState::Pressed if !over_ui => self.camera.press(),
+                ElementState::Pressed if !over_ui && self.page == Page::Viewer => self.camera.press(),
                 ElementState::Released if self.camera.dragging() => {
                     let click = self.camera.drag_distance() < 4.0;
                     self.camera.release();
@@ -451,7 +605,7 @@ impl Viewer {
                 }
                 _ => {}
             },
-            WindowEvent::MouseWheel { delta, .. } if !over_ui => match delta {
+            WindowEvent::MouseWheel { delta, .. } if !over_ui && self.page == Page::Viewer => match delta {
                 MouseScrollDelta::LineDelta(_, y) => self.camera.scroll_lines(y),
                 MouseScrollDelta::PixelDelta(p) => self.camera.scroll_pixels(p.y as f32),
             },
@@ -463,7 +617,7 @@ impl Viewer {
                     self.key(&event.logical_key, false); // never leave a key stuck down
                 }
             }
-            WindowEvent::DroppedFile(path) => {
+            WindowEvent::DroppedFile(path) if self.page == Page::Viewer => {
                 if path.extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_TYPES.contains(&e.to_lowercase().as_str())) {
                     if self.set_photo(path) {
                         self.ask();
@@ -488,12 +642,8 @@ impl Viewer {
         }
         self.camera.update(dt, self.cursor, self.keys);
         self.frames += 1;
-        if self.frames % 30 == 0 {
-            self.poll_search_file();
-            if self.ask_when_ready && self.map.as_ref().is_some_and(|m| helper_alive(&m.path)) {
-                self.ask();
-            }
-        }
+        self.poll_engine();
+        self.pump_builds();
         if self.opening.as_ref().is_some_and(|(_, job, _)| job.is_finished()) {
             let (path, job, _) = self.opening.take().unwrap();
             match job.join() {
@@ -504,7 +654,7 @@ impl Viewer {
         }
         let over_ui = self.ui.ctx.is_pointer_over_egui();
         self.hovered = match self.cursor {
-            Some(c) if !self.camera.dragging() && !over_ui => self.pick(c),
+            Some(c) if self.page == Page::Viewer && !self.camera.dragging() && !over_ui => self.pick(c),
             _ => None,
         };
 
@@ -535,7 +685,7 @@ impl Viewer {
             _pad: [0; 2],
         };
         match &mut self.map {
-            Some(m) => {
+            Some(m) if self.page == Page::Viewer => {
                 if m.flags_dirty {
                     m.renderer.upload_flags(&self.gpu.queue, &m.flags);
                     m.flags_dirty = false;
@@ -543,13 +693,35 @@ impl Viewer {
                 m.streamer.update(&self.gpu.queue, &m.data, view_min, view_max, self.camera.center, size_px);
                 m.renderer.draw(&self.gpu.queue, &mut encoder, &view, cam);
             }
-            None => gpu::clear(&mut encoder, &view),
+            _ => gpu::clear(&mut encoder, &view),
         }
         self.draw_ui(&mut encoder, &view);
         self.gpu.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
         self.window.request_redraw();
+    }
+
+    /// A map being opened: one card in the middle.
+    fn opening_card(&self, ctx: &egui::Context) {
+        let Some((path, _, progress)) = &self.opening else { return };
+        let (text, fraction) = progress.now();
+        let name = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
+        egui::Area::new("opening".into()).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            theme::card().inner_margin(egui::Margin::same(20)).show(ui, |ui| {
+                ui.set_width(340.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.heading(format!("Opening {name}"));
+                });
+                ui.add_space(4.0);
+                ui.label(theme::muted(text));
+                if let Some(f) = fraction {
+                    ui.add_space(4.0);
+                    ui.add(egui::ProgressBar::new(f).desired_width(ui.available_width()).show_percentage().fill(theme::ACCENT));
+                }
+            });
+        });
     }
 
     fn draw_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
@@ -574,8 +746,11 @@ impl Viewer {
         if actions.step != 0 {
             self.step_match(actions.step);
         }
-        if let Some(path) = actions.open {
-            self.open(path);
+        if actions.back {
+            self.go_to_maps();
+        }
+        for a in std::mem::take(&mut actions.home) {
+            self.handle_home(a);
         }
 
         self.ui.state.handle_platform_output(&self.window, output.platform_output);
@@ -753,6 +928,19 @@ impl Viewer {
 
     fn build_ui(&mut self, ui: &mut egui::Ui, actions: &mut UiActions) {
         let ctx = ui.ctx().clone();
+        if self.page == Page::Maps {
+            let views = self.build_views();
+            let notice = self.notice.clone();
+            let ready_msg = notice.as_ref().filter(|(_, good)| *good).map(|(m, _)| m.as_str());
+            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg);
+            if let Some((text, false)) = &notice {
+                egui::Area::new("notice".into()).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0]).show(&ctx, |ui| {
+                    theme::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(235, 110, 100))));
+                });
+            }
+            self.opening_card(&ctx);
+            return;
+        }
         if SHOW_REGION_NAMES {
             self.draw_labels(&ctx);
         }
@@ -774,108 +962,147 @@ impl Viewer {
             }
         }
 
-        egui::Area::new("top".into()).fixed_pos([10.0, 10.0]).show(&ctx, |ui| {
-            ui.horizontal(|ui| {
-                let current = self.opening.as_ref().map(|(p, _, _)| p.as_path()).or(self.map.as_ref().map(|m| m.path.as_path()));
-                actions.open = self.library.bar(ui, current);
-                if let Some((path, _, progress)) = &self.opening {
-                    let (text, fraction) = progress.now();
-                    ui.spinner();
-                    let name = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
-                    ui.colored_label(egui::Color32::from_rgb(240, 190, 90), format!("opening {name}: {text}"));
-                    if let Some(f) = fraction {
-                        ui.add(egui::ProgressBar::new(f).desired_width(160.0).show_percentage());
+        let width = (ctx.content_rect().width() - 24.0).clamp(320.0, 760.0);
+        egui::Area::new("top".into()).anchor(egui::Align2::CENTER_TOP, [0.0, 12.0]).show(&ctx, |ui| {
+            theme::card().show(ui, |ui| {
+                ui.set_width(width - 24.0);
+                // row 1: the map, the search (takes what is left), whether search is up, options
+                ui.horizontal(|ui| {
+                    if ui.button("Maps").on_hover_text("back to your maps (Esc)").clicked() {
+                        actions.back = true;
                     }
-                }
-                ui.separator();
-                // whether a search can run now
-                let helper_up = self.helper.as_mut().is_some_and(|h| h.0.try_wait().ok().flatten().is_none());
-                match self.map.as_ref().map(|m| (helper_alive(&m.path), helper_up)) {
-                    Some((true, _)) => {
-                        ui.colored_label(egui::Color32::from_rgb(110, 200, 120), "● search ready");
+                    if let Some(m) = &self.map {
+                        ui.label(theme::muted(&m.data.manifest.name));
                     }
-                    Some((false, true)) => {
-                        ui.spinner();
-                        ui.weak("search starting…");
-                    }
-                    Some((false, false)) => {
-                        ui.weak("○ search off (Enter starts it)");
-                    }
-                    None => {}
-                }
-                let edit = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("words, or a photo (drop it, or paste its path); Enter").desired_width(260.0));
-                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    actions.ask = true;
-                }
-                if let Some(photo) = &self.photo {
-                    if let Some(tex) = &self.photo_tex {
-                        ui.add(egui::Image::new((tex.id(), egui::vec2(36.0 * tex.aspect_ratio(), 36.0))));
-                    }
-                    ui.label(photo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-                    if ui.small_button("x").on_hover_text("remove the photo and search again").clicked() {
-                        actions.clear_photo = true;
-                    }
-                }
-                ui.label("search in");
-                let before = self.on;
-                for (value, text, tip) in [
-                    (SearchOn::Both, "both", "a photo's similarity is the better of its image's and its caption's"),
-                    (SearchOn::Images, "images", "only what the pictures look like"),
-                    (SearchOn::Captions, "captions", "only the captions (photos without one don't match)"),
-                ] {
-                    ui.selectable_value(&mut self.on, value, text).on_hover_text(tip);
-                }
-                if self.on != before {
-                    actions.reblend = true;
-                }
-                ui.label("photos");
-                let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
-                if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
-                    actions.reblend = true;
-                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.menu_button("Options", |ui| {
+                            ui.set_min_width(240.0);
+                            ui.label(theme::muted("SEARCH IN"));
+                            let options = [
+                                (SearchOn::Both, "Both", "a photo's similarity is the better of its image's and its caption's"),
+                                (SearchOn::Images, "Images", "only what the pictures look like"),
+                                (SearchOn::Captions, "Captions", "only the captions (photos without one don't match)"),
+                            ];
+                            if theme::segmented(ui, &mut self.on, &options) {
+                                actions.reblend = true;
+                            }
+                            ui.add_space(4.0);
+                            ui.label(theme::muted("MOST SIMILAR PHOTOS TO SHOW"));
+                            let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
+                            if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
+                                actions.reblend = true;
+                            }
+                        });
+                        // whether a search can run now
+                        let searchable = self.map.as_ref().is_some_and(|m| m.vectors.is_some());
+                        if let Some(why) = &self.engine.failed {
+                            ui.label(theme::muted("search off")).on_hover_text(why.as_str());
+                            theme::dot(ui, theme::MUTED);
+                        } else if self.map.is_some() && !searchable {
+                            ui.label(theme::muted("map not searchable")).on_hover_text("it has no embeddings.bin of the right size");
+                            theme::dot(ui, theme::MUTED);
+                        } else if let Some(gpu) = self.engine.ready {
+                            ui.label(theme::muted(if gpu { "search ready" } else { "search ready (CPU)" }));
+                            theme::dot(ui, theme::OK);
+                        } else if self.map.is_some() {
+                            ui.label(theme::muted("search starting"));
+                            ui.spinner();
+                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let edit = ui.add(
+                                egui::TextEdit::singleline(&mut self.search)
+                                    .hint_text("Search the map: words, or drop in a photo")
+                                    .margin(egui::Margin::symmetric(10, 6))
+                                    .desired_width(ui.available_width()),
+                            );
+                            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                actions.ask = true;
+                            }
+                        });
+                    });
+                });
+                // row 2, once there is something to say: the photo searched with, the matches and how to go through them, the status
                 let (found, at) = self.map.as_ref().map_or((0, None), |m| (m.order.len(), m.at));
-                if found > 0 {
-                    if ui.button("prev").on_hover_text("the previous match (P or [)").clicked() {
-                        actions.step = -1;
-                    }
-                    if ui.button("next").on_hover_text("the next match, best first (N or ])").clicked() {
-                        actions.step = 1;
-                    }
-                    ui.label(at.map_or(format!("{found} matches"), |k| format!("{} / {found}", k + 1)));
-                    ui.toggle_value(&mut self.gallery.open, "gallery").on_hover_text("all the matches together (G)");
+                if self.photo.is_some() || found > 0 || !self.status.is_empty() {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if let Some(photo) = &self.photo {
+                            if let Some(tex) = &self.photo_tex {
+                                ui.add(egui::Image::new((tex.id(), egui::vec2(24.0 * tex.aspect_ratio(), 24.0))).corner_radius(4));
+                            }
+                            let name = photo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            ui.label(theme::muted(name));
+                            if ui.small_button("×").on_hover_text("remove the photo and search again").clicked() {
+                                actions.clear_photo = true;
+                            }
+                            ui.separator();
+                        }
+                        if found > 0 {
+                            if ui.button("Prev").on_hover_text("the previous match (P or [)").clicked() {
+                                actions.step = -1;
+                            }
+                            if ui.button("Next").on_hover_text("the next match, best first (N or ])").clicked() {
+                                actions.step = 1;
+                            }
+                            ui.label(at.map_or(format!("{found} matches"), |k| format!("{} of {found}", k + 1)));
+                            ui.toggle_value(&mut self.gallery.open, "Gallery").on_hover_text("all the matches together (G)");
+                        }
+                        if !self.status.is_empty() {
+                            ui.label(theme::muted(&self.status));
+                        }
+                    });
                 }
-                ui.label(&self.status);
             });
         });
-        if self.map.is_none() && self.opening.is_none() {
-            egui::Area::new("empty".into()).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
-                ui.weak(if self.library.maps.is_empty() { "No maps in maps/ yet: make one in Python (src/photomap.py)" } else { "Choose a map above" });
-            });
-        }
 
+        self.opening_card(&ctx);
+
+        // bottom left: the controls, as keys; bottom right: speed
+        egui::Area::new("help".into()).anchor(egui::Align2::LEFT_BOTTOM, [12.0, -12.0]).show(&ctx, |ui| {
+            theme::card().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (keys, what) in [
+                        (&["scroll", "Q", "E"][..], "zoom"),
+                        (&["drag", "W", "A", "S", "D"][..], "move"),
+                        (&["F"][..], "photos like the one under the mouse"),
+                        (&["N", "P"][..], "next / previous match"),
+                        (&["G"][..], "gallery"),
+                    ] {
+                        for k in keys {
+                            theme::key(ui, k);
+                        }
+                        ui.label(theme::muted(what));
+                        ui.add_space(8.0);
+                    }
+                });
+            });
+        });
         let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len().max(1) as f32;
         if let Some(m) = &self.map {
-            egui::Area::new("fps".into()).anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -8.0]).show(&ctx, |ui| {
-                ui.label(egui::RichText::new(format!(
-                    "{:.0} fps · {:.1} ms · streamed {} · loading {}",
-                    1.0 / avg.max(1e-6),
+            egui::Area::new("fps".into()).anchor(egui::Align2::RIGHT_BOTTOM, [-14.0, -14.0]).show(&ctx, |ui| {
+                let detail = format!(
+                    "{:.1} ms a frame\nstreamed: {}\nloading: {}",
                     avg * 1000.0,
-                    m.streamer.usage().iter().map(|(s, used, total)| format!("{s}px {used}/{total}")).collect::<Vec<_>>().join(", "),
+                    m.streamer.usage().iter().map(|(s, used, total)| format!("{s} px {used}/{total}")).collect::<Vec<_>>().join(", "),
                     m.streamer.in_flight()
-                )).monospace().color(egui::Color32::from_rgb(150, 200, 150)));
+                );
+                let speed = egui::RichText::new(format!("{:.0} fps", 1.0 / avg.max(1e-6))).monospace().color(theme::MUTED);
+                ui.add(egui::Label::new(speed).sense(egui::Sense::hover())).on_hover_text(detail);
             });
         }
-        egui::Area::new("help".into()).anchor(egui::Align2::LEFT_BOTTOM, [10.0, -8.0]).show(&ctx, |ui| {
-            ui.label(egui::RichText::new("scroll / Q E = zoom · drag or WASD = move (flick to throw) · F = photos like the one under the mouse · N / P = next / previous match · G = gallery of the matches").small().weak());
-        });
 
         if let (Some(id), Some(c), Some(m)) = (self.hovered, self.cursor, &self.map) {
             let ppp = ctx.pixels_per_point();
             egui::Area::new("tip".into()).fixed_pos([c.x / ppp + 14.0, c.y / ppp + 14.0]).interactable(false).show(&ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                theme::card().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                     ui.set_max_width(320.0);
                     ui.label(&m.data.photos[id].title);
-                    ui.weak("F: photos like this");
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        theme::key(ui, "F");
+                        ui.label(theme::muted("photos like this"));
+                    });
                 });
             });
         }
@@ -891,7 +1118,23 @@ struct UiActions {
     /// A thumbnail in the gallery was clicked: its position among the matches.
     goto: Option<usize>,
     clear_photo: bool,
-    open: Option<PathBuf>,
+    /// The "Maps" button.
+    back: bool,
+    /// What the Maps page asked for.
+    home: Vec<home::Action>,
+}
+
+impl Drop for Viewer {
+    /// Closing the app stops the maps being made where they are (everything done so far is on disk).
+    fn drop(&mut self) {
+        for run in &self.runs {
+            run.pause();
+        }
+        let waited = Instant::now();
+        while self.runs.iter().any(|r| r.running()) && waited.elapsed().as_secs() < 20 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
 }
 
 struct App {
@@ -950,54 +1193,6 @@ fn photo_path(text: &str) -> Option<PathBuf> {
     let path = PathBuf::from(t.strip_prefix("file://").unwrap_or(&t));
     let image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_TYPES.contains(&e.to_lowercase().as_str()));
     (image && path.is_file()).then_some(path)
-}
-
-/// The project folder: the one that has the bundle's maps/ folder.
-fn project_root(bundle: &std::path::Path) -> Result<PathBuf, String> {
-    bundle.parent().and_then(|p| p.parent()).map(PathBuf::from).ok_or_else(|| "no project folder around the map".to_string())
-}
-
-/// The search helper (src/map_search.py) this viewer started; stopped with it.
-struct Helper(std::process::Child);
-
-impl Drop for Helper {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Start the helper for a bundle: the project's .venv python on src/map_search.py, its output in logs/map_search.log.
-/// (The project folder is the one with the bundle's maps/ folder.)
-fn start_helper(bundle: &std::path::Path) -> Result<Helper, String> {
-    let bundle = std::fs::canonicalize(bundle).map_err(|e| e.to_string())?;
-    let root = project_root(&bundle)?;
-    let (python, script) = (root.join(".venv/bin/python"), root.join("src/map_search.py"));
-    if !python.exists() || !script.exists() {
-        return Err("search needs .venv/bin/python and src/map_search.py in the project folder".into());
-    }
-    let _ = std::fs::create_dir_all(root.join("logs"));
-    let log = std::fs::File::create(root.join("logs/map_search.log")).map_err(|e| e.to_string())?;
-    let child = std::process::Command::new(python)
-        .arg(script)
-        .arg(&bundle)
-        .current_dir(&root)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone().map_err(|e| e.to_string())?)
-        .stderr(log)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(Helper(child))
-}
-
-/// Is src/map_search.py running for this bundle? It keeps query.ready fresh.
-fn helper_alive(bundle: &std::path::Path) -> bool {
-    std::fs::metadata(bundle.join("query.ready")).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs_f32() < 3.0)
-}
-
-/// When a bundle's search.json was last written, if it has one.
-fn search_file_time(bundle: &std::path::Path) -> Option<SystemTime> {
-    std::fs::metadata(bundle.join("search.json")).and_then(|m| m.modified()).ok()
 }
 
 fn main() {
