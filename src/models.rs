@@ -271,7 +271,7 @@ impl Hub {
             if paused() {
                 return Ok(false);
             }
-            if started.elapsed().as_secs() > 300 {
+            if started.elapsed().as_secs() > 3600 {
                 return Err("the model didn't load".into());
             }
             std::thread::sleep(std::time::Duration::from_millis(100));

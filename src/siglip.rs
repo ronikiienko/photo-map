@@ -87,7 +87,7 @@ impl Siglip {
         let text = Session::builder(&env).and_then(|mut b| b.commit_from_file(model_dir.join("text_fp16.onnx"))).map_err(err("loading the text encoder"))?;
         let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
         tokenizer.with_truncation(Some(TruncationParams { max_length: TOKENS, ..Default::default() })).map_err(|e| e.to_string())?;
-        Ok(Self {
+        let mut model = Self {
             id: spec.id,
             env,
             vision: None,
@@ -101,7 +101,12 @@ impl Siglip {
             apple: rt.apple,
             root: root.to_path_buf(),
             on_gpu: rt.on_gpu || rt.apple.is_some(),
-        })
+        };
+        // CoreML prepares the network for the chip when it is opened (minutes the first time): here, where a map being made can still be paused
+        if model.apple.is_some() {
+            model.open_vision()?;
+        }
+        Ok(model)
     }
 
     pub fn id(&self) -> &'static str {
