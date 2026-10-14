@@ -61,10 +61,10 @@ pub const ONNXRUNTIME_MACOS: Pack = Pack {
     id: "onnxruntime-macos",
     label: "ONNX Runtime (processor and Apple chip)",
     version: ORT_VERSION,
-    size_mb: 21,
+    size_mb: 9,
     wheels: &[Wheel {
         url: "https://files.pythonhosted.org/packages/b3/bd/2ac094311163b803e3626c3937461d6900934bd56cca7601f6150ff860c3/onnxruntime-1.31.0-cp312-cp312-macosx_14_0_arm64.whl",
-        pin: "",
+        pin: "0c7696a37823ac69e32a3be6cf09e389c4dbeb434af177b0893b191c02624214",
         wants: &[Want { member: "libonnxruntime.1.31.0.dylib", save_as: "libonnxruntime.dylib" }],
     }],
 };

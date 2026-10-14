@@ -76,7 +76,7 @@ fn mac_embed_speed() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(format!("{tag}.f32")), vectors.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
     let mut accuracy = String::new();
-    if let Ok(reference) = std::env::var("BENCH_REF") {
+    if let Some(reference) = std::env::var("BENCH_REF").ok().filter(|r| r != "none") {
         let bytes = std::fs::read(dir.join(format!("{reference}.f32"))).unwrap();
         let theirs: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
         let dim = spec.dim;
@@ -93,3 +93,21 @@ fn mac_embed_speed() {
     );
 }
 
+
+/// What the inputs and outputs of the model files in BENCH_FILES (a list, separated by commas) are called, and their types.
+#[test]
+#[ignore]
+fn show_model_edges() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let rt = crate::embed::Runtime::start(&root).unwrap();
+    for f in std::env::var("BENCH_FILES").unwrap().split(',') {
+        let session = ort::session::Session::builder(&rt.env).unwrap().commit_from_file(f).unwrap();
+        eprintln!("EDGES {f}");
+        for i in session.inputs() {
+            eprintln!("  in  {} {:?}", i.name(), i.dtype());
+        }
+        for o in session.outputs() {
+            eprintln!("  out {} {:?}", o.name(), o.dtype());
+        }
+    }
+}

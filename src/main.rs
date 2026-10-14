@@ -3,6 +3,7 @@
 //!     photo-map [bundle]      default: the one opened last in maps/
 
 mod bake;
+mod backends;
 mod bc7;
 mod build;
 mod camera;
@@ -428,6 +429,7 @@ impl Viewer {
                 }
             }
             Action::StopInstall => self.runtime.stop(),
+            Action::SetBackend(b, on) => self.runtime.set_backend(b, on),
             Action::RemovePack(id) => self.runtime.remove(&id),
             Action::DismissOffer => self.runtime.dismiss(),
             Action::Restart => self.restart = true,

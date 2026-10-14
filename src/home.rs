@@ -14,6 +14,7 @@ pub enum Action {
     Open(PathBuf),
     Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String },
     Pause(PathBuf),
+    SetBackend(crate::backends::Backend, bool),
     Continue(PathBuf),
     Discard(PathBuf),
     Delete(PathBuf),
@@ -747,7 +748,7 @@ impl Home {
                     ui.label(theme::muted(what));
                 });
             };
-            let mac = cfg!(target_os = "macos");
+            let mac = !crate::backends::Backend::Cuda.exists_here();
             if !mac {
                 row(ui, "Graphics card", match &rt.nvidia {
                     Some(c) => format!("{} (its driver supports CUDA {})", c.name, manager::cuda_version(c.driver_cuda)),
@@ -765,6 +766,25 @@ impl Home {
             }
             ui.add_space(8.0);
             runtime_offer(ui, rt, false, actions);
+
+            ui.add_space(8.0);
+            ui.label("Run the models on");
+            for b in crate::backends::Backend::ALL.into_iter().filter(|b| b.exists_here()) {
+                let available = b.available(&rt.setup) && !(matches!(b, crate::backends::Backend::Cuda | crate::backends::Backend::TensorRt) && rt.nvidia.is_none());
+                let mut on = available && rt.backends.is_on(b, &rt.setup);
+                let was = on;
+                let cpu_alone = b == crate::backends::Backend::Cpu;
+                ui.horizontal(|ui| {
+                    let response = ui.add_enabled(available && !cpu_alone, egui::Checkbox::new(&mut on, b.label())).on_hover_text(b.note());
+                    if response.changed() && on != was {
+                        actions.push(Action::SetBackend(b, on));
+                    }
+                    if !available {
+                        ui.label(theme::muted("not installed"));
+                    }
+                });
+            }
+            ui.label(theme::muted("The processor is used for whatever the others can't run. Changes apply after a restart."));
 
             let installed = rt.installed();
             if !installed.is_empty() {

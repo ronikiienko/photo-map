@@ -1,5 +1,6 @@
 //! SigLIP 2 (photo encoder and text encoder, two separate networks that were trained to put a photo near the words that describe it)
-//! through ONNX Runtime. Made by src/siglip_export.py into .cache/onnx/<model>/: vision_fp16.onnx, text_fp16.onnx, tokenizer.json.
+//! through ONNX Runtime: .cache/onnx/<model>/ has vision_fp16.onnx, text_fp16.onnx, tokenizer.json. Either our own export (outputs
+//! image_features and text_features) or the ones the model's publisher has (onnx-community, outputs pooler_output) do.
 //!
 //! A photo is squeezed into a square (its shape is not kept), scaled to -1..1; the photo encoder runs on TensorRT when it can (its
 //! libraries are in runtime/tensorrt/) and on the CUDA provider otherwise. The text goes in lower case, cut to 64 tokens with an
@@ -99,7 +100,7 @@ impl Siglip {
             tensorrt: rt.tensorrt,
             apple: rt.apple,
             root: root.to_path_buf(),
-            on_gpu: rt.on_gpu,
+            on_gpu: rt.on_gpu || rt.apple.is_some(),
         })
     }
 
@@ -115,7 +116,7 @@ impl Siglip {
             return Err(format!("the tokenizer made {} tokens, expected {TOKENS}", ids.len()));
         }
         let outputs = self.text.run(ort::inputs!["input_ids" => Tensor::from_array(([1usize, TOKENS], ids)).map_err(err("tensor"))?]).map_err(err("running the text encoder"))?;
-        let (_, data) = outputs["text_features"].try_extract_tensor::<f32>().map_err(err("reading the result"))?;
+        let (_, data) = (outputs.get("text_features").or_else(|| outputs.get("pooler_output"))).ok_or("the text encoder has no text_features or pooler_output")?.try_extract_tensor::<f32>().map_err(err("reading the result"))?;
         Ok(unit(data.to_vec()))
     }
 
@@ -151,14 +152,17 @@ impl Siglip {
         }
         let batch = group.len();
         let side = self.size as usize;
-        let pixels: Vec<f32> = group.into_iter().flatten().collect();
+        let mut pixels: Vec<f32> = group.into_iter().flatten().collect();
+        // with CoreML the network is made for exactly BATCH photos: a short group is filled up with blank ones
+        let run_batch = if self.apple.is_some() { BATCH } else { batch };
+        pixels.resize(run_batch * 3 * side * side, 0.0);
         let vision = self.vision.as_mut().unwrap();
-        let outputs = vision.run(ort::inputs!["pixel_values" => Tensor::from_array(([batch, 3, side, side], pixels)).map_err(err("tensor"))?]).map_err(err("running the photo encoder"))?;
-        let (_, data) = outputs["image_features"].try_extract_tensor::<f32>().map_err(err("reading the result"))?;
-        if data.len() != batch * self.dim {
-            return Err(format!("the photo encoder made {} numbers for {batch} photos", data.len()));
+        let outputs = vision.run(ort::inputs!["pixel_values" => Tensor::from_array(([run_batch, 3, side, side], pixels)).map_err(err("tensor"))?]).map_err(err("running the photo encoder"))?;
+        let (_, data) = (outputs.get("image_features").or_else(|| outputs.get("pooler_output"))).ok_or("the photo encoder has no image_features or pooler_output")?.try_extract_tensor::<f32>().map_err(err("reading the result"))?;
+        if data.len() != run_batch * self.dim {
+            return Err(format!("the photo encoder made {} numbers for {run_batch} photos", data.len()));
         }
-        Ok(data.chunks_exact(self.dim).map(|row| unit(row.to_vec())).collect())
+        Ok(data.chunks_exact(self.dim).take(batch).map(|row| unit(row.to_vec())).collect())
     }
 
     /// The photo encoder: on TensorRT if it can (its engine is built the first time, about a minute, and kept in .cache/trt/), else
@@ -178,7 +182,7 @@ impl Siglip {
             }
         }
         let cache = self.root.join(".cache/coreml").join(self.model_dir.file_name().unwrap_or_default());
-        self.vision = Some(crate::embed::vision_builder(&self.env, self.apple, &cache).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?);
+        self.vision = Some(crate::embed::vision_builder(&self.env, self.apple, &cache, &[("batch_size", BATCH as i64), ("num_channels", 3), ("height", self.size as i64), ("width", self.size as i64)]).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?);
         Ok(())
     }
 

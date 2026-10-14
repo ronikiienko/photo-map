@@ -131,27 +131,16 @@ pub struct Runtime {
     pub apple: Option<ep::coreml::ComputeUnits>,
 }
 
-/// What a Mac's photo encoders run on, from `PHOTO_MAP_COREML`: off, cpu (CoreML on the processor), gpu, ane (neural engine) or all.
-fn apple_units() -> Option<ep::coreml::ComputeUnits> {
-    use ep::coreml::ComputeUnits::*;
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    match std::env::var("PHOTO_MAP_COREML").as_deref() {
-        Ok("off") => None,
-        Ok("cpu") => Some(CPUOnly),
-        Ok("gpu") => Some(CPUAndGPU),
-        Ok("ane") => Some(CPUAndNeuralEngine),
-        _ => Some(All),
-    }
-}
-
 /// A session builder for a photo encoder: with CoreML when the machine has it and `apple` says so.
-pub fn vision_builder(env: &Environment, apple: Option<ep::coreml::ComputeUnits>, cache: &Path) -> ort::Result<ort::session::builder::SessionBuilder> {
-    let builder = Session::builder(env)?;
+/// `sizes`: the dimensions the model leaves open, fixed to these sizes (CoreML needs shapes that do not change).
+pub fn vision_builder(env: &Environment, apple: Option<ep::coreml::ComputeUnits>, cache: &Path, sizes: &[(&str, i64)]) -> ort::Result<ort::session::builder::SessionBuilder> {
+    let mut builder = Session::builder(env)?;
     let Some(units) = apple else { return Ok(builder) };
+    for (name, size) in sizes {
+        builder = builder.with_dimension_override(name, *size)?;
+    }
     let _ = std::fs::create_dir_all(cache);
-    let coreml = ep::CoreML::default().with_compute_units(units).with_model_format(ep::coreml::ModelFormat::MLProgram).with_model_cache_dir(cache.display()).build();
+    let coreml = ep::CoreML::default().with_compute_units(units).with_model_format(if std::env::var("PHOTO_MAP_COREML_FORMAT").as_deref() == Ok("nn") { ep::coreml::ModelFormat::NeuralNetwork } else { ep::coreml::ModelFormat::MLProgram }).with_model_cache_dir(cache.display()).build();
     builder.with_execution_providers([coreml]).map_err(|e| e.into())
 }
 
@@ -164,8 +153,9 @@ impl Runtime {
             return Err(format!("ONNX Runtime is not installed (looked in {})", root.join("runtime").display()));
         };
         let onnx = ort_place.dir.join(runtime::ORT_LIB);
+        let chosen = crate::backends::Choice::load(root);
         let mut on_gpu = false;
-        if let (Some(gpu), true) = (&setup.gpu, setup.ort_cuda) {
+        if let (Some(gpu), true, true) = (&setup.gpu, setup.ort_cuda, chosen.cuda(&setup)) {
             on_gpu = runtime::CUDA_LIBS.iter().all(|l| ort::util::preload_dylib(gpu.cuda.dir.join(l)).is_ok())
                 && runtime::CUDNN_LIBS.iter().all(|l| ort::util::preload_dylib(gpu.cudnn.dir.join(l)).is_ok());
         }
@@ -175,10 +165,11 @@ impl Runtime {
         }
         let env = env.build().map_err(err("starting ONNX Runtime"))?;
         let tensorrt = on_gpu
+            && chosen.tensorrt(&setup)
             && setup.ort_tensorrt
             && setup.tensorrt.as_ref().is_some_and(|t| runtime::TENSORRT_LIBS.iter().all(|l| ort::util::preload_dylib(t.dir.join(l)).is_ok()));
-        let apple = apple_units();
-        Ok(Self { env, on_gpu: on_gpu || apple.is_some(), tensorrt, apple })
+        let apple = chosen.apple(&setup);
+        Ok(Self { env, on_gpu, tensorrt, apple })
     }
 }
 
@@ -198,7 +189,7 @@ impl Gemma {
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
         let on_gpu = rt.on_gpu;
         let tensorrt = rt.tensorrt && model_dir.join("onnx/vision_encoder_fp16_trt.onnx").exists() && model_dir.join("onnx/vision_pool.onnx").exists();
-        Ok(Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt, apple: rt.apple })
+        Ok(Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt, apple: None /* measured: its open shapes make CoreML slower than the processor */ })
     }
 
     /// The token ids of a text, as the model gets them (its special tokens included).
@@ -267,7 +258,7 @@ impl Gemma {
         // the fused attention is for CUDA; the plain export (the one the model's publisher has) is what other machines run
         let fused = self.model_dir.join("onnx/vision_encoder_fp16_fused.onnx");
         let file = if fused.exists() && self.apple.is_none() { fused } else { self.model_dir.join("onnx/vision_encoder_fp16.onnx") };
-        let session = vision_builder(&self.env, self.apple, &self.root.join(".cache/coreml/embeddinggemma-2")).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
+        let session = vision_builder(&self.env, self.apple, &self.root.join(".cache/coreml/embeddinggemma-2"), &[("s11", TENSORRT_BATCH as i64), ("s35", PADDED as i64)]).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
         self.vision = Some(session);
         Ok(())
     }
@@ -303,7 +294,7 @@ impl Gemma {
         if self.vision.is_none() {
             self.open_vision()?;
         }
-        if self.pool.is_some() && cuts.len() > TENSORRT_BATCH {
+        if (self.pool.is_some() || self.apple.is_some()) && cuts.len() > TENSORRT_BATCH {
             // more photos than the TensorRT engine takes at once: in turns
             let mut out = Vec::new();
             while !cuts.is_empty() {
@@ -312,8 +303,14 @@ impl Gemma {
             }
             return Ok(out);
         }
-        let batch = cuts.len();
         let tokens: usize = cuts.iter().map(|c| c.soft_tokens).sum();
+        if self.apple.is_some() {
+            // CoreML's network is made for exactly this many photos: a short group is filled up with blank ones (all filler, no tokens)
+            while cuts.len() < TENSORRT_BATCH {
+                cuts.push(Patches { pixels: vec![0f32; PADDED * PATCH_VALUES], positions: vec![-1i64; PADDED * 2], soft_tokens: 0 });
+            }
+        }
+        let batch = cuts.len();
         let mut pixels = Vec::with_capacity(batch * PADDED * PATCH_VALUES);
         let mut positions = Vec::with_capacity(batch * PADDED * 2);
         for c in cuts {
