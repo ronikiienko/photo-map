@@ -1,0 +1,5 @@
+# Compiling the bundled JPEG decoder (libjpeg-turbo) needs cmake and nasm. They are kept in this folder (see README), so plain
+# `cargo run --release` finds them without anything on PATH.
+[env]
+CMAKE = { value = ".venv/bin/cmake", relative = true }
+ASM_NASM = { value = ".tools/nasm/usr/bin/nasm", relative = true }
