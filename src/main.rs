@@ -137,6 +137,8 @@ struct Viewer {
     camera: Camera,
     keys: Keys,
     alt: bool,
+    /// Fingers are on the trackpad, scrolling (or the system's momentum after them): the scroll pans instead of zooming.
+    scroll_gesture: bool,
     /// The window is minimized or covered: no frames are asked for until it is shown again.
     hidden: bool,
     help_open: bool,
@@ -217,6 +219,7 @@ impl Viewer {
             camera,
             keys: Keys::default(),
             alt: false,
+            scroll_gesture: false,
             hidden: false,
             help_open: false,
             paused_for_viewing: Vec::new(),
@@ -447,6 +450,7 @@ impl Viewer {
             Action::RemovePack(id) => self.runtime.remove(&id),
             Action::GetModel(id) => self.store.get(&id),
             Action::StopModelFetch => self.store.stop(),
+            Action::CountModels => self.store.count(),
             Action::RemoveModel(id) => {
                 if self.runs.iter().any(|r| r.running()) {
                     self.notice = Some(("stop the maps being made first: they may be using the model".into(), false));
@@ -725,10 +729,22 @@ impl Viewer {
                 }
                 _ => {}
             },
-            WindowEvent::MouseWheel { delta, .. } if !over_ui && self.page == Page::Viewer => match delta {
-                MouseScrollDelta::LineDelta(_, y) => self.camera.scroll_lines(y),
-                MouseScrollDelta::PixelDelta(p) => self.camera.scroll_pixels(p.y as f32),
-            },
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                // a trackpad's two fingers pan (from the first touch to the end of the system's own momentum); a wheel zooms
+                match phase {
+                    winit::event::TouchPhase::Started => self.scroll_gesture = true,
+                    winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => self.scroll_gesture = false,
+                    winit::event::TouchPhase::Moved => {}
+                }
+                if !over_ui && self.page == Page::Viewer {
+                    match delta {
+                        MouseScrollDelta::LineDelta(_, y) => self.camera.scroll_lines(y),
+                        MouseScrollDelta::PixelDelta(p) if self.scroll_gesture => self.camera.pan_pixels(Vec2::new(p.x as f32, p.y as f32)),
+                        MouseScrollDelta::PixelDelta(p) => self.camera.scroll_pixels(p.y as f32),
+                    }
+                }
+            }
+            WindowEvent::PinchGesture { delta, .. } if !over_ui && self.page == Page::Viewer => self.camera.pinch(delta as f32),
             WindowEvent::ModifiersChanged(m) => self.alt = m.state().alt_key(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if self.alt && event.state == ElementState::Pressed && !event.repeat && event.logical_key == Key::Named(NamedKey::Enter) {
