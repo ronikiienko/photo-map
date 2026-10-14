@@ -76,6 +76,6 @@ with torch.no_grad():
     photo_vectors = vector(model.get_image_features(pixel_values=pixels)).float().cpu().numpy()
 (out_dir / "reference.json").write_text(json.dumps({
     "texts": texts, "ids": tok["input_ids"].tolist(), "text_vectors": text_vectors.tolist(),
-    "photos": [str(p) for p in photos], "photo_vectors": photo_vectors.tolist(),
+    "photos": [str(p.relative_to(config.ROOT)) for p in photos], "photo_vectors": photo_vectors.tolist(),
 }))
 print("exported", out_dir, "size", size, "dim", photo_vectors.shape[1])

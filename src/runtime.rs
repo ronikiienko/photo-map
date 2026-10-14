@@ -20,7 +20,7 @@ pub const ORT_TENSORRT_PROVIDER: &str = "libonnxruntime_providers_tensorrt.so";
 /// CUDA libraries to load, dependencies first (ONNX Runtime's CUDA provider needs these four).
 pub const CUDA_LIBS: [&str; 4] = ["libcudart.so.13", "libcublasLt.so.13", "libcublas.so.13", "libcurand.so.10"];
 /// cuDNN (its softmax and attention helpers), also dependencies first.
-pub const CUDNN_LIBS: [&str; 8] = [
+pub const CUDNN_LIBS: [&str; 10] = [
     "libcudnn.so.9",
     "libcudnn_graph.so.9",
     "libcudnn_ops.so.9",
@@ -29,6 +29,9 @@ pub const CUDNN_LIBS: [&str; 8] = [
     "libcudnn_cnn.so.9",
     "libcudnn_engines_precompiled.so.9",
     "libcudnn_engines_runtime_compiled.so.9",
+    // cuDNN loads these two itself when it builds a convolution; a copy without them starts and then fails on the first one
+    "libcudnn_engines_tensor_ir.so.9",
+    "libcudnn_ext.so.9",
 ];
 /// TensorRT's libraries, dependencies first.
 pub const TENSORRT_LIBS: [&str; 3] = ["libnvinfer.so.10", "libnvinfer_plugin.so.10", "libnvonnxparser.so.10"];

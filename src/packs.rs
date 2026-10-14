@@ -101,10 +101,10 @@ pub const CUDNN: Pack = Pack {
     id: "cudnn-9",
     label: "NVIDIA cuDNN 9",
     version: "9.24",
-    size_mb: 411,
+    size_mb: 527,
     wheels: &[Wheel {
         url: "https://files.pythonhosted.org/packages/5c/ba/791cffd048fe5b044e620df55267e3e95c0e6e07d50b41e377c03dfc910f/nvidia_cudnn_cu13-9.24.0.43-py3-none-manylinux_2_27_x86_64.whl",
-        pin: "ca81d9ab4df48ff67dd64a93c4c350aa960cd22a402a10d972ec60acd20a57db",
+        pin: "5406885654fe5530a169be2773d38ff50a4998484b3fbab2fd86ba321df03d31",
         wants: &[
             same("libcudnn.so.9"),
             same("libcudnn_graph.so.9"),
@@ -114,6 +114,8 @@ pub const CUDNN: Pack = Pack {
             same("libcudnn_cnn.so.9"),
             same("libcudnn_engines_precompiled.so.9"),
             same("libcudnn_engines_runtime_compiled.so.9"),
+            same("libcudnn_engines_tensor_ir.so.9"),
+            same("libcudnn_ext.so.9"),
         ],
     }],
 };
@@ -176,6 +178,7 @@ pub struct Installed {
     pub id: String,
     pub version: String,
     pub bytes: u64,
+    pub files: Vec<String>,
 }
 
 /// The packs this program installed (not other folders in `runtime/`).
@@ -186,11 +189,24 @@ pub fn installed(root: &Path) -> Vec<Installed> {
         .map(|e| e.path())
         .filter_map(|dir| {
             let manifest: Manifest = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST)).ok()?).ok()?;
-            Some(Installed { bytes: manifest.files.iter().map(|f| f.size).sum(), id: manifest.id, version: manifest.version })
+            Some(Installed { bytes: manifest.files.iter().map(|f| f.size).sum(), files: manifest.files.into_iter().map(|f| f.name).collect(), id: manifest.id, version: manifest.version })
         })
         .collect();
     found.sort_by(|a, b| a.id.cmp(&b.id));
     found
+}
+
+/// Packs this program installed that lack a file this version of the program wants from them (a pack made by an older definition).
+pub fn outdated(root: &Path) -> Vec<&'static Pack> {
+    installed(root)
+        .into_iter()
+        .filter_map(|have| {
+            let pack = pack(&have.id)?;
+            let wanted = pack.wheels.iter().flat_map(|w| w.wants.iter().map(|w| w.save_as));
+            let missing = wanted.into_iter().any(|name| !have.files.iter().any(|f| f == name));
+            missing.then_some(pack)
+        })
+        .collect()
 }
 
 /// Remove a pack this program installed: exactly the files its `pack.json` lists. A folder without one is left alone.
@@ -422,7 +438,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("photo-map-packs-{name}-{}", std::process::id()));
+        // inside the project, like everything this program downloads
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache/test").join(format!("packs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("runtime")).unwrap();
         dir
@@ -448,6 +465,23 @@ mod tests {
         remove(&root, "cuda-13").unwrap();
         assert!(!own.join("libcudart.so.13").exists() && !own.join(MANIFEST).exists());
         assert!(own.join("somebody-elses.txt").exists(), "what is not in the manifest stays");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_pack_made_before_a_file_was_added_to_it_is_outdated() {
+        let root = temp("outdated");
+        let dir = root.join("runtime/cudnn-9");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wanted: Vec<&str> = CUDNN.wheels.iter().flat_map(|w| w.wants.iter().map(|w| w.save_as)).collect();
+        let write = |names: &[&str]| {
+            let manifest = Manifest { id: "cudnn-9".into(), version: "9".into(), files: names.iter().map(|n| File { name: n.to_string(), size: 1 }).collect() };
+            std::fs::write(dir.join(MANIFEST), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        };
+        write(&wanted[..wanted.len() - 1]);
+        assert_eq!(outdated(&root).iter().map(|p| p.id).collect::<Vec<_>>(), ["cudnn-9"]);
+        write(&wanted);
+        assert!(outdated(&root).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -494,6 +528,21 @@ mod tests {
         remove(&root, "onnxruntime").unwrap();
         assert!(!dir.join("libonnxruntime.so").exists());
         assert!(crate::runtime::Setup::detect(&root).ort.is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Installs cuDNN for real and checks every library cuDNN needs is there (needs the network, 0.5 GB): cargo test --release installs_all_of_cudnn -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn installs_all_of_cudnn() {
+        let root = temp("cudnn");
+        let stop = AtomicBool::new(false);
+        install(&root, &CUDNN, None, &stop, &|_, _| {}).unwrap();
+        let dir = root.join("runtime/cudnn-9");
+        for lib in crate::runtime::CUDNN_LIBS {
+            assert!(std::fs::metadata(dir.join(lib)).unwrap().len() > 100_000, "{lib}");
+        }
+        assert!(outdated(&root).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

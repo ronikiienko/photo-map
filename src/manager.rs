@@ -124,6 +124,14 @@ impl Manager {
         if self.restart || !self.card_known() {
             return Advice::Nothing;
         }
+        let stale = packs::outdated(&self.root);
+        if !stale.is_empty() {
+            return Advice::Offer(Offer {
+                packs: stale,
+                title: "Update",
+                why: "A pack installed earlier is missing files that this version needs, which can make the graphics card fail while running the models. Installing it again fetches it complete.".into(),
+            });
+        }
         let usable_card = self.nvidia.as_ref().filter(|c| c.driver_ok());
         if self.setup.ort.is_none() {
             return match usable_card {

@@ -211,6 +211,11 @@ mod tests {
 
     /// Words and photos come out as PyTorch makes them (.cache/onnx/<model>/reference.json, from src/siglip_export.py). These tests
     /// swap the loaded model, so run them alone: cargo test --release siglip -- --ignored --test-threads=1 --nocapture
+    /// A photo of reference.json, which names them from where the Python export was made: the part from `maps/` on is in this project.
+    fn project_path(root: &std::path::Path, p: &str) -> std::path::PathBuf {
+        root.join(&p[p.find("maps/").unwrap_or(0)..])
+    }
+
     #[test]
     #[ignore]
     fn siglip_matches_pytorch() {
@@ -235,7 +240,7 @@ mod tests {
                 assert!((got.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-3, "unit length");
             }
             let paths: Vec<&str> = reference["photos"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
-            let prepared: Vec<_> = paths.iter().map(|p| spec.prepare(&crate::photo::load(std::path::Path::new(p)).unwrap()).unwrap()).collect();
+            let prepared: Vec<_> = paths.iter().map(|p| spec.prepare(&crate::photo::load(&project_path(root, p)).unwrap()).unwrap()).collect();
             let together = m.embed_prepared(prepared);
             for ((path, got), want) in paths.iter().zip(together).zip(reference["photo_vectors"].as_array().unwrap()) {
                 let got = got.unwrap();
@@ -244,7 +249,7 @@ mod tests {
                 assert!(c > 0.99, "{c}"); // our resize is not PIL's, and the card computes in float16
             }
             // a photo alone is what it is in a group
-            let alone = m.embed_image(&crate::photo::load(std::path::Path::new(paths[1])).unwrap()).unwrap();
+            let alone = m.embed_image(&crate::photo::load(&project_path(root, paths[1])).unwrap()).unwrap();
             let c = cosine(&alone, &vector(&reference["photo_vectors"][1]));
             assert!(c > 0.99, "{c}");
         })
