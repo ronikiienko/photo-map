@@ -220,7 +220,7 @@ mod tests {
     }
 
     fn matches_pytorch(id: &'static str) {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let spec = models::spec(id).unwrap();
         let reference: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join(".cache/onnx").join(spec.folder).join("reference.json")).unwrap()).unwrap();
         let hub = models::test_hub();
@@ -270,7 +270,7 @@ mod tests {
     #[ignore]
     fn siglip_cpu_side_speed() {
         use rayon::prelude::*;
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for (id, name) in [SIGLIP_BASE_512, models::SIGLIP_BASE_256].into_iter().flat_map(|id| ["maps/rare-species.photomap/originals", "maps/wikivoyage.photomap/originals"].map(|n| (id, n))) {
             let spec = models::spec(id).unwrap();
             let mut files: Vec<_> = std::fs::read_dir(root.join(name)).unwrap().flatten().map(|e| e.path()).collect();
@@ -318,7 +318,7 @@ mod tests {
     #[ignore]
     fn siglip_embed_speed() {
         use rayon::prelude::*;
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let hub = models::test_hub();
         for (id, name) in [SIGLIP_BASE_512, models::SIGLIP_BASE_256].into_iter().flat_map(|id| ["maps/rare-species.photomap/originals", "maps/wikivoyage.photomap/originals"].map(|n| (id, n))) {
             let spec = models::spec(id).unwrap();

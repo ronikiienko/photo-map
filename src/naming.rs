@@ -170,7 +170,7 @@ mod tests {
     /// The vocabulary is read, every phrase once, with its commonness.
     #[test]
     fn reads_the_vocabulary() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let list = phrases(root).unwrap();
         assert_eq!(list.len(), 3385, "same as the Python list (data/vocab/curated2.json)");
         assert_eq!(list.iter().map(|p| p.name.to_lowercase()).collect::<std::collections::HashSet<_>>().len(), list.len());

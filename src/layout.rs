@@ -318,7 +318,7 @@ mod compare {
     #[test]
     #[ignore]
     fn layout_of_a_real_map() {
-        let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("maps/flickr30k.photomap");
+        let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("maps/flickr30k.photomap");
         let n = 31_014;
         let raw = std::fs::read(bundle.join("embeddings.bin")).unwrap();
         let v: Vec<f32> = raw.chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();

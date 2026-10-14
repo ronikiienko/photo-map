@@ -1352,7 +1352,7 @@ fn photo_path(text: &str) -> Option<PathBuf> {
 }
 
 fn main() {
-    let maps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("maps");
+    let maps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("maps");
     let first = std::env::args().nth(1).map(PathBuf::from);
     // winit doesn't deliver files dropped on a native Wayland window (the photo search takes dropped photos), but does on
     // an X11 one: with an X server around (XWayland), use that, unless PHOTO_MAP_WAYLAND is set

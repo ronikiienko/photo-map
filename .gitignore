@@ -1,22 +1,16 @@
-.venv/
+# built, downloaded or made here - never committed
+target/
+maps/
+runtime/
 .cache/
+.cargo-home/
+.tools/
+.venv/
 __pycache__/
+
+# data and scratch
+data/
+idk/
 index/
 logs/
-data/uk_wiki/
-data/simplewiki/
-data/wikivoyage/
-data/history/
-data/budget_test/
-reports/*.html
-reports/*.zip
-.cargo-home/
-photo-map/target/
-maps/
-data/nasa/
-data/vocab/
-data/rare-species/
-data/esc50/
-data/flickr30k/
-runtime/
-.tools/
+reports/

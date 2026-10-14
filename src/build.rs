@@ -927,7 +927,7 @@ mod tests {
     /// Proved by changing a row in the first map to a vector the model would never make, and finding it in the second.
     #[test]
     fn reuses_vectors_of_earlier_maps() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
         let temp = std::env::temp_dir().join(format!("photo-map-reuse-test-{}", std::process::id()));
         let (source, maps) = (temp.join("photos"), temp.join("maps"));
         fs::create_dir_all(&source).unwrap();
@@ -980,7 +980,7 @@ mod tests {
     /// A folder of photos becomes a map's vectors, also when the build is paused and continued several times on the way.
     #[test]
     fn builds_from_a_folder_and_resumes() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
         let temp = std::env::temp_dir().join(format!("photo-map-build-test-{}", std::process::id()));
         let (source, maps) = (temp.join("photos"), temp.join("maps"));
         fs::create_dir_all(source.join("sub")).unwrap();
@@ -1051,7 +1051,7 @@ mod tests {
     #[test]
     #[ignore]
     fn another_model_makes_its_own_vectors() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
         let temp = std::env::temp_dir().join(format!("photo-map-models-test-{}", std::process::id()));
         let (source, maps) = (temp.join("photos"), temp.join("maps"));
         fs::create_dir_all(&source).unwrap();

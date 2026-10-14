@@ -293,7 +293,7 @@ pub fn test_hub() -> Arc<Hub> {
     static HUB: std::sync::OnceLock<Arc<Hub>> = std::sync::OnceLock::new();
     let hub = HUB
         .get_or_init(|| {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
             Hub::start(root, || {})
         })
         .clone();

@@ -392,8 +392,8 @@ mod tests {
     /// Same token ids and (nearly) the same vectors as the Python / PyTorch side (tests/query_vectors.json).
     #[test]
     fn queries_match_python() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("photo-map/tests/query_vectors.json")).unwrap()).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("tests/query_vectors.json")).unwrap()).unwrap();
         assert_eq!(fixture["prompt"].as_str().unwrap(), QUERY_PROMPT);
         let shared = shared_model();
         let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -414,8 +414,8 @@ mod tests {
     /// A photo through the Rust side gives (nearly) the vector Python made of it, and its patches are the processor's.
     #[test]
     fn photos_match_python() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("photo-map/tests/image_vectors.json")).unwrap()).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("tests/image_vectors.json")).unwrap()).unwrap();
         let shared = shared_model();
         let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let model = guard.as_mut().unwrap().gemma();
@@ -447,7 +447,7 @@ mod tests {
     /// Photos embedded together (their token lists padded) give the same vectors as each one alone.
     #[test]
     fn together_is_the_same_as_alone() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let dir = root.join("maps/wikivoyage.photomap/originals");
         let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
         files.sort();
@@ -473,7 +473,7 @@ mod tests {
     #[ignore]
     fn cpu_side_speed() {
         use rayon::prelude::*;
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for name in ["data/wikiart/images", "maps/wikivoyage.photomap/originals"] {
             let mut files: Vec<_> = std::fs::read_dir(root.join(name)).unwrap().flatten().map(|e| e.path()).collect();
             files.sort();
@@ -503,7 +503,7 @@ mod tests {
     #[ignore]
     fn cpu_side_speed_camera_photo() {
         use rayon::prelude::*;
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files: Vec<_> = std::fs::read_dir(root.join("data/wikiart/images")).unwrap().flatten().map(|e| e.path()).collect();
         files.sort();
         let base = crate::photo::load(&files[100]).unwrap();
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     #[ignore]
     fn closing_is_clean() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let dir = root.join("maps/wikivoyage.photomap/originals");
         let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
         files.sort();
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     #[ignore]
     fn where_the_time_goes() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let dir = root.join("maps/wikivoyage.photomap/originals");
         let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
         files.sort();
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     #[ignore]
     fn batch_sizes() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let dir = root.join("maps/wikivoyage.photomap/originals");
         let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
         files.sort();
