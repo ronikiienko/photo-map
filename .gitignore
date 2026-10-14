@@ -14,3 +14,4 @@ idk/
 index/
 logs/
 reports/
+.cargo/
