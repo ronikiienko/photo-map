@@ -117,7 +117,8 @@ impl Choice {
             return false;
         }
         match &self.0 {
-            Some(list) => list.contains(&b) || (b == Backend::Cpu && !list.iter().any(|x| x.available(setup) && *x != Backend::Cpu)),
+            Some(list) if b == Backend::Cpu => !list.iter().any(|x| *x != Backend::Cpu && x.exists_here() && x.available(setup)),
+            Some(list) => list.contains(&b),
             None => b == Backend::AppleNeural || b == Backend::Cuda || b == Backend::TensorRt || b == Backend::Cpu && !Backend::ALL.iter().any(|x| *x != Backend::Cpu && x.exists_here() && x.available(setup)),
         }
     }
@@ -136,7 +137,7 @@ impl Choice {
             return;
         }
         let mut list = self.current(setup);
-        list.retain(|x| *x != b);
+        list.retain(|x| *x != b && *x != Backend::Cpu);
         if on {
             if b.apple() {
                 list.retain(|x| !x.apple());
@@ -199,5 +200,15 @@ mod tests {
         assert!(c.is_on(Backend::AppleGpu, &setup) && !c.is_on(Backend::AppleNeural, &setup));
         c.set(Backend::AppleGpu, false, &setup);
         assert!(c.is_on(Backend::Cpu, &setup) && c.apple(&setup).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_processor_is_not_ticked_beside_another() {
+        let setup = with_ort();
+        let mut c = Choice(None);
+        c.set(Backend::Cpu, true, &setup);
+        c.set(Backend::AppleGpu, true, &setup);
+        assert!(c.is_on(Backend::AppleGpu, &setup) && !c.is_on(Backend::Cpu, &setup));
     }
 }
