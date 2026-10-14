@@ -29,3 +29,6 @@ delaunator = "1.1.0"
 rfd = "0.17"
 fast_image_resize = "6.1.0"
 turbojpeg = { version = "1.5.1", default-features = false, features = ["cmake", "require-simd"] }
+ureq = "3"
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
+sha2 = "0.11.1"

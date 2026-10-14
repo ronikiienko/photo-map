@@ -4,6 +4,7 @@
 //! .cache/onnx/embeddinggemma-2/ (the ONNX export of Gemma; vision_encoder_fp16_fused.onnx is for photos). The CUDA libraries are loaded by
 //! full path before the first session is made, so nothing has to be installed or put on a search path.
 
+use crate::runtime::{self, Setup};
 use ort::ep;
 use ort::environment::Environment;
 use ort::session::Session;
@@ -16,20 +17,6 @@ use tokenizers::Tokenizer;
 pub const QUERY_PROMPT: &str = "task: search result | query: ";
 /// The model's default for a text that is searched (a caption), when it has no title.
 pub const DOCUMENT_PROMPT: &str = "title: none | text: ";
-/// CUDA libraries to load, dependencies first (ONNX Runtime's CUDA provider needs these four).
-const CUDA_LIBS: [&str; 4] = ["libcudart.so.13", "libcublasLt.so.13", "libcublas.so.13", "libcurand.so.10"];
-/// cuDNN (its softmax and attention helpers), also dependencies first.
-const CUDNN_LIBS: [&str; 8] = [
-    "libcudnn.so.9",
-    "libcudnn_graph.so.9",
-    "libcudnn_ops.so.9",
-    "libcudnn_heuristic.so.9",
-    "libcudnn_adv.so.9",
-    "libcudnn_cnn.so.9",
-    "libcudnn_engines_precompiled.so.9",
-    "libcudnn_engines_runtime_compiled.so.9",
-];
-
 pub struct Gemma {
     // the environment must outlive the sessions
     env: Environment,
@@ -47,8 +34,6 @@ pub struct Gemma {
     tensorrt: bool,
 }
 
-/// TensorRT's libraries (runtime/tensorrt/), dependencies first.
-const TENSORRT_LIBS: [&str; 3] = ["libnvinfer.so.10", "libnvinfer_plugin.so.10", "libnvonnxparser.so.10"];
 /// The most photos TensorRT's engine takes at once (it is built for 1 to this many).
 const TENSORRT_BATCH: usize = 4;
 
@@ -140,25 +125,33 @@ pub struct Runtime {
     pub env: Environment,
     pub on_gpu: bool,
     pub tensorrt: bool,
+    /// Where its libraries came from.
+    pub setup: Setup,
 }
 
 impl Runtime {
-    /// Start ONNX Runtime from the project folder (runtime/), with the CUDA libraries loaded by full path (a missing one means no GPU).
+    /// Start ONNX Runtime from the libraries `runtime::Setup` finds, with the CUDA libraries loaded by full path (a missing one
+    /// means no GPU).
     pub fn start(root: &Path) -> Result<Self> {
-        let onnx = root.join("runtime/ort/libonnxruntime.so");
-        if !onnx.exists() {
-            return Err(format!("missing {}", onnx.display()));
+        let setup = Setup::detect(root);
+        let Some(ort_place) = &setup.ort else {
+            return Err(format!("ONNX Runtime is not installed (looked in {})", root.join("runtime").display()));
+        };
+        let onnx = ort_place.dir.join(runtime::ORT_LIB);
+        let mut on_gpu = false;
+        if let (Some(gpu), true) = (&setup.gpu, setup.ort_cuda) {
+            on_gpu = runtime::CUDA_LIBS.iter().all(|l| ort::util::preload_dylib(gpu.cuda.dir.join(l)).is_ok())
+                && runtime::CUDNN_LIBS.iter().all(|l| ort::util::preload_dylib(gpu.cudnn.dir.join(l)).is_ok());
         }
-        let cuda_dir: PathBuf = root.join("runtime/cuda");
-        let on_gpu = CUDA_LIBS.iter().all(|l| ort::util::preload_dylib(cuda_dir.join(l)).is_ok())
-            && CUDNN_LIBS.iter().all(|l| ort::util::preload_dylib(root.join("runtime/cudnn").join(l)).is_ok());
         let mut env = ort::init_from(&onnx).map_err(|e| format!("loading ONNX Runtime: {e}"))?.with_name("photo-map");
         if on_gpu {
             env = env.with_execution_providers([ep::CUDA::default().with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested).build()]); // allocate what is needed, not the next power of two (the card is shared with the map)
         }
         let env = env.build().map_err(err("starting ONNX Runtime"))?;
-        let tensorrt = on_gpu && TENSORRT_LIBS.iter().all(|l| ort::util::preload_dylib(root.join("runtime/tensorrt").join(l)).is_ok());
-        Ok(Self { env, on_gpu, tensorrt })
+        let tensorrt = on_gpu
+            && setup.ort_tensorrt
+            && setup.tensorrt.as_ref().is_some_and(|t| runtime::TENSORRT_LIBS.iter().all(|l| ort::util::preload_dylib(t.dir.join(l)).is_ok()));
+        Ok(Self { env, on_gpu, tensorrt, setup })
     }
 }
 
