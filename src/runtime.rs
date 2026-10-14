@@ -59,6 +59,7 @@ impl Source {
     }
 
     /// Is it ours to remove?
+    #[cfg(test)]
     pub fn ours(&self) -> bool {
         matches!(self, Source::Managed(_))
     }

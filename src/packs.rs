@@ -10,7 +10,7 @@
 use crate::runtime::Nvidia;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const MANIFEST: &str = "pack.json";
@@ -37,6 +37,8 @@ pub struct Pack {
     pub id: &'static str,
     pub label: &'static str,
     pub version: &'static str,
+    /// About how much it downloads, in MB (the real figure is shown while it downloads).
+    pub size_mb: u32,
     pub wheels: &'static [Wheel],
 }
 
@@ -46,6 +48,7 @@ pub const ONNXRUNTIME: Pack = Pack {
     id: "onnxruntime",
     label: "ONNX Runtime (processor only)",
     version: ORT_VERSION,
+    size_mb: 11,
     wheels: &[Wheel {
         url: "https://files.pythonhosted.org/packages/6c/44/1e9e762b95b7da0a8424913a1ed7c38cdaf88624a3c41ddba24ebac88bc9/onnxruntime-1.31.0-cp312-cp312-manylinux_2_28_x86_64.whl",
         pin: "c65e5b3e56e6181244335676c560d23d31198ab55c59fc63813ef9c95bf22aa8",
@@ -57,6 +60,7 @@ pub const ONNXRUNTIME_GPU: Pack = Pack {
     id: "onnxruntime-gpu",
     label: "ONNX Runtime (with graphics card support)",
     version: ORT_VERSION,
+    size_mb: 232,
     wheels: &[Wheel {
         url: "https://files.pythonhosted.org/packages/8f/48/6fbfdbce25e5756c7b9ff8f40645d98b166b8022cf00ede58a2bb4571b8e/onnxruntime_gpu-1.31.0-cp312-cp312-manylinux_2_28_x86_64.whl",
         pin: "9e3f1b84ba7baaf3bc5d6e7827a46cbeb8e35785283a31ac2614cd534062ae4e",
@@ -73,6 +77,7 @@ pub const CUDA: Pack = Pack {
     id: "cuda-13",
     label: "NVIDIA CUDA 13",
     version: "13.0",
+    size_mb: 460,
     wheels: &[
         Wheel {
             url: "https://files.pythonhosted.org/packages/2e/24/d1558f3b68b1d26e706813b1d10aa1d785e4698c425af8db8edc3dced472/nvidia_cuda_runtime-13.0.96-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
@@ -96,6 +101,7 @@ pub const CUDNN: Pack = Pack {
     id: "cudnn-9",
     label: "NVIDIA cuDNN 9",
     version: "9.24",
+    size_mb: 411,
     wheels: &[Wheel {
         url: "https://files.pythonhosted.org/packages/5c/ba/791cffd048fe5b044e620df55267e3e95c0e6e07d50b41e377c03dfc910f/nvidia_cudnn_cu13-9.24.0.43-py3-none-manylinux_2_27_x86_64.whl",
         pin: "ca81d9ab4df48ff67dd64a93c4c350aa960cd22a402a10d972ec60acd20a57db",
@@ -118,6 +124,7 @@ pub const TENSORRT: Pack = Pack {
     id: "tensorrt-10",
     label: "NVIDIA TensorRT 10",
     version: "10.16",
+    size_mb: 456,
     wheels: &[Wheel {
         url: "https://pypi.nvidia.com/tensorrt-cu13-libs/tensorrt_cu13_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl",
         pin: "4fa55167a28ef01fdd7002e3240f3a2e9eda594310a41a1f27b6ad3c8ba78e72",
@@ -169,7 +176,6 @@ pub struct Installed {
     pub id: String,
     pub version: String,
     pub bytes: u64,
-    pub dir: PathBuf,
 }
 
 /// The packs this program installed (not other folders in `runtime/`).
@@ -180,7 +186,7 @@ pub fn installed(root: &Path) -> Vec<Installed> {
         .map(|e| e.path())
         .filter_map(|dir| {
             let manifest: Manifest = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST)).ok()?).ok()?;
-            Some(Installed { bytes: manifest.files.iter().map(|f| f.size).sum(), id: manifest.id, version: manifest.version, dir })
+            Some(Installed { bytes: manifest.files.iter().map(|f| f.size).sum(), id: manifest.id, version: manifest.version })
         })
         .collect();
     found.sort_by(|a, b| a.id.cmp(&b.id));
@@ -322,7 +328,8 @@ pub fn fingerprint<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, picked: &[(usiz
 }
 
 /// What installing a pack will fetch, in bytes (from the wheels' directories; reads only those).
-pub fn download_size(pack: &Pack, card: Option<&Nvidia>) -> Result<u64, String> {
+#[cfg(test)]
+fn download_size(pack: &Pack, card: Option<&Nvidia>) -> Result<u64, String> {
     let mut total = 0;
     for wheel in pack.wheels {
         let mut zip = zip::ZipArchive::new(Remote::open(wheel.url)?).map_err(|e| e.to_string())?;
@@ -412,6 +419,7 @@ pub fn install(root: &Path, pack: &Pack, card: Option<&Nvidia>, stop: &AtomicBoo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("photo-map-packs-{name}-{}", std::process::id()));

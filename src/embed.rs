@@ -125,8 +125,6 @@ pub struct Runtime {
     pub env: Environment,
     pub on_gpu: bool,
     pub tensorrt: bool,
-    /// Where its libraries came from.
-    pub setup: Setup,
 }
 
 impl Runtime {
@@ -151,7 +149,7 @@ impl Runtime {
         let tensorrt = on_gpu
             && setup.ort_tensorrt
             && setup.tensorrt.as_ref().is_some_and(|t| runtime::TENSORRT_LIBS.iter().all(|l| ort::util::preload_dylib(t.dir.join(l)).is_ok()));
-        Ok(Self { env, on_gpu, tensorrt, setup })
+        Ok(Self { env, on_gpu, tensorrt })
     }
 }
 

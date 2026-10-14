@@ -12,6 +12,7 @@ mod gpu;
 mod home;
 mod layout;
 mod library;
+mod manager;
 mod models;
 mod packs;
 mod runtime;
@@ -163,6 +164,8 @@ struct Viewer {
     shown: String,
     /// The photo in the box, as a small picture.
     photo_tex: Option<egui::TextureHandle>,
+    /// The runtime libraries: what is installed and the install under way.
+    runtime: manager::Manager,
     last_frame: Instant,
     frame_times: Vec<f32>,
     frames: u64,
@@ -176,6 +179,10 @@ impl Viewer {
         let engine = {
             let window = window.clone();
             search::Engine::start(library.root(), move || window.request_redraw())
+        };
+        let runtime = {
+            let window = window.clone();
+            manager::Manager::new(library.root(), move || window.request_redraw())
         };
         let state = egui_winit::State::new(ctx.clone(), ctx.viewport_id(), &window, None, None, None);
         let renderer = egui_wgpu::Renderer::new(&gpu.device, gpu.config.format, Default::default());
@@ -193,6 +200,7 @@ impl Viewer {
             last_refresh: Instant::now(),
             map: None,
             library,
+            runtime,
             opening: None,
             camera,
             keys: Keys::default(),
@@ -279,6 +287,11 @@ impl Viewer {
 
     /// Maps being made, as the Maps page shows them.
     fn build_views(&self) -> Vec<home::BuildView> {
+        let backend = match self.engine.hub.state() {
+            hub if hub.loaded.is_none() => String::new(),
+            hub if hub.on_gpu => "on the graphics card".to_string(),
+            _ => "on the processor".to_string(),
+        };
         self.library
             .builds
             .iter()
@@ -291,6 +304,7 @@ impl Viewer {
                     source: build::describe(&b.job.sources),
                     stage: state.as_ref().map_or(b.job.stage, |s| s.stage),
                     running: run.is_some_and(|r| r.running()),
+                    backend: backend.clone(),
                     queued: self.queue.contains(&b.dir),
                     elsewhere: run.is_none_or(|r| !r.running()) && build::locked(&b.dir),
                     state,
@@ -405,6 +419,14 @@ impl Viewer {
                 self.library.refresh();
             }
             Action::Resume(on) => self.library.set_resume_on_start(on),
+            Action::InstallRuntime => {
+                if let manager::Advice::Offer(offer) = self.runtime.advice() {
+                    self.runtime.start(&offer);
+                }
+            }
+            Action::StopInstall => self.runtime.stop(),
+            Action::RemovePack(id) => self.runtime.remove(&id),
+            Action::DismissOffer => self.runtime.dismiss(),
         }
     }
 
@@ -726,6 +748,7 @@ impl Viewer {
         self.camera.update(dt, self.cursor, self.keys);
         self.frames += 1;
         self.poll_engine();
+        self.runtime.tick();
         self.pump_builds();
         if self.opening.as_ref().is_some_and(|(_, job, _)| job.is_finished()) {
             let (path, job, _) = self.opening.take().unwrap();
@@ -1020,7 +1043,7 @@ impl Viewer {
             let views = self.build_views();
             let notice = self.notice.clone();
             let ready_msg = notice.as_ref().filter(|(_, good)| *good).map(|(m, _)| m.as_str());
-            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg);
+            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg, &self.runtime);
             if let Some((text, false)) = &notice {
                 egui::Area::new("notice".into()).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0]).show(&ctx, |ui| {
                     theme::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(235, 110, 100))));

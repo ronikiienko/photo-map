@@ -2,6 +2,7 @@
 
 use crate::build::{self, Stage, State};
 use crate::library::Library;
+use crate::manager::{self, Advice, Manager};
 use crate::storage::{self, Sizes};
 use crate::theme;
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, TextureHandle, Ui, vec2};
@@ -17,6 +18,11 @@ pub enum Action {
     Discard(PathBuf),
     Delete(PathBuf),
     Resume(bool),
+    /// Fetch what the runtime offer says (manager.rs).
+    InstallRuntime,
+    StopInstall,
+    RemovePack(String),
+    DismissOffer,
 }
 
 /// A map being made, as the page shows it.
@@ -27,6 +33,8 @@ pub struct BuildView {
     pub source: String,
     pub stage: Stage,
     pub running: bool,
+    /// What the models run on while it is made ("on the graphics card"), once a model is loaded.
+    pub backend: String,
     /// Waiting for the map before it to finish.
     pub queued: bool,
     /// Being made by another window of the app.
@@ -87,13 +95,16 @@ pub struct Home {
     new_map: Option<NewMap>,
     confirm_discard: Option<PathBuf>,
     confirm_delete: Option<PathBuf>,
+    /// The window on the runtime libraries is open.
+    runtime_open: bool,
+    confirm_remove: Option<String>,
 }
 
 const COVER: f32 = 200.0;
 
 impl Home {
     pub fn new() -> Self {
-        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None }
+        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: None }
     }
 
     pub fn open_new_map(&mut self) {
@@ -124,7 +135,7 @@ impl Home {
         self.sizes.remove(map);
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>) -> Vec<Action> {
+    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::Area::new("maps-background".into()).anchor(Align2::LEFT_TOP, [0.0, 0.0]).order(egui::Order::Background).show(ctx, |ui| {
             let screen = ctx.content_rect();
@@ -154,7 +165,7 @@ impl Home {
                 });
             });
         }
-        self.dialogs(ctx, builds, lib, &mut actions);
+        self.dialogs(ctx, builds, lib, rt, &mut actions);
         actions
     }
 
@@ -164,6 +175,9 @@ impl Home {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("+  New map").strong()).min_size(vec2(112.0, 34.0))).clicked() {
                     self.open_new_map();
+                }
+                if ui.button("Runtime").on_hover_text("The libraries the models run on: what is installed and what could be").clicked() {
+                    self.runtime_open = true;
                 }
             });
         });
@@ -294,6 +308,9 @@ impl Home {
                         }
                         if !s.message.is_empty() {
                             line += &format!(" · {}", s.message);
+                        }
+                        if b.stage == Stage::Embed && !b.backend.is_empty() {
+                            line += &format!(" · {}", b.backend);
                         }
                         ui.label(theme::muted(line));
                         ui.add_space(6.0);
@@ -520,7 +537,7 @@ impl Home {
         }
     }
 
-    fn dialogs(&mut self, ctx: &egui::Context, builds: &[BuildView], lib: &Library, actions: &mut Vec<Action>) {
+    fn dialogs(&mut self, ctx: &egui::Context, builds: &[BuildView], lib: &Library, rt: &Manager, actions: &mut Vec<Action>) {
         if let Some(dir) = self.confirm_discard.clone() {
             let name = builds.iter().find(|b| b.dir == dir).map_or(String::new(), |b| b.name.clone());
             let mut close = false;
@@ -562,10 +579,11 @@ impl Home {
             }
         }
         self.details_window(ctx, lib);
-        self.new_map_dialog(ctx, lib, actions);
+        self.new_map_dialog(ctx, lib, rt, actions);
+        self.runtime_window(ctx, rt, actions);
     }
 
-    fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, actions: &mut Vec<Action>) {
+    fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, actions: &mut Vec<Action>) {
         let Some(nm) = &mut self.new_map else { return };
         if let Some(rx) = &nm.count {
             if let Ok(n) = rx.try_recv() {
@@ -577,6 +595,9 @@ impl Home {
         let mut create = None;
         // a click on the backdrop does not close this one (what you typed would be lost): Cancel or Esc does
         theme::modal(ctx, "new-map", 480.0, Some("New map"), |ui| {
+            if rt.nagging() || rt.installing() {
+                runtime_offer(ui, rt, true, actions);
+            }
             ui.label("Photos");
             if nm.sources.is_empty() {
                 ui.label(theme::muted("Add the folders (their sub-folders are included) or photos to make the map from. You can also drop them on this window."));
@@ -704,6 +725,139 @@ impl Home {
             self.new_map = None;
         }
     }
+
+    /// The window on the runtime libraries: what the models run on now, what is installed and by whom, what could be installed.
+    fn runtime_window(&mut self, ctx: &egui::Context, rt: &Manager, actions: &mut Vec<Action>) {
+        if !self.runtime_open {
+            return;
+        }
+        let mut close = false;
+        let response = theme::modal(ctx, "runtime", 560.0, Some("Runtime"), |ui| {
+            ui.label(theme::muted("The libraries the models run on. The models run on the processor with ONNX Runtime alone; with an NVIDIA graphics card they can use it through CUDA, and TensorRT on top of that."));
+            ui.add_space(8.0);
+            let row = |ui: &mut Ui, name: &str, what: String| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(name).strong());
+                    ui.label(theme::muted(what));
+                });
+            };
+            row(ui, "Graphics card", match &rt.nvidia {
+                Some(c) => format!("{} (its driver supports CUDA {})", c.name, manager::cuda_version(c.driver_cuda)),
+                None if rt.card_known() => "no NVIDIA card found".into(),
+                None => "looking…".into(),
+            });
+            row(ui, "ONNX Runtime", rt.setup.ort.as_ref().map_or("not installed".into(), |p| format!("{}{}", manager::describe(p), if rt.setup.ort_cuda { "" } else { "; processor only" })));
+            row(ui, "CUDA and cuDNN", rt.setup.gpu.as_ref().map_or("not installed".into(), |g| manager::describe(&g.cuda)));
+            row(ui, "TensorRT", rt.setup.tensorrt.as_ref().map_or("not installed".into(), manager::describe));
+            for note in &rt.wrong {
+                ui.label(theme::muted(format!("{note}, so it is not used.")));
+            }
+            ui.add_space(8.0);
+            runtime_offer(ui, rt, false, actions);
+
+            let installed = rt.installed();
+            if !installed.is_empty() {
+                ui.add_space(8.0);
+                ui.label("Installed by photo-map");
+                for pack in &installed {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} {}", crate::packs::pack(&pack.id).map_or(pack.id.as_str(), |p| p.label), pack.version));
+                        ui.label(theme::muted(format!("{:.0} MB", pack.bytes as f64 / 1048576.0)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add_enabled(!rt.installing(), egui::Button::new("Remove")).clicked() {
+                                self.confirm_remove = Some(pack.id.clone());
+                            }
+                        });
+                    });
+                }
+                ui.label(theme::muted("Libraries you installed yourself, or the system's, are used when they fit but never removed from here."));
+            }
+            if let Some(id) = self.confirm_remove.clone() {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(format!("Remove {id}? The models run slower or not at all until it is installed again."));
+                    if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Remove")).clicked() {
+                        actions.push(Action::RemovePack(id.clone()));
+                        self.confirm_remove = None;
+                    }
+                    if ui.button("Keep it").clicked() {
+                        self.confirm_remove = None;
+                    }
+                });
+            }
+            if let Some(e) = &rt.failure {
+                ui.add_space(8.0);
+                ui.label(RichText::new(e).color(Color32::from_rgb(235, 110, 100)));
+            }
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+        if close || response.should_close() {
+            self.runtime_open = false;
+            self.confirm_remove = None;
+        }
+    }
+}
+
+/// What the runtime could use that is not installed, as a box with the way to get it - or the install under way, or the note that
+/// a restart is needed. `dismissible`: with a way to say "not now" that is remembered.
+fn runtime_offer(ui: &mut Ui, rt: &Manager, dismissible: bool, actions: &mut Vec<Action>) {
+    if let Some(job) = &rt.job {
+        let s = job.state();
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(format!("Downloading {}…", s.current));
+            ui.add(egui::ProgressBar::new(s.fraction).desired_height(8.0).fill(theme::ACCENT));
+            ui.horizontal(|ui| {
+                ui.label(theme::muted(format!("{} of {}", job.packs.iter().position(|p| p.label == s.current).map_or(1, |i| i + 1), job.packs.len())));
+                if ui.button("Stop").clicked() {
+                    actions.push(Action::StopInstall);
+                }
+            });
+        });
+        ui.add_space(8.0);
+        return;
+    }
+    if rt.restart {
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label("The runtime changed. Close and open the app again for the models to use it.");
+        });
+        ui.add_space(8.0);
+        return;
+    }
+    match rt.advice() {
+        Advice::Nothing => {}
+        Advice::Driver(why) => {
+            theme::card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(why);
+            });
+            ui.add_space(8.0);
+        }
+        Advice::Offer(offer) => {
+            theme::card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(&offer.why);
+                ui.label(theme::muted(format!("Download: about {}. It is kept in the runtime folder of the app and can be removed from the Runtime window.", size_text(offer.mb()))));
+                ui.horizontal(|ui| {
+                    if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new(offer.title).strong())).clicked() {
+                        actions.push(Action::InstallRuntime);
+                    }
+                    if dismissible && ui.button("Not now").on_hover_text("Don't offer this here again; the Runtime window on the Maps page still has it").clicked() {
+                        actions.push(Action::DismissOffer);
+                    }
+                });
+            });
+            ui.add_space(8.0);
+        }
+    }
+}
+
+fn size_text(mb: u32) -> String {
+    if mb >= 1000 { format!("{:.1} GB", mb as f32 / 1000.0) } else { format!("{mb} MB") }
 }
 
 /// One step of the list of steps: a dot (filled when done, ringed when current, empty when still to come) and its name.
