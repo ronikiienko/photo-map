@@ -3,6 +3,7 @@
 use crate::build::{self, Stage, State};
 use crate::library::Library;
 use crate::manager::{self, Advice, Manager};
+use crate::modelstore::{self, ModelStore};
 use crate::storage::{self, Sizes};
 use crate::theme;
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, TextureHandle, Ui, vec2};
@@ -15,6 +16,9 @@ pub enum Action {
     Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String },
     Pause(PathBuf),
     SetBackend(crate::backends::Backend, bool),
+    GetModel(String),
+    StopModelFetch,
+    RemoveModel(String),
     Continue(PathBuf),
     Discard(PathBuf),
     Delete(PathBuf),
@@ -101,13 +105,16 @@ pub struct Home {
     /// The window on the runtime libraries is open.
     runtime_open: bool,
     confirm_remove: Option<String>,
+    /// The window on the models is open, and the model asked about removing.
+    models_open: bool,
+    confirm_remove_model: Option<String>,
 }
 
 const COVER: f32 = 200.0;
 
 impl Home {
     pub fn new() -> Self {
-        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: None }
+        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: None, models_open: false, confirm_remove_model: None }
     }
 
     pub fn open_new_map(&mut self) {
@@ -138,7 +145,7 @@ impl Home {
         self.sizes.remove(map);
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager) -> Vec<Action> {
+    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager, store: &ModelStore) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::Area::new("maps-background".into()).anchor(Align2::LEFT_TOP, [0.0, 0.0]).order(egui::Order::Background).show(ctx, |ui| {
             let screen = ctx.content_rect();
@@ -168,7 +175,7 @@ impl Home {
                 });
             });
         }
-        self.dialogs(ctx, builds, lib, rt, &mut actions);
+        self.dialogs(ctx, builds, lib, rt, store, &mut actions);
         actions
     }
 
@@ -178,6 +185,9 @@ impl Home {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("+  New map").strong()).min_size(vec2(112.0, 34.0))).clicked() {
                     self.open_new_map();
+                }
+                if ui.button("Models").on_hover_text("The models maps are made and searched with: get or remove them").clicked() {
+                    self.models_open = true;
                 }
                 if ui.button("Runtime").on_hover_text("The libraries the models run on: what is installed and what could be").clicked() {
                     self.runtime_open = true;
@@ -540,7 +550,7 @@ impl Home {
         }
     }
 
-    fn dialogs(&mut self, ctx: &egui::Context, builds: &[BuildView], lib: &Library, rt: &Manager, actions: &mut Vec<Action>) {
+    fn dialogs(&mut self, ctx: &egui::Context, builds: &[BuildView], lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         if let Some(dir) = self.confirm_discard.clone() {
             let name = builds.iter().find(|b| b.dir == dir).map_or(String::new(), |b| b.name.clone());
             let mut close = false;
@@ -582,11 +592,12 @@ impl Home {
             }
         }
         self.details_window(ctx, lib);
-        self.new_map_dialog(ctx, lib, rt, actions);
+        self.new_map_dialog(ctx, lib, rt, store, actions);
         self.runtime_window(ctx, rt, actions);
+        self.models_window(ctx, store, actions);
     }
 
-    fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, actions: &mut Vec<Action>) {
+    fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         let Some(nm) = &mut self.new_map else { return };
         if let Some(rx) = &nm.count {
             if let Ok(n) = rx.try_recv() {
@@ -596,6 +607,13 @@ impl Home {
         }
         let mut close = false;
         let mut create = None;
+        let mut open_models = false;
+        // the model asked for is one that is installed
+        if !crate::models::spec(&nm.model).is_some_and(|s| store.installed(s)) {
+            if let Some(first) = crate::models::ALL.iter().find(|s| store.installed(s)) {
+                nm.model = first.id.to_string();
+            }
+        }
         // a click on the backdrop does not close this one (what you typed would be lost): Cancel or Esc does
         theme::modal(ctx, "new-map", 480.0, Some("New map"), |ui| {
             if rt.nagging() || rt.installing() {
@@ -671,17 +689,21 @@ impl Home {
             ui.label(theme::muted("A smaller map takes less time to make, to see whether it is what you want. The photos are picked evenly from the sorted list. Make a bigger one later: photos already understood in your other maps are not done again."));
             ui.add_space(8.0);
             ui.label("Model");
-            let root = lib.root();
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.spacing_mut().button_padding = egui::vec2(12.0, 5.0);
-                for spec in crate::models::ALL.iter() {
-                    let installed = spec.installed(&root);
-                    let tip = if installed { spec.note.to_string() } else { format!("{} Not installed: its files are missing from .cache/onnx/{}.", spec.note, spec.folder) };
-                    ui.add_enabled_ui(installed, |ui| ui.selectable_value(&mut nm.model, spec.id.to_string(), spec.label)).response.on_hover_text(tip);
+                for spec in crate::models::ALL.iter().filter(|s| store.installed(s)) {
+                    ui.selectable_value(&mut nm.model, spec.id.to_string(), spec.label).on_hover_text(spec.note);
                 }
             });
-            if let Some(spec) = crate::models::spec(&nm.model) {
+            if !crate::models::ALL.iter().any(|s| store.installed(s)) {
+                ui.horizontal(|ui| {
+                    ui.label(theme::muted("No model is installed."));
+                    if ui.button("Get a model").clicked() {
+                        open_models = true;
+                    }
+                });
+            } else if let Some(spec) = crate::models::spec(&nm.model) {
                 ui.label(theme::muted(spec.note));
             }
             ui.label(theme::muted("The map is searched with the same model, and vectors from different models are never mixed: photos already understood in your other maps are reused only if those were made with this model too."));
@@ -708,7 +730,7 @@ impl Home {
             ui.label(theme::muted("It can take a while for many photos. You can pause, close the app and carry on later."));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0);
+                let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0) && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
                     create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone() });
                 }
@@ -717,6 +739,9 @@ impl Home {
                 }
             });
         });
+        if open_models {
+            self.models_open = true;
+        }
         if let Some(a) = create {
             actions.push(a);
             close = true;
@@ -726,6 +751,71 @@ impl Home {
         }
         if close {
             self.new_map = None;
+        }
+    }
+
+    /// The window on the models: which are installed, what each takes, and a way to get or remove each.
+    fn models_window(&mut self, ctx: &egui::Context, store: &ModelStore, actions: &mut Vec<Action>) {
+        if !self.models_open {
+            return;
+        }
+        let mut close = false;
+        let response = theme::modal(ctx, "models", 560.0, Some("Models"), |ui| {
+            ui.label(theme::muted("A map is made and searched with one model. Only the models you have are offered when a map is made. Getting a model is simulated for now: nothing is downloaded."));
+            ui.add_space(8.0);
+            for spec in crate::models::ALL.iter() {
+                theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(spec.label).strong());
+                        ui.label(theme::muted(format!("{} MB", modelstore::size_mb(spec))));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let fetching = store.job.as_ref().filter(|j| j.id == spec.id);
+                            if let Some(job) = fetching {
+                                if ui.button("Stop").clicked() {
+                                    actions.push(Action::StopModelFetch);
+                                }
+                                ui.add(egui::ProgressBar::new(job.state().0).desired_width(120.0).desired_height(8.0).fill(theme::ACCENT));
+                            } else if store.installed(spec) {
+                                if ui.button("Remove").clicked() {
+                                    self.confirm_remove_model = Some(spec.id.to_string());
+                                }
+                                ui.label(theme::muted("installed"));
+                            } else if ui.add_enabled(!store.fetching(), egui::Button::new("Get")).clicked() {
+                                actions.push(Action::GetModel(spec.id.to_string()));
+                            }
+                        });
+                    });
+                    ui.label(theme::muted(spec.note));
+                });
+                ui.add_space(4.0);
+            }
+            if let Some(id) = self.confirm_remove_model.clone() {
+                let label = crate::models::spec(&id).map_or("", |s| s.label);
+                ui.add_space(4.0);
+                ui.label(format!("Remove {label}? Its files and everything prepared for it (the networks made for the Apple chip or the graphics card, the vocabulary's vectors) are deleted. Maps made with it stay, but can't be searched until you get it again."));
+                ui.horizontal(|ui| {
+                    if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Remove")).clicked() {
+                        actions.push(Action::RemoveModel(id.clone()));
+                        self.confirm_remove_model = None;
+                    }
+                    if ui.button("Keep it").clicked() {
+                        self.confirm_remove_model = None;
+                    }
+                });
+            }
+            if let Some(e) = &store.failure {
+                ui.add_space(8.0);
+                ui.label(RichText::new(e).color(Color32::from_rgb(235, 110, 100)));
+            }
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+        if close || response.should_close() {
+            self.models_open = false;
+            self.confirm_remove_model = None;
         }
     }
 

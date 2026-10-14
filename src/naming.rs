@@ -48,7 +48,7 @@ fn key(phrases: &[Phrase]) -> u64 {
 }
 
 /// The file name part for a model's cache: its id with the slashes made harmless.
-fn slug(model: &str) -> String {
+pub fn slug(model: &str) -> String {
     model.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect()
 }
 

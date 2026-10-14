@@ -190,8 +190,8 @@ impl Gemma {
         let on_gpu = rt.on_gpu || rt.apple.is_some();
         let tensorrt = rt.tensorrt && model_dir.join("onnx/vision_encoder_fp16_trt.onnx").exists() && model_dir.join("onnx/vision_pool.onnx").exists();
         let mut model = Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt, apple: rt.apple };
-        // CoreML prepares the network for the chip when it is opened (minutes the first time): here, where a map being made can still be paused
-        if model.apple.is_some() {
+        // CoreML and TensorRT prepare the network for the chip or card when it is opened (minutes the first time): here, where a map being made can still be paused
+        if model.apple.is_some() || model.tensorrt {
             model.open_vision()?;
         }
         Ok(model)
