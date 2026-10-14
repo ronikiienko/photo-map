@@ -273,7 +273,6 @@ fn decode(job: &Job) -> Loaded {
     let mut loaded = Loaded { id: job.id, levels: Vec::new() };
     let Some(rgba) = photo::load_for(&job.path, |_, _| slot_size(job.to)) else { return loaded };
     let long = rgba.width().max(rgba.height());
-    let settings = intel_tex_2::bc7::opaque_ultra_fast_settings();
     for level in job.from..=job.to {
         let fitted = photo::fit(&rgba, slot_size(level).min(long), false);
         let (w, h) = fitted.dimensions();
@@ -286,8 +285,7 @@ fn decode(job: &Job) -> Loaded {
                 padded[o..o + 4].copy_from_slice(&p.0);
             }
         }
-        let surface = intel_tex_2::RgbaSurface { data: &padded, width: w4, height: h4, stride: w4 * 4 };
-        let blocks = intel_tex_2::bc7::compress_blocks(&settings, &surface);
+        let blocks = crate::bc7::compress(&padded, w4, h4);
         loaded.levels.push(Level { level, w: w4, h: h4, blocks });
     }
     loaded

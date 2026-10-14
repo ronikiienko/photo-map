@@ -32,6 +32,8 @@ pub struct Gemma {
     /// Run the photo encoder's layers on TensorRT (about 1.5 times faster): its libraries and the two converted models are there.
     /// Switched off if TensorRT fails to start, and the encoder runs on the CUDA provider as before.
     tensorrt: bool,
+    /// See `Runtime::apple`.
+    apple: Option<ep::coreml::ComputeUnits>,
 }
 
 /// The most photos TensorRT's engine takes at once (it is built for 1 to this many).
@@ -125,6 +127,32 @@ pub struct Runtime {
     pub env: Environment,
     pub on_gpu: bool,
     pub tensorrt: bool,
+    /// On a Mac: what the photo encoders run on besides the processor (CoreML); None: the processor alone.
+    pub apple: Option<ep::coreml::ComputeUnits>,
+}
+
+/// What a Mac's photo encoders run on, from `PHOTO_MAP_COREML`: off, cpu (CoreML on the processor), gpu, ane (neural engine) or all.
+fn apple_units() -> Option<ep::coreml::ComputeUnits> {
+    use ep::coreml::ComputeUnits::*;
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    match std::env::var("PHOTO_MAP_COREML").as_deref() {
+        Ok("off") => None,
+        Ok("cpu") => Some(CPUOnly),
+        Ok("gpu") => Some(CPUAndGPU),
+        Ok("ane") => Some(CPUAndNeuralEngine),
+        _ => Some(All),
+    }
+}
+
+/// A session builder for a photo encoder: with CoreML when the machine has it and `apple` says so.
+pub fn vision_builder(env: &Environment, apple: Option<ep::coreml::ComputeUnits>, cache: &Path) -> ort::Result<ort::session::builder::SessionBuilder> {
+    let builder = Session::builder(env)?;
+    let Some(units) = apple else { return Ok(builder) };
+    let _ = std::fs::create_dir_all(cache);
+    let coreml = ep::CoreML::default().with_compute_units(units).with_model_format(ep::coreml::ModelFormat::MLProgram).with_model_cache_dir(cache.display()).build();
+    builder.with_execution_providers([coreml]).map_err(|e| e.into())
 }
 
 impl Runtime {
@@ -149,7 +177,8 @@ impl Runtime {
         let tensorrt = on_gpu
             && setup.ort_tensorrt
             && setup.tensorrt.as_ref().is_some_and(|t| runtime::TENSORRT_LIBS.iter().all(|l| ort::util::preload_dylib(t.dir.join(l)).is_ok()));
-        Ok(Self { env, on_gpu, tensorrt })
+        let apple = apple_units();
+        Ok(Self { env, on_gpu: on_gpu || apple.is_some(), tensorrt, apple })
     }
 }
 
@@ -169,7 +198,7 @@ impl Gemma {
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
         let on_gpu = rt.on_gpu;
         let tensorrt = rt.tensorrt && model_dir.join("onnx/vision_encoder_fp16_trt.onnx").exists() && model_dir.join("onnx/vision_pool.onnx").exists();
-        Ok(Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt })
+        Ok(Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt, apple: rt.apple })
     }
 
     /// The token ids of a text, as the model gets them (its special tokens included).
@@ -235,8 +264,10 @@ impl Gemma {
                 }
             }
         }
-        let file = self.model_dir.join("onnx/vision_encoder_fp16_fused.onnx");
-        let session = Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
+        // the fused attention is for CUDA; the plain export (the one the model's publisher has) is what other machines run
+        let fused = self.model_dir.join("onnx/vision_encoder_fp16_fused.onnx");
+        let file = if fused.exists() && self.apple.is_none() { fused } else { self.model_dir.join("onnx/vision_encoder_fp16.onnx") };
+        let session = vision_builder(&self.env, self.apple, &self.root.join(".cache/coreml/embeddinggemma-2")).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
         self.vision = Some(session);
         Ok(())
     }

@@ -56,6 +56,19 @@ pub const ONNXRUNTIME: Pack = Pack {
     }],
 };
 
+/// The Mac build (Apple Silicon, macOS 14 or newer): the processor and the CoreML provider are in the one library.
+pub const ONNXRUNTIME_MACOS: Pack = Pack {
+    id: "onnxruntime-macos",
+    label: "ONNX Runtime (processor and Apple chip)",
+    version: ORT_VERSION,
+    size_mb: 21,
+    wheels: &[Wheel {
+        url: "https://files.pythonhosted.org/packages/b3/bd/2ac094311163b803e3626c3937461d6900934bd56cca7601f6150ff860c3/onnxruntime-1.31.0-cp312-cp312-macosx_14_0_arm64.whl",
+        pin: "",
+        wants: &[Want { member: "libonnxruntime.1.31.0.dylib", save_as: "libonnxruntime.dylib" }],
+    }],
+};
+
 pub const ONNXRUNTIME_GPU: Pack = Pack {
     id: "onnxruntime-gpu",
     label: "ONNX Runtime (with graphics card support)",
@@ -134,7 +147,12 @@ pub const TENSORRT: Pack = Pack {
     }],
 };
 
-pub const ALL: [&Pack; 5] = [&ONNXRUNTIME, &ONNXRUNTIME_GPU, &CUDA, &CUDNN, &TENSORRT];
+pub const ALL: [&Pack; 6] = [&ONNXRUNTIME, &ONNXRUNTIME_MACOS, &ONNXRUNTIME_GPU, &CUDA, &CUDNN, &TENSORRT];
+
+/// The ONNX Runtime for a machine with no graphics card of the kind the other packs are for: this operating system's own build.
+pub fn onnxruntime_cpu() -> &'static Pack {
+    if cfg!(target_os = "macos") { &ONNXRUNTIME_MACOS } else { &ONNXRUNTIME }
+}
 
 pub fn pack(id: &str) -> Option<&'static Pack> {
     ALL.iter().copied().find(|p| p.id == id)
@@ -484,18 +502,18 @@ mod tests {
         let root = temp("real");
         let stop = AtomicBool::new(false);
         let last = std::sync::Mutex::new((0, 0));
-        install(&root, &ONNXRUNTIME, None, &stop, &|done, all| *last.lock().unwrap() = (done, all)).unwrap();
+        install(&root, onnxruntime_cpu(), None, &stop, &|done, all| *last.lock().unwrap() = (done, all)).unwrap();
         let (done, all) = *last.lock().unwrap();
         assert_eq!(done, all, "progress ends complete");
-        let dir = root.join("runtime/onnxruntime");
-        assert!(std::fs::metadata(dir.join("libonnxruntime.so")).unwrap().len() > 10_000_000);
+        let dir = root.join("runtime").join(onnxruntime_cpu().id);
+        assert!(std::fs::metadata(dir.join(crate::runtime::ORT_LIB)).unwrap().len() > 10_000_000);
         assert_eq!(installed(&root).len(), 1);
-        assert!(!root.join("runtime/.onnxruntime.partial").exists());
+        assert!(!root.join("runtime").join(format!(".{}.partial", onnxruntime_cpu().id)).exists());
         let setup = crate::runtime::Setup::detect(&root);
         let ort = setup.ort.expect("found after installing");
         assert!(ort.source.ours());
-        remove(&root, "onnxruntime").unwrap();
-        assert!(!dir.join("libonnxruntime.so").exists());
+        remove(&root, onnxruntime_cpu().id).unwrap();
+        assert!(!dir.join(crate::runtime::ORT_LIB).exists());
         assert!(crate::runtime::Setup::detect(&root).ort.is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }

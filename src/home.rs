@@ -735,7 +735,11 @@ impl Home {
         }
         let mut close = false;
         let response = theme::modal(ctx, "runtime", 560.0, Some("Runtime"), |ui| {
-            ui.label(theme::muted("The libraries the models run on. The models run on the processor with ONNX Runtime alone; with an NVIDIA graphics card they can use it through CUDA, and TensorRT on top of that."));
+            ui.label(theme::muted(if cfg!(target_os = "macos") {
+                "The library the models run on: ONNX Runtime. It runs them on the processor, and on the Mac's own chip through CoreML."
+            } else {
+                "The libraries the models run on. The models run on the processor with ONNX Runtime alone; with an NVIDIA graphics card they can use it through CUDA, and TensorRT on top of that."
+            }));
             ui.add_space(8.0);
             let row = |ui: &mut Ui, name: &str, what: String| {
                 ui.horizontal_wrapped(|ui| {
@@ -743,14 +747,19 @@ impl Home {
                     ui.label(theme::muted(what));
                 });
             };
-            row(ui, "Graphics card", match &rt.nvidia {
-                Some(c) => format!("{} (its driver supports CUDA {})", c.name, manager::cuda_version(c.driver_cuda)),
-                None if rt.card_known() => "no NVIDIA card found".into(),
-                None => "looking…".into(),
-            });
-            row(ui, "ONNX Runtime", rt.setup.ort.as_ref().map_or("not installed".into(), |p| format!("{}{}", manager::describe(p), if rt.setup.ort_cuda { "" } else { "; processor only" })));
-            row(ui, "CUDA and cuDNN", rt.setup.gpu.as_ref().map_or("not installed".into(), |g| manager::describe(&g.cuda)));
-            row(ui, "TensorRT", rt.setup.tensorrt.as_ref().map_or("not installed".into(), manager::describe));
+            let mac = cfg!(target_os = "macos");
+            if !mac {
+                row(ui, "Graphics card", match &rt.nvidia {
+                    Some(c) => format!("{} (its driver supports CUDA {})", c.name, manager::cuda_version(c.driver_cuda)),
+                    None if rt.card_known() => "no NVIDIA card found".into(),
+                    None => "looking…".into(),
+                });
+            }
+            row(ui, "ONNX Runtime", rt.setup.ort.as_ref().map_or("not installed".into(), |p| format!("{}{}", manager::describe(p), if mac || rt.setup.ort_cuda { "" } else { "; processor only" })));
+            if !mac {
+                row(ui, "CUDA and cuDNN", rt.setup.gpu.as_ref().map_or("not installed".into(), |g| manager::describe(&g.cuda)));
+                row(ui, "TensorRT", rt.setup.tensorrt.as_ref().map_or("not installed".into(), manager::describe));
+            }
             for note in &rt.wrong {
                 ui.label(theme::muted(format!("{note}, so it is not used.")));
             }

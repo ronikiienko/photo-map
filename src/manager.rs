@@ -133,9 +133,13 @@ impl Manager {
                     why: format!("The models need ONNX Runtime, which is not installed. {} was found; this installs the version that uses it, with the NVIDIA libraries it needs.", card.name),
                 }),
                 None => Advice::Offer(Offer {
-                    packs: vec![&packs::ONNXRUNTIME],
+                    packs: vec![packs::onnxruntime_cpu()],
                     title: "Download ONNX Runtime",
-                    why: "The models need ONNX Runtime, which is not installed. This installs the version that runs on the processor.".into(),
+                    why: if cfg!(target_os = "macos") {
+                        "The models need ONNX Runtime, which is not installed. This installs the version for this Mac: it runs on the processor and on the Apple chip.".into()
+                    } else {
+                        "The models need ONNX Runtime, which is not installed. This installs the version that runs on the processor.".into()
+                    },
                 }),
             };
         }
@@ -289,7 +293,7 @@ mod tests {
 
     #[test]
     fn nothing_runs_without_onnx_runtime_so_that_is_offered_first() {
-        assert_eq!(ids(manager(Setup::default(), None).advice()), ["onnxruntime"]);
+        assert_eq!(ids(manager(Setup::default(), None).advice()), [packs::onnxruntime_cpu().id]);
         assert_eq!(ids(manager(Setup::default(), Some(card(13000))).advice()), ["onnxruntime-gpu", "cuda-13", "cudnn-9"]);
     }
 

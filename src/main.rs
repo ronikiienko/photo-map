@@ -3,6 +3,7 @@
 //!     photo-map [bundle]      default: the one opened last in maps/
 
 mod bake;
+mod bc7;
 mod build;
 mod camera;
 mod data;
@@ -12,6 +13,8 @@ mod gpu;
 mod home;
 mod layout;
 mod library;
+#[cfg(test)]
+mod macbench;
 mod manager;
 mod models;
 mod packs;
@@ -43,10 +46,6 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
-
-// intel_tex_2's precompiled ISPC kernels (BC7 encoding in stream.rs and bake.rs) need the C++ runtime
-#[link(name = "stdc++")]
-unsafe extern "C" {}
 
 /// Side of a photo square in world units is the median distance between nearest neighbours: a map of 12,000 photos
 /// gets bigger squares than one of 88,000 in the same world (zoom changes the size on screen, nothing else does).
@@ -292,6 +291,7 @@ impl Viewer {
     fn build_views(&self) -> Vec<home::BuildView> {
         let backend = match self.engine.hub.state() {
             hub if hub.loaded.is_none() => String::new(),
+            hub if hub.on_gpu && cfg!(target_os = "macos") => "on the Apple chip".to_string(),
             hub if hub.on_gpu => "on the graphics card".to_string(),
             _ => "on the processor".to_string(),
         };

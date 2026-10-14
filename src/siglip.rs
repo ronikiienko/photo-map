@@ -32,6 +32,8 @@ pub struct Siglip {
     model_dir: PathBuf,
     cache: PathBuf,
     tensorrt: bool,
+    apple: Option<ort::ep::coreml::ComputeUnits>,
+    root: PathBuf,
     pub on_gpu: bool,
 }
 
@@ -95,6 +97,8 @@ impl Siglip {
             cache: root.join(".cache/trt").join(spec.folder),
             model_dir,
             tensorrt: rt.tensorrt,
+            apple: rt.apple,
+            root: root.to_path_buf(),
             on_gpu: rt.on_gpu,
         })
     }
@@ -173,7 +177,8 @@ impl Siglip {
                 }
             }
         }
-        self.vision = Some(Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?);
+        let cache = self.root.join(".cache/coreml").join(self.model_dir.file_name().unwrap_or_default());
+        self.vision = Some(crate::embed::vision_builder(&self.env, self.apple, &cache).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?);
         Ok(())
     }
 
