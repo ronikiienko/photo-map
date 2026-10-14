@@ -249,6 +249,14 @@ impl Hub {
         let _ = self.load.lock().unwrap().send(id.to_string());
     }
 
+    /// Let go of the loaded model (it holds memory), unless it is in use or being loaded. It is loaded again by the next `want`.
+    pub fn unload(&self) {
+        let Ok(mut slot) = self.slot.try_lock() else { return };
+        if slot.take().is_some() {
+            *self.state.lock().unwrap() = State::default();
+        }
+    }
+
     pub fn state(&self) -> State {
         self.state.lock().unwrap().clone()
     }

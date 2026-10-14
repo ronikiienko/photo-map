@@ -360,6 +360,10 @@ impl Viewer {
                 }
             }
         }
+        // nothing is being made or searched: the model goes (it holds gigabytes on the Apple chip)
+        if on_maps && self.queue.is_empty() && !self.runs.iter().any(|r| r.running()) {
+            self.engine.hub.unload();
+        }
         if refresh || (self.page == Page::Maps && self.runs.iter().any(|r| r.running()) && self.last_refresh.elapsed().as_secs_f32() > 1.5) {
             self.library.refresh();
             self.last_refresh = Instant::now();

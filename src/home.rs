@@ -900,6 +900,7 @@ fn step(ui: &mut Ui, step: Stage, current: Stage, last: bool) {
     let short = match step {
         Stage::Scan => "Find",
         Stage::Copy => "Copy",
+        Stage::Load => "Load",
         Stage::Embed => "Understand",
         Stage::Layout => "Lay out",
         Stage::Regions => "Regions",
