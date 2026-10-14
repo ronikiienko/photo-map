@@ -178,7 +178,6 @@ pub struct Installed {
     pub id: String,
     pub version: String,
     pub bytes: u64,
-    pub files: Vec<String>,
 }
 
 /// The packs this program installed (not other folders in `runtime/`).
@@ -189,24 +188,11 @@ pub fn installed(root: &Path) -> Vec<Installed> {
         .map(|e| e.path())
         .filter_map(|dir| {
             let manifest: Manifest = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST)).ok()?).ok()?;
-            Some(Installed { bytes: manifest.files.iter().map(|f| f.size).sum(), files: manifest.files.into_iter().map(|f| f.name).collect(), id: manifest.id, version: manifest.version })
+            Some(Installed { bytes: manifest.files.iter().map(|f| f.size).sum(), id: manifest.id, version: manifest.version })
         })
         .collect();
     found.sort_by(|a, b| a.id.cmp(&b.id));
     found
-}
-
-/// Packs this program installed that lack a file this version of the program wants from them (a pack made by an older definition).
-pub fn outdated(root: &Path) -> Vec<&'static Pack> {
-    installed(root)
-        .into_iter()
-        .filter_map(|have| {
-            let pack = pack(&have.id)?;
-            let wanted = pack.wheels.iter().flat_map(|w| w.wants.iter().map(|w| w.save_as));
-            let missing = wanted.into_iter().any(|name| !have.files.iter().any(|f| f == name));
-            missing.then_some(pack)
-        })
-        .collect()
 }
 
 /// Remove a pack this program installed: exactly the files its `pack.json` lists. A folder without one is left alone.
@@ -469,23 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pack_made_before_a_file_was_added_to_it_is_outdated() {
-        let root = temp("outdated");
-        let dir = root.join("runtime/cudnn-9");
-        std::fs::create_dir_all(&dir).unwrap();
-        let wanted: Vec<&str> = CUDNN.wheels.iter().flat_map(|w| w.wants.iter().map(|w| w.save_as)).collect();
-        let write = |names: &[&str]| {
-            let manifest = Manifest { id: "cudnn-9".into(), version: "9".into(), files: names.iter().map(|n| File { name: n.to_string(), size: 1 }).collect() };
-            std::fs::write(dir.join(MANIFEST), serde_json::to_vec(&manifest).unwrap()).unwrap();
-        };
-        write(&wanted[..wanted.len() - 1]);
-        assert_eq!(outdated(&root).iter().map(|p| p.id).collect::<Vec<_>>(), ["cudnn-9"]);
-        write(&wanted);
-        assert!(outdated(&root).is_empty());
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
     fn a_manifest_cannot_point_outside_its_folder() {
         let root = temp("escape");
         let own = root.join("runtime/cuda-13");
@@ -542,7 +511,6 @@ mod tests {
         for lib in crate::runtime::CUDNN_LIBS {
             assert!(std::fs::metadata(dir.join(lib)).unwrap().len() > 100_000, "{lib}");
         }
-        assert!(outdated(&root).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
