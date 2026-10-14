@@ -187,9 +187,9 @@ impl Gemma {
             .and_then(|mut b| b.commit_from_file(model_dir.join("onnx/model_fp16.onnx")))
             .map_err(err("loading the model"))?;
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
-        let on_gpu = rt.on_gpu;
+        let on_gpu = rt.on_gpu || rt.apple.is_some();
         let tensorrt = rt.tensorrt && model_dir.join("onnx/vision_encoder_fp16_trt.onnx").exists() && model_dir.join("onnx/vision_pool.onnx").exists();
-        Ok(Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt, apple: None /* measured: its open shapes make CoreML slower than the processor */ })
+        Ok(Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt, apple: rt.apple })
     }
 
     /// The token ids of a text, as the model gets them (its special tokens included).

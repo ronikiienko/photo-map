@@ -48,7 +48,7 @@ impl Backend {
             Backend::Cpu => "Works everywhere, slowest.",
             Backend::AppleAll => "CoreML picks the part for each piece of the model.",
             Backend::AppleGpu => "CoreML on the graphics chip: as fast as the neural engine, but busy while the map is shown.",
-            Backend::AppleNeural => "CoreML on the neural engine: fast, and the graphics chip stays free. Photo encoders only.",
+            Backend::AppleNeural => "CoreML on the neural engine: fast, and the graphics chip stays free. Applies to the photo encoders.",
             Backend::Cuda => "Needs CUDA and cuDNN.",
             Backend::TensorRt => "On top of CUDA; faster, and slow to start the first time.",
         }
