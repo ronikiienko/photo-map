@@ -32,6 +32,7 @@ const BATCH: usize = 4;
 pub enum Stage {
     Scan,
     Copy,
+    #[serde(alias = "load")] // a job saved while loading the model was a step of its own
     Embed,
     Layout,
     Regions,
@@ -613,7 +614,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let finished = |k: usize| fs::metadata(shard_path(&ctx.dir, k)).is_ok_and(|m| m.len() as usize == shard_len(n, k) * ctx.dim() * 2);
     let todo: Vec<usize> = (0..shards).filter(|&k| !finished(k)).collect();
     let already = n - todo.iter().map(|&k| shard_len(n, k)).sum::<usize>();
-    ctx.progress(already, n, "waiting for the model");
+    ctx.progress(already, n, "loading the model (the first time on the Apple chip or TensorRT it is prepared for it: a few minutes)");
 
     // the model is loaded by the search engine's thread; wait for it
     if !ctx.wait_for_model()? {

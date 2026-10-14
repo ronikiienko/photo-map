@@ -14,6 +14,8 @@ const ZOOM_FRICTION: f32 = 0.9;
 const ZOOM_PER_LINE: f32 = 0.12;
 const ZOOM_PER_PIXEL: f32 = 0.0012;
 const ZOOM_STOP: f32 = 1e-4;
+/// Log zoom per unit of a trackpad pinch (the system's own: the picture grows by what the fingers spread by).
+const PINCH_ZOOM: f32 = 1.0;
 const KEY_SPEED: f32 = 900.0;
 const KEY_FRICTION: f32 = 0.8;
 const KEY_ZOOM: f32 = 0.05;
@@ -56,6 +58,9 @@ pub struct Camera {
     drag_moved: Vec2,
     zoom_velocity: f32,
     pending_zoom: f32,
+    /// A trackpad pinch and a two-finger pan, as they arrive: applied at once, with no coast of their own (the system sends its own momentum).
+    pending_pinch: f32,
+    pending_pan: Vec2,
     key_velocity: Vec2,
     fly: Option<(Vec2, f32)>,
 }
@@ -70,6 +75,8 @@ impl Camera {
             drag_moved: Vec2::ZERO,
             zoom_velocity: 0.0,
             pending_zoom: 0.0,
+            pending_pinch: 0.0,
+            pending_pan: Vec2::ZERO,
             key_velocity: Vec2::ZERO,
             fly: None,
         }
@@ -106,6 +113,18 @@ impl Camera {
 
     pub fn scroll_pixels(&mut self, pixels: f32) {
         self.pending_zoom += pixels * ZOOM_PER_PIXEL;
+        self.fly = None;
+    }
+
+    /// A trackpad pinch (positive: fingers spreading): zooms about the pointer.
+    pub fn pinch(&mut self, delta: f32) {
+        self.pending_pinch += delta * PINCH_ZOOM;
+        self.fly = None;
+    }
+
+    /// Two fingers on the trackpad moved by this many screen pixels: the content follows them.
+    pub fn pan_pixels(&mut self, delta: Vec2) {
+        self.pending_pan += delta;
         self.fly = None;
     }
 
@@ -166,6 +185,17 @@ impl Camera {
         } else {
             let about = if key_zoom != 0.0 { self.viewport * 0.5 } else { cursor.unwrap_or(self.viewport * 0.5) };
             self.zoom_about(factor(self.zoom_velocity.exp(), dt), about);
+            moving = true;
+        }
+
+        if self.pending_pinch != 0.0 {
+            self.zoom_about(self.pending_pinch.exp(), cursor.unwrap_or(self.viewport * 0.5));
+            self.pending_pinch = 0.0;
+            moving = true;
+        }
+        if self.pending_pan != Vec2::ZERO {
+            self.center -= self.pending_pan / self.scale;
+            self.pending_pan = Vec2::ZERO;
             moving = true;
         }
 

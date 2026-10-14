@@ -12,6 +12,9 @@
 use std::path::{Path, PathBuf};
 
 /// ONNX Runtime's core library.
+#[cfg(target_os = "macos")]
+pub const ORT_LIB: &str = "libonnxruntime.dylib";
+#[cfg(not(target_os = "macos"))]
 pub const ORT_LIB: &str = "libonnxruntime.so";
 /// Its CUDA provider, next to the core library: only a build for graphics cards has it.
 pub const ORT_CUDA_PROVIDER: &str = "libonnxruntime_providers_cuda.so";
@@ -115,6 +118,14 @@ fn candidates(root: &Path, extra: Option<&std::ffi::OsStr>) -> Vec<Place> {
     if let Some(paths) = extra {
         found.extend(std::env::split_paths(paths).map(|dir| Place { dir, source: Source::Override }));
     }
+    let system = system_folders();
+    found.extend(system.into_iter().filter(|d| !d.as_os_str().is_empty() && d.is_dir()).map(|dir| Place { dir, source: Source::System }));
+    found
+}
+
+/// The system's own folders for CUDA, cuDNN and TensorRT: only a Linux machine has them in these places (a Mac has none of them).
+#[cfg(target_os = "linux")]
+fn system_folders() -> Vec<PathBuf> {
     let mut system: Vec<PathBuf> = std::env::var_os("LD_LIBRARY_PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     for fixed in ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib", "/usr/local/lib", "/opt/cuda/lib64", "/opt/cuda/lib"] {
         system.push(PathBuf::from(fixed));
@@ -126,8 +137,12 @@ fn candidates(root: &Path, extra: Option<&std::ffi::OsStr>) -> Vec<Place> {
             system.push(c.join("lib64"));
         }
     }
-    found.extend(system.into_iter().filter(|d| !d.as_os_str().is_empty() && d.is_dir()).map(|dir| Place { dir, source: Source::System }));
-    found
+    system
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_folders() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn complete(dir: &Path, libs: &[&str]) -> bool {
@@ -210,6 +225,9 @@ impl Nvidia {
 
     /// Ask the driver (`libcuda.so.1`, which the graphics driver installs); None if there is no NVIDIA card or driver.
     pub fn probe() -> Option<Nvidia> {
+        if cfg!(target_os = "macos") {
+            return None; // no Mac has one
+        }
         use std::os::raw::{c_char, c_int};
         unsafe {
             let lib = libloading::Library::new("libcuda.so.1").ok()?;

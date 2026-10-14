@@ -50,14 +50,11 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     });
 
     // 2. from 32 px down: pack each level's tiles onto pages and compress; halve the tiles for the next level
-    let settings = intel_tex_2::bc7::opaque_basic_settings();
     let mut levels: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
     // what the encoder makes of a block of zeros (transparent black), the same wherever it is
     let empty = {
-        let zeros = [0u8; 4 * 4 * 4];
-        let surface = intel_tex_2::RgbaSurface { data: &zeros, width: 4, height: 4, stride: 16 };
         let mut block = [0u8; 16];
-        intel_tex_2::bc7::compress_blocks_into(&settings, &surface, &mut block);
+        block.copy_from_slice(&crate::bc7::compress(&[0u8; 4 * 4 * 4], 4, 4));
         block
     };
     for level in (0..LEVELS).rev() {
@@ -90,8 +87,7 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
                     }
                     return;
                 }
-                let surface = intel_tex_2::RgbaSurface { data: src, width: PAGE as u32, height: STRIP as u32, stride: (PAGE * 4) as u32 };
-                intel_tex_2::bc7::compress_blocks_into(&settings, &surface, dst);
+                dst.copy_from_slice(&crate::bc7::compress(src, PAGE as u32, STRIP as u32));
             });
             out.extend_from_slice(&blocks);
         }
@@ -190,11 +186,7 @@ mod tests {
     /// The shortcut for empty rows: a strip of zeros compresses to one block, the same everywhere.
     #[test]
     fn empty_strips_are_one_repeated_block() {
-        let settings = intel_tex_2::bc7::opaque_basic_settings();
-        let encode = |data: &[u8], width: usize, height: usize, out: &mut [u8]| {
-            let surface = intel_tex_2::RgbaSurface { data, width: width as u32, height: height as u32, stride: (width * 4) as u32 };
-            intel_tex_2::bc7::compress_blocks_into(&settings, &surface, out);
-        };
+        let encode = |data: &[u8], width: usize, height: usize, out: &mut [u8]| out.copy_from_slice(&crate::bc7::compress(data, width as u32, height as u32));
         let mut one = [0u8; 16];
         encode(&[0u8; 64], 4, 4, &mut one);
         let mut strip = vec![0u8; PAGE / 4 * STRIP / 4 * 16];

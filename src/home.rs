@@ -3,6 +3,7 @@
 use crate::build::{self, Stage, State};
 use crate::library::Library;
 use crate::manager::{self, Advice, Manager};
+use crate::modelstore::{self, ModelStore};
 use crate::storage::{self, Sizes};
 use crate::theme;
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, TextureHandle, Ui, vec2};
@@ -14,6 +15,11 @@ pub enum Action {
     Open(PathBuf),
     Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String },
     Pause(PathBuf),
+    SetBackend(crate::backends::Backend, bool),
+    GetModel(String),
+    StopModelFetch,
+    RemoveModel(String),
+    CountModels,
     Continue(PathBuf),
     Discard(PathBuf),
     Delete(PathBuf),
@@ -100,13 +106,16 @@ pub struct Home {
     /// The window on the runtime libraries is open.
     runtime_open: bool,
     confirm_remove: Option<String>,
+    /// The window on the models is open, and the model asked about removing.
+    models_open: bool,
+    confirm_remove_model: Option<String>,
 }
 
 const COVER: f32 = 200.0;
 
 impl Home {
     pub fn new() -> Self {
-        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: None }
+        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: None, models_open: false, confirm_remove_model: None }
     }
 
     pub fn open_new_map(&mut self) {
@@ -137,7 +146,7 @@ impl Home {
         self.sizes.remove(map);
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager) -> Vec<Action> {
+    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager, store: &ModelStore) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::Area::new("maps-background".into()).anchor(Align2::LEFT_TOP, [0.0, 0.0]).order(egui::Order::Background).show(ctx, |ui| {
             let screen = ctx.content_rect();
@@ -167,7 +176,7 @@ impl Home {
                 });
             });
         }
-        self.dialogs(ctx, builds, lib, rt, &mut actions);
+        self.dialogs(ctx, builds, lib, rt, store, &mut actions);
         actions
     }
 
@@ -177,6 +186,10 @@ impl Home {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("+  New map").strong()).min_size(vec2(112.0, 34.0))).clicked() {
                     self.open_new_map();
+                }
+                if ui.button("Models").on_hover_text("The models maps are made and searched with: get or remove them").clicked() {
+                    self.models_open = true;
+                    actions.push(Action::CountModels);
                 }
                 if ui.button("Runtime").on_hover_text("The libraries the models run on: what is installed and what could be").clicked() {
                     self.runtime_open = true;
@@ -539,7 +552,7 @@ impl Home {
         }
     }
 
-    fn dialogs(&mut self, ctx: &egui::Context, builds: &[BuildView], lib: &Library, rt: &Manager, actions: &mut Vec<Action>) {
+    fn dialogs(&mut self, ctx: &egui::Context, builds: &[BuildView], lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         if let Some(dir) = self.confirm_discard.clone() {
             let name = builds.iter().find(|b| b.dir == dir).map_or(String::new(), |b| b.name.clone());
             let mut close = false;
@@ -581,11 +594,12 @@ impl Home {
             }
         }
         self.details_window(ctx, lib);
-        self.new_map_dialog(ctx, lib, rt, actions);
+        self.new_map_dialog(ctx, lib, rt, store, actions);
         self.runtime_window(ctx, rt, actions);
+        self.models_window(ctx, rt, store, actions);
     }
 
-    fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, actions: &mut Vec<Action>) {
+    fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         let Some(nm) = &mut self.new_map else { return };
         if let Some(rx) = &nm.count {
             if let Ok(n) = rx.try_recv() {
@@ -595,10 +609,19 @@ impl Home {
         }
         let mut close = false;
         let mut create = None;
+        let mut open_models = false;
+        // the model asked for is one that is installed
+        if !crate::models::spec(&nm.model).is_some_and(|s| store.installed(s)) {
+            if let Some(first) = crate::models::ALL.iter().find(|s| store.installed(s)) {
+                nm.model = first.id.to_string();
+            }
+        }
         // a click on the backdrop does not close this one (what you typed would be lost): Cancel or Esc does
         theme::modal(ctx, "new-map", 480.0, Some("New map"), |ui| {
-            if rt.nagging() || rt.installing() {
-                runtime_offer(ui, rt, true, actions);
+            // ONNX Runtime is not optional: nothing runs without it, so its offer is always shown (and can't be dismissed) until it is there
+            let runtime_missing = rt.setup.ort.is_none();
+            if runtime_missing || rt.nagging() || rt.installing() {
+                runtime_offer(ui, rt, !runtime_missing, actions);
             }
             ui.label("Photos");
             if nm.sources.is_empty() {
@@ -670,17 +693,21 @@ impl Home {
             ui.label(theme::muted("A smaller map takes less time to make, to see whether it is what you want. The photos are picked evenly from the sorted list. Make a bigger one later: photos already understood in your other maps are not done again."));
             ui.add_space(8.0);
             ui.label("Model");
-            let root = lib.root();
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.spacing_mut().button_padding = egui::vec2(12.0, 5.0);
-                for spec in crate::models::ALL.iter() {
-                    let installed = spec.installed(&root);
-                    let tip = if installed { spec.note.to_string() } else { format!("{} Not installed: its files are missing from .cache/onnx/{}.", spec.note, spec.folder) };
-                    ui.add_enabled_ui(installed, |ui| ui.selectable_value(&mut nm.model, spec.id.to_string(), spec.label)).response.on_hover_text(tip);
+                for spec in crate::models::ALL.iter().filter(|s| store.installed(s)) {
+                    ui.selectable_value(&mut nm.model, spec.id.to_string(), spec.label).on_hover_text(spec.note);
                 }
             });
-            if let Some(spec) = crate::models::spec(&nm.model) {
+            if !crate::models::ALL.iter().any(|s| store.installed(s)) {
+                ui.horizontal(|ui| {
+                    ui.label(theme::muted("No model is installed."));
+                    if ui.button("Get a model").clicked() {
+                        open_models = true;
+                    }
+                });
+            } else if let Some(spec) = crate::models::spec(&nm.model) {
                 ui.label(theme::muted(spec.note));
             }
             ui.label(theme::muted("The map is searched with the same model, and vectors from different models are never mixed: photos already understood in your other maps are reused only if those were made with this model too."));
@@ -707,7 +734,7 @@ impl Home {
             ui.label(theme::muted("It can take a while for many photos. You can pause, close the app and carry on later."));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0);
+                let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
                     create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone() });
                 }
@@ -716,6 +743,9 @@ impl Home {
                 }
             });
         });
+        if open_models {
+            self.models_open = true;
+        }
         if let Some(a) = create {
             actions.push(a);
             close = true;
@@ -728,6 +758,85 @@ impl Home {
         }
     }
 
+    /// The window on the models: which are installed, what each takes, and a way to get or remove each.
+    fn models_window(&mut self, ctx: &egui::Context, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
+        if !self.models_open {
+            return;
+        }
+        let mut close = false;
+        let response = theme::modal(ctx, "models", 560.0, Some("Models"), |ui| {
+            ui.label(theme::muted("A map is made and searched with one model. Only the models you have are offered when a map is made. Getting a model is simulated for now: nothing is downloaded."));
+            ui.add_space(8.0);
+            if rt.setup.ort.is_none() {
+                ui.label(RichText::new("ONNX Runtime is not installed: no model can run without it.").color(Color32::from_rgb(235, 110, 100)));
+                ui.add_space(4.0);
+                runtime_offer(ui, rt, false, actions);
+            }
+            for spec in crate::models::ALL.iter() {
+                theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(spec.label).strong());
+                        ui.label(theme::muted(format!("{} MB", modelstore::size_mb(spec))));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let fetching = store.job.as_ref().filter(|j| j.id == spec.id);
+                            if let Some(job) = fetching {
+                                if ui.button("Stop").clicked() {
+                                    actions.push(Action::StopModelFetch);
+                                }
+                                ui.add(egui::ProgressBar::new(job.state().0).desired_width(120.0).desired_height(8.0).fill(theme::ACCENT));
+                            } else if store.installed(spec) {
+                                if ui.button("Remove").clicked() {
+                                    self.confirm_remove_model = Some(spec.id.to_string());
+                                }
+                                ui.label(theme::muted("installed"));
+                            } else if ui.add_enabled(!store.fetching(), egui::Button::new("Get")).clicked() {
+                                actions.push(Action::GetModel(spec.id.to_string()));
+                            }
+                        });
+                    });
+                    ui.label(theme::muted(spec.note));
+                    if store.installed(spec) {
+                        if let Some(t) = store.taken.get(spec.id) {
+                            ui.label(theme::muted(format!("On disk: {} for its files, {} prepared for the Apple chip or graphics card and for naming", bytes_text(t.files), bytes_text(t.prepared))));
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            let total: u64 = store.taken.values().map(|t| t.files + t.prepared).sum();
+            if total > 0 {
+                ui.label(theme::muted(format!("Models take {} in all.", bytes_text(total))));
+            }
+            if let Some(id) = self.confirm_remove_model.clone() {
+                let label = crate::models::spec(&id).map_or("", |s| s.label);
+                ui.add_space(4.0);
+                ui.label(format!("Remove {label}? Its files and everything prepared for it (the networks made for the Apple chip or the graphics card, the vocabulary's vectors) are deleted. Maps made with it stay, but can't be searched until you get it again."));
+                ui.horizontal(|ui| {
+                    if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Remove")).clicked() {
+                        actions.push(Action::RemoveModel(id.clone()));
+                        self.confirm_remove_model = None;
+                    }
+                    if ui.button("Keep it").clicked() {
+                        self.confirm_remove_model = None;
+                    }
+                });
+            }
+            if let Some(e) = &store.failure {
+                ui.add_space(8.0);
+                ui.label(RichText::new(e).color(Color32::from_rgb(235, 110, 100)));
+            }
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+        if close || response.should_close() {
+            self.models_open = false;
+            self.confirm_remove_model = None;
+        }
+    }
+
     /// The window on the runtime libraries: what the models run on now, what is installed and by whom, what could be installed.
     fn runtime_window(&mut self, ctx: &egui::Context, rt: &Manager, actions: &mut Vec<Action>) {
         if !self.runtime_open {
@@ -735,7 +844,11 @@ impl Home {
         }
         let mut close = false;
         let response = theme::modal(ctx, "runtime", 560.0, Some("Runtime"), |ui| {
-            ui.label(theme::muted("The libraries the models run on. The models run on the processor with ONNX Runtime alone; with an NVIDIA graphics card they can use it through CUDA, and TensorRT on top of that."));
+            ui.label(theme::muted(if cfg!(target_os = "macos") {
+                "The library the models run on: ONNX Runtime. It runs them on the processor, and on the Mac's own chip through CoreML."
+            } else {
+                "The libraries the models run on. The models run on the processor with ONNX Runtime alone; with an NVIDIA graphics card they can use it through CUDA, and TensorRT on top of that."
+            }));
             ui.add_space(8.0);
             let row = |ui: &mut Ui, name: &str, what: String| {
                 ui.horizontal_wrapped(|ui| {
@@ -743,19 +856,42 @@ impl Home {
                     ui.label(theme::muted(what));
                 });
             };
-            row(ui, "Graphics card", match &rt.nvidia {
-                Some(c) => format!("{} (its driver supports CUDA {})", c.name, manager::cuda_version(c.driver_cuda)),
-                None if rt.card_known() => "no NVIDIA card found".into(),
-                None => "looking…".into(),
-            });
-            row(ui, "ONNX Runtime", rt.setup.ort.as_ref().map_or("not installed".into(), |p| format!("{}{}", manager::describe(p), if rt.setup.ort_cuda { "" } else { "; processor only" })));
-            row(ui, "CUDA and cuDNN", rt.setup.gpu.as_ref().map_or("not installed".into(), |g| manager::describe(&g.cuda)));
-            row(ui, "TensorRT", rt.setup.tensorrt.as_ref().map_or("not installed".into(), manager::describe));
+            let mac = !crate::backends::Backend::Cuda.exists_here();
+            if !mac {
+                row(ui, "Graphics card", match &rt.nvidia {
+                    Some(c) => format!("{} (its driver supports CUDA {})", c.name, manager::cuda_version(c.driver_cuda)),
+                    None if rt.card_known() => "no NVIDIA card found".into(),
+                    None => "looking…".into(),
+                });
+            }
+            row(ui, "ONNX Runtime", rt.setup.ort.as_ref().map_or("not installed".into(), |p| format!("{}{}", manager::describe(p), if mac || rt.setup.ort_cuda { "" } else { "; processor only" })));
+            if !mac {
+                row(ui, "CUDA and cuDNN", rt.setup.gpu.as_ref().map_or("not installed".into(), |g| manager::describe(&g.cuda)));
+                row(ui, "TensorRT", rt.setup.tensorrt.as_ref().map_or("not installed".into(), manager::describe));
+            }
             for note in &rt.wrong {
                 ui.label(theme::muted(format!("{note}, so it is not used.")));
             }
             ui.add_space(8.0);
             runtime_offer(ui, rt, false, actions);
+
+            ui.add_space(8.0);
+            ui.label("Run the models on");
+            for b in crate::backends::Backend::ALL.into_iter().filter(|b| b.exists_here()) {
+                let available = b.available(&rt.setup) && !(matches!(b, crate::backends::Backend::Cuda | crate::backends::Backend::TensorRt) && rt.nvidia.is_none());
+                let mut on = available && rt.backends.is_on(b, &rt.setup);
+                let was = on;
+                ui.horizontal(|ui| {
+                    let response = ui.add_enabled(available, egui::Checkbox::new(&mut on, b.label())).on_hover_text(b.note());
+                    if response.changed() && on != was {
+                        actions.push(Action::SetBackend(b, on));
+                    }
+                    if !available {
+                        ui.label(theme::muted(if rt.setup.ort.is_none() { "needs ONNX Runtime" } else { "not installed" }));
+                    }
+                });
+            }
+            ui.label(theme::muted("The processor is used for whatever the others can't run. Changes apply after a restart."));
 
             let installed = rt.installed();
             if !installed.is_empty() {
@@ -860,6 +996,10 @@ fn runtime_offer(ui: &mut Ui, rt: &Manager, dismissible: bool, actions: &mut Vec
             ui.add_space(8.0);
         }
     }
+}
+
+fn bytes_text(b: u64) -> String {
+    size_text((b / 1_000_000) as u32)
 }
 
 fn size_text(mb: u32) -> String {

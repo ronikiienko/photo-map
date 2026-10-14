@@ -62,6 +62,8 @@ pub struct Manager {
     pub restart: bool,
     pub failure: Option<String>,
     dismissed: bool,
+    /// What the models may run on (changes take effect when the program is restarted).
+    pub backends: crate::backends::Choice,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -75,10 +77,11 @@ impl Manager {
         std::thread::spawn(move || {
             let _ = tx.send(Nvidia::probe());
         });
+        let root_for_choice = root.clone();
         let setup = Setup::detect(&root);
         let wrong = Setup::wrong_versions(&root);
         let dismissed = dismissed_file(&root).exists();
-        Self { root, setup, nvidia: None, probe: Some(rx), wrong, job: None, restart: false, failure: None, dismissed, wake: Arc::new(wake) }
+        Self { root, setup, nvidia: None, probe: Some(rx), wrong, job: None, restart: false, failure: None, dismissed, backends: crate::backends::Choice::load(&root_for_choice), wake: Arc::new(wake) }
     }
 
     /// Look again at what is installed.
@@ -110,6 +113,13 @@ impl Manager {
         }
     }
 
+    /// Tick or untick a backend; kept for the next start.
+    pub fn set_backend(&mut self, b: crate::backends::Backend, on: bool) {
+        self.backends.set(b, on, &self.setup);
+        self.backends.save(&self.root);
+        self.restart = true;
+    }
+
     pub fn card_known(&self) -> bool {
         self.probe.is_none()
     }
@@ -133,9 +143,13 @@ impl Manager {
                     why: format!("The models need ONNX Runtime, which is not installed. {} was found; this installs the version that uses it, with the NVIDIA libraries it needs.", card.name),
                 }),
                 None => Advice::Offer(Offer {
-                    packs: vec![&packs::ONNXRUNTIME],
+                    packs: vec![packs::onnxruntime_cpu()],
                     title: "Download ONNX Runtime",
-                    why: "The models need ONNX Runtime, which is not installed. This installs the version that runs on the processor.".into(),
+                    why: if cfg!(target_os = "macos") {
+                        "The models need ONNX Runtime, which is not installed. This installs the version for this Mac: it runs on the processor and on the Apple chip.".into()
+                    } else {
+                        "The models need ONNX Runtime, which is not installed. This installs the version that runs on the processor.".into()
+                    },
                 }),
             };
         }
@@ -264,7 +278,7 @@ mod tests {
     use crate::runtime::Gpu;
 
     fn manager(setup: Setup, nvidia: Option<Nvidia>) -> Manager {
-        Manager { root: PathBuf::from("/nonexistent"), setup, nvidia, probe: None, wrong: Vec::new(), job: None, restart: false, failure: None, dismissed: false, wake: Arc::new(|| {}) }
+        Manager { root: PathBuf::from("/nonexistent"), setup, nvidia, probe: None, wrong: Vec::new(), job: None, restart: false, failure: None, dismissed: false, backends: crate::backends::Choice::load(Path::new("/nonexistent")), wake: Arc::new(|| {}) }
     }
 
     fn place(name: &str) -> Place {
@@ -289,7 +303,7 @@ mod tests {
 
     #[test]
     fn nothing_runs_without_onnx_runtime_so_that_is_offered_first() {
-        assert_eq!(ids(manager(Setup::default(), None).advice()), ["onnxruntime"]);
+        assert_eq!(ids(manager(Setup::default(), None).advice()), [packs::onnxruntime_cpu().id]);
         assert_eq!(ids(manager(Setup::default(), Some(card(13000))).advice()), ["onnxruntime-gpu", "cuda-13", "cudnn-9"]);
     }
 

@@ -3,6 +3,8 @@
 //!     photo-map [bundle]      default: the one opened last in maps/
 
 mod bake;
+mod backends;
+mod bc7;
 mod build;
 mod camera;
 mod data;
@@ -12,7 +14,10 @@ mod gpu;
 mod home;
 mod layout;
 mod library;
+#[cfg(test)]
+mod macbench;
 mod manager;
+mod modelstore;
 mod models;
 mod packs;
 mod runtime;
@@ -43,10 +48,6 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
-
-// intel_tex_2's precompiled ISPC kernels (BC7 encoding in stream.rs and bake.rs) need the C++ runtime
-#[link(name = "stdc++")]
-unsafe extern "C" {}
 
 /// Side of a photo square in world units is the median distance between nearest neighbours: a map of 12,000 photos
 /// gets bigger squares than one of 88,000 in the same world (zoom changes the size on screen, nothing else does).
@@ -136,6 +137,10 @@ struct Viewer {
     camera: Camera,
     keys: Keys,
     alt: bool,
+    /// Fingers are on the trackpad, scrolling (or the system's momentum after them): the scroll pans instead of zooming.
+    scroll_gesture: bool,
+    /// The window is minimized or covered: no frames are asked for until it is shown again.
+    hidden: bool,
     help_open: bool,
     /// Builds stopped because a map was opened (a build and a map together would not fit on the card): they go on when the Maps page is back.
     paused_for_viewing: Vec<PathBuf>,
@@ -166,6 +171,7 @@ struct Viewer {
     photo_tex: Option<egui::TextureHandle>,
     /// The runtime libraries: what is installed and the install under way.
     runtime: manager::Manager,
+    store: modelstore::ModelStore,
     /// The Restart button was pressed: the app closes and opens again.
     restart: bool,
     last_frame: Instant,
@@ -186,6 +192,10 @@ impl Viewer {
             let window = window.clone();
             manager::Manager::new(library.root(), move || window.request_redraw())
         };
+        let store = {
+            let window = window.clone();
+            modelstore::ModelStore::new(library.root(), move || window.request_redraw())
+        };
         let state = egui_winit::State::new(ctx.clone(), ctx.viewport_id(), &window, None, None, None);
         let renderer = egui_wgpu::Renderer::new(&gpu.device, gpu.config.format, Default::default());
         let size = window.inner_size();
@@ -203,11 +213,14 @@ impl Viewer {
             map: None,
             library,
             runtime,
+            store,
             restart: false,
             opening: None,
             camera,
             keys: Keys::default(),
             alt: false,
+            scroll_gesture: false,
+            hidden: false,
             help_open: false,
             paused_for_viewing: Vec::new(),
             dropped: Vec::new(),
@@ -292,6 +305,7 @@ impl Viewer {
     fn build_views(&self) -> Vec<home::BuildView> {
         let backend = match self.engine.hub.state() {
             hub if hub.loaded.is_none() => String::new(),
+            hub if hub.on_gpu && cfg!(target_os = "macos") => "on the Apple chip".to_string(),
             hub if hub.on_gpu => "on the graphics card".to_string(),
             _ => "on the processor".to_string(),
         };
@@ -355,6 +369,10 @@ impl Viewer {
                     break;
                 }
             }
+        }
+        // nothing is being made or searched: the model goes (it holds gigabytes on the Apple chip)
+        if on_maps && self.queue.is_empty() && !self.runs.iter().any(|r| r.running()) {
+            self.engine.hub.unload();
         }
         if refresh || (self.page == Page::Maps && self.runs.iter().any(|r| r.running()) && self.last_refresh.elapsed().as_secs_f32() > 1.5) {
             self.library.refresh();
@@ -428,7 +446,21 @@ impl Viewer {
                 }
             }
             Action::StopInstall => self.runtime.stop(),
+            Action::SetBackend(b, on) => self.runtime.set_backend(b, on),
             Action::RemovePack(id) => self.runtime.remove(&id),
+            Action::GetModel(id) => self.store.get(&id),
+            Action::StopModelFetch => self.store.stop(),
+            Action::CountModels => self.store.count(),
+            Action::RemoveModel(id) => {
+                if self.runs.iter().any(|r| r.running()) {
+                    self.notice = Some(("stop the maps being made first: they may be using the model".into(), false));
+                } else {
+                    if self.engine.hub.state().loaded.as_deref() == Some(id.as_str()) {
+                        self.engine.hub.unload();
+                    }
+                    self.store.remove(&id);
+                }
+            }
             Action::DismissOffer => self.runtime.dismiss(),
             Action::Restart => self.restart = true,
         }
@@ -697,10 +729,22 @@ impl Viewer {
                 }
                 _ => {}
             },
-            WindowEvent::MouseWheel { delta, .. } if !over_ui && self.page == Page::Viewer => match delta {
-                MouseScrollDelta::LineDelta(_, y) => self.camera.scroll_lines(y),
-                MouseScrollDelta::PixelDelta(p) => self.camera.scroll_pixels(p.y as f32),
-            },
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                // a trackpad's two fingers pan (from the first touch to the end of the system's own momentum); a wheel zooms
+                match phase {
+                    winit::event::TouchPhase::Started => self.scroll_gesture = true,
+                    winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => self.scroll_gesture = false,
+                    winit::event::TouchPhase::Moved => {}
+                }
+                if !over_ui && self.page == Page::Viewer {
+                    match delta {
+                        MouseScrollDelta::LineDelta(_, y) => self.camera.scroll_lines(y),
+                        MouseScrollDelta::PixelDelta(p) if self.scroll_gesture => self.camera.pan_pixels(Vec2::new(p.x as f32, p.y as f32)),
+                        MouseScrollDelta::PixelDelta(p) => self.camera.scroll_pixels(p.y as f32),
+                    }
+                }
+            }
+            WindowEvent::PinchGesture { delta, .. } if !over_ui && self.page == Page::Viewer => self.camera.pinch(delta as f32),
             WindowEvent::ModifiersChanged(m) => self.alt = m.state().alt_key(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if self.alt && event.state == ElementState::Pressed && !event.repeat && event.logical_key == Key::Named(NamedKey::Enter) {
@@ -736,12 +780,25 @@ impl Viewer {
                 }
             }
             WindowEvent::Focused(false) => self.keys = Keys::default(),
+            WindowEvent::Focused(true) => self.window.request_redraw(),
+            WindowEvent::Occluded(hidden) => {
+                self.hidden = hidden;
+                self.window.request_redraw();
+            }
             WindowEvent::RedrawRequested => self.frame(),
             _ => {}
         }
     }
 
     fn frame(&mut self) {
+        if !self.hidden {
+            self.window.request_redraw(); // first, so that the frames go on when the surface can't be drawn to
+        }
+        let size = self.window.inner_size();
+        if (size.width, size.height) != (self.gpu.config.width, self.gpu.config.height) && size.width > 0 && size.height > 0 {
+            self.gpu.resize(size.width, size.height);
+            self.camera.viewport = Vec2::new(size.width as f32, size.height as f32);
+        }
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -753,6 +810,7 @@ impl Viewer {
         self.frames += 1;
         self.poll_engine();
         self.runtime.tick();
+        self.store.tick();
         self.pump_builds();
         if self.opening.as_ref().is_some_and(|(_, job, _)| job.is_finished()) {
             let (path, job, _) = self.opening.take().unwrap();
@@ -1047,7 +1105,7 @@ impl Viewer {
             let views = self.build_views();
             let notice = self.notice.clone();
             let ready_msg = notice.as_ref().filter(|(_, good)| *good).map(|(m, _)| m.as_str());
-            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg, &self.runtime);
+            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg, &self.runtime, &self.store);
             if let Some((text, false)) = &notice {
                 egui::Area::new("notice".into()).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0]).show(&ctx, |ui| {
                     theme::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(235, 110, 100))));
@@ -1336,8 +1394,9 @@ impl ApplicationHandler for App {
         if self.viewer.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("photo map").with_maximized(true);
+        let attrs = Window::default_attributes().with_title("photo map").with_inner_size(winit::dpi::LogicalSize::new(1200.0, 780.0));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
+        window.request_redraw(); // a window that isn't maximized gets no resize event to start the first frame
         let library = Library::new(self.maps.clone());
         let first = self.first.take();
         self.viewer = Some(Viewer::new(window, library, first));
