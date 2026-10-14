@@ -19,6 +19,7 @@ pub enum Action {
     GetModel(String),
     StopModelFetch,
     RemoveModel(String),
+    CountModels,
     Continue(PathBuf),
     Discard(PathBuf),
     Delete(PathBuf),
@@ -188,6 +189,7 @@ impl Home {
                 }
                 if ui.button("Models").on_hover_text("The models maps are made and searched with: get or remove them").clicked() {
                     self.models_open = true;
+                    actions.push(Action::CountModels);
                 }
                 if ui.button("Runtime").on_hover_text("The libraries the models run on: what is installed and what could be").clicked() {
                     self.runtime_open = true;
@@ -794,8 +796,17 @@ impl Home {
                         });
                     });
                     ui.label(theme::muted(spec.note));
+                    if store.installed(spec) {
+                        if let Some(t) = store.taken.get(spec.id) {
+                            ui.label(theme::muted(format!("On disk: {} for its files, {} prepared for the Apple chip or graphics card and for naming", bytes_text(t.files), bytes_text(t.prepared))));
+                        }
+                    }
                 });
                 ui.add_space(4.0);
+            }
+            let total: u64 = store.taken.values().map(|t| t.files + t.prepared).sum();
+            if total > 0 {
+                ui.label(theme::muted(format!("Models take {} in all.", bytes_text(total))));
             }
             if let Some(id) = self.confirm_remove_model.clone() {
                 let label = crate::models::spec(&id).map_or("", |s| s.label);
@@ -985,6 +996,10 @@ fn runtime_offer(ui: &mut Ui, rt: &Manager, dismissible: bool, actions: &mut Vec
             ui.add_space(8.0);
         }
     }
+}
+
+fn bytes_text(b: u64) -> String {
+    size_text((b / 1_000_000) as u32)
 }
 
 fn size_text(mb: u32) -> String {

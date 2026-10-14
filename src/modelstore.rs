@@ -6,6 +6,8 @@
 use crate::models::{self, Spec};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 
 /// A model being fetched.
@@ -22,8 +24,28 @@ impl Job {
     }
 }
 
+/// What a model takes on disk, in bytes.
+#[derive(Clone, Copy, Default)]
+pub struct Taken {
+    /// Its files (what a link points at counts).
+    pub files: u64,
+    /// What was prepared for it: networks for the Apple chip and the graphics card, the vocabulary's vectors.
+    pub prepared: u64,
+}
+
+fn size_of(path: &Path) -> u64 {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::read_dir(path).map_or(0, |entries| entries.flatten().map(|e| size_of(&e.path())).sum()),
+        Ok(_) => std::fs::metadata(path).map_or(0, |m| m.len()), // follows a link
+        Err(_) => 0,
+    }
+}
+
 pub struct ModelStore {
     root: PathBuf,
+    /// What each model takes (as last counted: counting walks folders, so it is done on a thread).
+    pub taken: HashMap<&'static str, Taken>,
+    counting: Option<Receiver<HashMap<&'static str, Taken>>>,
     pub job: Option<Arc<Job>>,
     pub failure: Option<String>,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -100,7 +122,28 @@ fn leftovers(root: &Path, spec: &Spec) -> Vec<PathBuf> {
 
 impl ModelStore {
     pub fn new(root: PathBuf, wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self { root, job: None, failure: None, wake: Arc::new(wake) }
+        let mut store = Self { root, taken: HashMap::new(), counting: None, job: None, failure: None, wake: Arc::new(wake) };
+        store.count();
+        store
+    }
+
+    /// Count again what each model takes, on a thread.
+    pub fn count(&mut self) {
+        let (tx, rx) = channel();
+        let (root, wake) = (self.root.clone(), self.wake.clone());
+        std::thread::spawn(move || {
+            let counted = models::ALL
+                .iter()
+                .map(|spec| {
+                    let files = size_of(&root.join(".cache/onnx").join(spec.folder));
+                    let prepared = leftovers(&root, spec).iter().filter(|p| !p.starts_with(root.join(".cache/onnx"))).map(|p| size_of(p)).sum();
+                    (spec.id, Taken { files, prepared })
+                })
+                .collect();
+            let _ = tx.send(counted);
+            wake();
+        });
+        self.counting = Some(rx);
     }
 
     pub fn installed(&self, spec: &Spec) -> bool {
@@ -113,9 +156,14 @@ impl ModelStore {
 
     /// Call every frame: takes in the end of a fetch.
     pub fn tick(&mut self) {
+        if let Some(counted) = self.counting.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.taken = counted;
+            self.counting = None;
+        }
         let finished = self.job.as_ref().and_then(|j| j.state().1);
         if let Some(result) = finished {
             self.job = None;
+            self.count();
             self.failure = match result {
                 Err(e) if e != "stopped" => Some(e),
                 _ => None,
@@ -171,6 +219,7 @@ impl ModelStore {
             }
         }
         self.failure = None;
+        self.count();
     }
 }
 
