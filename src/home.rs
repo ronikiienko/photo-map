@@ -594,7 +594,7 @@ impl Home {
         self.details_window(ctx, lib);
         self.new_map_dialog(ctx, lib, rt, store, actions);
         self.runtime_window(ctx, rt, actions);
-        self.models_window(ctx, store, actions);
+        self.models_window(ctx, rt, store, actions);
     }
 
     fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
@@ -616,8 +616,10 @@ impl Home {
         }
         // a click on the backdrop does not close this one (what you typed would be lost): Cancel or Esc does
         theme::modal(ctx, "new-map", 480.0, Some("New map"), |ui| {
-            if rt.nagging() || rt.installing() {
-                runtime_offer(ui, rt, true, actions);
+            // ONNX Runtime is not optional: nothing runs without it, so its offer is always shown (and can't be dismissed) until it is there
+            let runtime_missing = rt.setup.ort.is_none();
+            if runtime_missing || rt.nagging() || rt.installing() {
+                runtime_offer(ui, rt, !runtime_missing, actions);
             }
             ui.label("Photos");
             if nm.sources.is_empty() {
@@ -730,7 +732,7 @@ impl Home {
             ui.label(theme::muted("It can take a while for many photos. You can pause, close the app and carry on later."));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0) && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
+                let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
                     create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone() });
                 }
@@ -755,7 +757,7 @@ impl Home {
     }
 
     /// The window on the models: which are installed, what each takes, and a way to get or remove each.
-    fn models_window(&mut self, ctx: &egui::Context, store: &ModelStore, actions: &mut Vec<Action>) {
+    fn models_window(&mut self, ctx: &egui::Context, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         if !self.models_open {
             return;
         }
@@ -763,6 +765,11 @@ impl Home {
         let response = theme::modal(ctx, "models", 560.0, Some("Models"), |ui| {
             ui.label(theme::muted("A map is made and searched with one model. Only the models you have are offered when a map is made. Getting a model is simulated for now: nothing is downloaded."));
             ui.add_space(8.0);
+            if rt.setup.ort.is_none() {
+                ui.label(RichText::new("ONNX Runtime is not installed: no model can run without it.").color(Color32::from_rgb(235, 110, 100)));
+                ui.add_space(4.0);
+                runtime_offer(ui, rt, false, actions);
+            }
             for spec in crate::models::ALL.iter() {
                 theme::card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -869,7 +876,7 @@ impl Home {
                         actions.push(Action::SetBackend(b, on));
                     }
                     if !available {
-                        ui.label(theme::muted("not installed"));
+                        ui.label(theme::muted(if rt.setup.ort.is_none() { "needs ONNX Runtime" } else { "not installed" }));
                     }
                 });
             }
