@@ -4,7 +4,6 @@ maps/
 runtime/
 .cache/
 .cargo-home/
-.tools/
 .venv/
 __pycache__/
 
@@ -14,4 +13,3 @@ idk/
 index/
 logs/
 reports/
-.cargo/

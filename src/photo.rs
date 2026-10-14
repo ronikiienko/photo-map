@@ -40,9 +40,8 @@ fn scaled_jpeg(path: &Path, needed: &dyn Fn(u32, u32) -> u32) -> Option<RgbaImag
         return None;
     }
     let orientation = reader.into_decoder().ok()?.orientation().ok()?;
-    let mut decompressor = turbojpeg::Decompressor::new().ok()?;
-    let header = decompressor.read_header(&bytes).ok()?;
-    let (w, h) = (header.width as u32, header.height as u32);
+    let info = libjpeg_turbo_rs::probe(&bytes).ok()?;
+    let (w, h) = (info.width as u32, info.height as u32);
     let (shown_w, shown_h) = if matches!(orientation, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH) { (h, w) } else { (w, h) };
     // twice what is needed is kept: the shrink that follows then has something to average, and the picture stays as sharp as it
     // would be from the full size (decoded at exactly the needed size it comes out a little aliased)
@@ -53,13 +52,11 @@ fn scaled_jpeg(path: &Path, needed: &dyn Fn(u32, u32) -> u32) -> Option<RgbaImag
     // the smallest size, in eighths, whose longer side is still enough
     let long = w.max(h);
     let eighths = (1..=8u32).find(|&n| (long * n).div_ceil(8) >= need).unwrap_or(8);
-    let factor = turbojpeg::ScalingFactor::new(eighths as usize, 8);
-    decompressor.set_scaling_factor(factor).ok()?;
-    let size = header.scaled(factor);
-    let mut pixels = vec![0u8; size.width * size.height * 4];
-    let image = turbojpeg::Image { pixels: &mut pixels[..], width: size.width, pitch: size.width * 4, height: size.height, format: turbojpeg::PixelFormat::RGBA };
-    decompressor.decompress(&bytes, image).ok()?;
-    let mut img = DynamicImage::ImageRgba8(RgbaImage::from_raw(size.width as u32, size.height as u32, pixels)?);
+    let mut decoder = libjpeg_turbo_rs::Decoder::new(&bytes).ok()?;
+    decoder.set_scale(libjpeg_turbo_rs::ScalingFactor::new(eighths, 8));
+    decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgba);
+    let decoded = decoder.decode_image().ok()?;
+    let mut img = DynamicImage::ImageRgba8(RgbaImage::from_raw(decoded.width as u32, decoded.height as u32, decoded.data)?);
     img.apply_orientation(orientation);
     Some(img.into_rgba8())
 }
@@ -73,4 +70,52 @@ pub fn fit(img: &RgbaImage, long: u32, enlarge: bool) -> RgbaImage {
     let s = long as f32 / cur as f32;
     let (w, h) = (((img.width() as f32 * s).round() as u32).max(1), ((img.height() as f32 * s).round() as u32).max(1));
     image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A JPEG of 800 x 600 (a gradient) saved in the project's test folder.
+    fn jpeg(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache/test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}-{}.jpg", std::process::id()));
+        let img = image::RgbImage::from_fn(800, 600, |x, y| image::Rgb([(x / 4) as u8, (y / 3) as u8, 128]));
+        img.save(&path).unwrap();
+        path
+    }
+
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_big_jpeg_is_decoded_at_the_smallest_eighth_that_is_enough() {
+        let path = jpeg("eighths");
+        // 200 needed, so 400 kept: 4/8 of 800 is exactly 400
+        let img = load_for(&path, |_, _| 200).unwrap();
+        assert_eq!((img.width(), img.height()), (400, 300));
+        // more than the photo has: the full size
+        let img = load_for(&path, |_, _| 2000).unwrap();
+        assert_eq!((img.width(), img.height()), (800, 600));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_scaled_picture_looks_like_the_full_one() {
+        let path = jpeg("alike");
+        let small = load_for(&path, |_, _| 100).unwrap();
+        let full = load(&path).unwrap();
+        let (sx, sy) = (full.width() / small.width(), full.height() / small.height());
+        let mut worst = 0;
+        for y in (0..small.height()).step_by(7) {
+            for x in (0..small.width()).step_by(7) {
+                let (a, b) = (small.get_pixel(x, y), full.get_pixel(x * sx + sx / 2, y * sy + sy / 2));
+                for c in 0..3 {
+                    worst = worst.max((a[c] as i32 - b[c] as i32).abs());
+                }
+            }
+        }
+        assert!(worst < 12, "the scaled picture differs from the full size by up to {worst} of 255");
+        let _ = std::fs::remove_file(path);
+    }
 }
