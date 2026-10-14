@@ -2,6 +2,7 @@
 name = "photo-map"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 wgpu = "30.0.1"

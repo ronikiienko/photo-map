@@ -11,3 +11,9 @@ Rust, wgpu and egui. The photos are embedded on your own machine with ONNX Runti
 Not in git, made or downloaded here: `maps/` (your maps), `runtime/` (ONNX Runtime, CUDA, TensorRT), `.cache/` (models, engines, vocabulary vectors).
 
 Build and run: `cargo run --release`. It is plain Rust: no C compiler, cmake or nasm is needed. To keep cargo's package cache inside this folder: `env CARGO_HOME=.cargo-home cargo run --release`.
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.
+
+The models the app runs (EmbeddingGemma 2, SigLIP 2) and the libraries it downloads (ONNX Runtime, NVIDIA CUDA, cuDNN, TensorRT) are not part of this repository and have their own licenses.
