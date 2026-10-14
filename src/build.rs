@@ -32,8 +32,7 @@ const BATCH: usize = 4;
 pub enum Stage {
     Scan,
     Copy,
-    /// The model is opened (the first time on the Apple chip it is also prepared for the chip, which takes minutes).
-    Load,
+    #[serde(alias = "load")] // a job saved while loading the model was a step of its own
     Embed,
     Layout,
     Regions,
@@ -43,14 +42,13 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 9] = [Stage::Scan, Stage::Copy, Stage::Load, Stage::Embed, Stage::Layout, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
+    pub const ALL: [Stage; 8] = [Stage::Scan, Stage::Copy, Stage::Embed, Stage::Layout, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
 
     /// What the stage is doing, for the list of steps.
     pub fn label(self) -> &'static str {
         match self {
             Stage::Scan => "Finding photos",
             Stage::Copy => "Copying photos into the map",
-            Stage::Load => "Loading the model",
             Stage::Embed => "Understanding photos",
             Stage::Layout => "Laying out the map",
             Stage::Regions => "Finding regions",
@@ -65,7 +63,6 @@ impl Stage {
         match self {
             Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on) and counts them. Nothing is changed in your folders.",
             Stage::Copy => "Makes the map its own list of the photos. Where it can, a photo is a hard link to your file (the same data, no second copy), so this takes almost no space. The map also notes each photo's size and where it came from.",
-            Stage::Load => "Opens the model on what it runs on: the processor, the graphics card or the Apple chip. The first time on the Apple chip (or with TensorRT) the model is also prepared for it, which takes a few minutes; after that it opens in seconds, and a new runtime is prepared for the same way. The model is unloaded again when no map is being made or searched.",
             Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. This is the slow part, because every photo goes through the model on the graphics card.",
             Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP).",
             Stage::Regions => "Groups the photos on the map into areas, from a few big ones down to small ones of about 10 photos. The groups are made from neighbours on the map, so each area is one connected piece. Zooming in shows the finer ones.",
@@ -424,7 +421,6 @@ fn run(mut ctx: Ctx) -> (Arc<Shared>, Result<(), String>) {
             let flow = match stage {
                 Stage::Scan => scan(&mut ctx)?,
                 Stage::Copy => copy(&mut ctx)?,
-                Stage::Load => load_model(&mut ctx)?,
                 Stage::Embed => embed_photos(&mut ctx)?,
                 Stage::Layout => lay_out(&mut ctx)?,
                 Stage::Regions => find_regions(&mut ctx)?,
@@ -611,11 +607,6 @@ fn shard_len(photos: usize, k: usize) -> usize {
     (photos - k * SHARD).min(SHARD)
 }
 
-fn load_model(ctx: &mut Ctx) -> Result<Flow, String> {
-    ctx.progress(0, 0, "this can take minutes the first time on the Apple chip or TensorRT");
-    Ok(if ctx.wait_for_model()? { Flow::Done } else { Flow::Paused })
-}
-
 fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let n = ctx.job.photos;
     let shards = n.div_ceil(SHARD);
@@ -623,7 +614,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let finished = |k: usize| fs::metadata(shard_path(&ctx.dir, k)).is_ok_and(|m| m.len() as usize == shard_len(n, k) * ctx.dim() * 2);
     let todo: Vec<usize> = (0..shards).filter(|&k| !finished(k)).collect();
     let already = n - todo.iter().map(|&k| shard_len(n, k)).sum::<usize>();
-    ctx.progress(already, n, "waiting for the model");
+    ctx.progress(already, n, "loading the model (the first time on the Apple chip or TensorRT it is prepared for it: a few minutes)");
 
     // the model is loaded by the search engine's thread; wait for it
     if !ctx.wait_for_model()? {
