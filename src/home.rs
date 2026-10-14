@@ -773,9 +773,8 @@ impl Home {
                 let available = b.available(&rt.setup) && !(matches!(b, crate::backends::Backend::Cuda | crate::backends::Backend::TensorRt) && rt.nvidia.is_none());
                 let mut on = available && rt.backends.is_on(b, &rt.setup);
                 let was = on;
-                let cpu_alone = b == crate::backends::Backend::Cpu;
                 ui.horizontal(|ui| {
-                    let response = ui.add_enabled(available && !cpu_alone, egui::Checkbox::new(&mut on, b.label())).on_hover_text(b.note());
+                    let response = ui.add_enabled(available, egui::Checkbox::new(&mut on, b.label())).on_hover_text(b.note());
                     if response.changed() && on != was {
                         actions.push(Action::SetBackend(b, on));
                     }

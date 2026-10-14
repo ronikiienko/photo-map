@@ -45,7 +45,7 @@ impl Backend {
 
     pub fn note(self) -> &'static str {
         match self {
-            Backend::Cpu => "Works everywhere, slowest.",
+            Backend::Cpu => "Works everywhere, slowest. Ticking it unticks the others.",
             Backend::AppleAll => "CoreML picks the part for each piece of the model.",
             Backend::AppleGpu => "CoreML on the graphics chip: as fast as the neural engine, but busy while the map is shown.",
             Backend::AppleNeural => "CoreML on the neural engine: fast, and the graphics chip stays free. Applies to the photo encoders.",
@@ -128,6 +128,13 @@ impl Choice {
 
     /// Tick or untick one. Only one part of the Apple chip is used at a time, and TensorRT works on top of CUDA.
     pub fn set(&mut self, b: Backend, on: bool, setup: &Setup) {
+        if b == Backend::Cpu {
+            // the processor is what is left when nothing else is ticked: ticking it unticks the rest, unticking it does nothing
+            if on {
+                self.0 = Some(vec![Backend::Cpu]);
+            }
+            return;
+        }
         let mut list = self.current(setup);
         list.retain(|x| *x != b);
         if on {
