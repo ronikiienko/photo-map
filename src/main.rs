@@ -744,6 +744,11 @@ impl Viewer {
     }
 
     fn frame(&mut self) {
+        let size = self.window.inner_size();
+        if (size.width, size.height) != (self.gpu.config.width, self.gpu.config.height) && size.width > 0 && size.height > 0 {
+            self.gpu.resize(size.width, size.height);
+            self.camera.viewport = Vec2::new(size.width as f32, size.height as f32);
+        }
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -1340,6 +1345,7 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes().with_title("photo map").with_inner_size(winit::dpi::LogicalSize::new(1200.0, 780.0));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
+        window.request_redraw(); // a window that isn't maximized gets no resize event to start the first frame
         let library = Library::new(self.maps.clone());
         let first = self.first.take();
         self.viewer = Some(Viewer::new(window, library, first));
