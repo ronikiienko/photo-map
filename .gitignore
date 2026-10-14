@@ -19,3 +19,4 @@ data/rare-species/
 data/esc50/
 data/flickr30k/
 runtime/
+.tools/
