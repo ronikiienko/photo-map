@@ -136,6 +136,8 @@ struct Viewer {
     camera: Camera,
     keys: Keys,
     alt: bool,
+    /// The window is minimized or covered: no frames are asked for until it is shown again.
+    hidden: bool,
     help_open: bool,
     /// Builds stopped because a map was opened (a build and a map together would not fit on the card): they go on when the Maps page is back.
     paused_for_viewing: Vec<PathBuf>,
@@ -208,6 +210,7 @@ impl Viewer {
             camera,
             keys: Keys::default(),
             alt: false,
+            hidden: false,
             help_open: false,
             paused_for_viewing: Vec::new(),
             dropped: Vec::new(),
@@ -738,12 +741,20 @@ impl Viewer {
                 }
             }
             WindowEvent::Focused(false) => self.keys = Keys::default(),
+            WindowEvent::Focused(true) => self.window.request_redraw(),
+            WindowEvent::Occluded(hidden) => {
+                self.hidden = hidden;
+                self.window.request_redraw();
+            }
             WindowEvent::RedrawRequested => self.frame(),
             _ => {}
         }
     }
 
     fn frame(&mut self) {
+        if !self.hidden {
+            self.window.request_redraw(); // first, so that the frames go on when the surface can't be drawn to
+        }
         let size = self.window.inner_size();
         if (size.width, size.height) != (self.gpu.config.width, self.gpu.config.height) && size.width > 0 && size.height > 0 {
             self.gpu.resize(size.width, size.height);
