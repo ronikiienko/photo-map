@@ -1338,7 +1338,7 @@ impl ApplicationHandler for App {
         if self.viewer.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("photo map").with_maximized(true);
+        let attrs = Window::default_attributes().with_title("photo map").with_inner_size(winit::dpi::LogicalSize::new(1200.0, 780.0));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         let library = Library::new(self.maps.clone());
         let first = self.first.take();
