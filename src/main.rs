@@ -166,6 +166,8 @@ struct Viewer {
     photo_tex: Option<egui::TextureHandle>,
     /// The runtime libraries: what is installed and the install under way.
     runtime: manager::Manager,
+    /// The Restart button was pressed: the app closes and opens again.
+    restart: bool,
     last_frame: Instant,
     frame_times: Vec<f32>,
     frames: u64,
@@ -201,6 +203,7 @@ impl Viewer {
             map: None,
             library,
             runtime,
+            restart: false,
             opening: None,
             camera,
             keys: Keys::default(),
@@ -427,6 +430,7 @@ impl Viewer {
             Action::StopInstall => self.runtime.stop(),
             Action::RemovePack(id) => self.runtime.remove(&id),
             Action::DismissOffer => self.runtime.dismiss(),
+            Action::Restart => self.restart = true,
         }
     }
 
@@ -1323,6 +1327,8 @@ struct App {
     /// The bundle to open first, if one was named on the command line; otherwise the app starts on the Maps page.
     first: Option<PathBuf>,
     viewer: Option<Viewer>,
+    /// The Restart button was pressed.
+    restart: bool,
 }
 
 impl ApplicationHandler for App {
@@ -1347,6 +1353,12 @@ impl ApplicationHandler for App {
         }
         if let Some(v) = &mut self.viewer {
             v.event(event);
+            if v.restart {
+                // closed like any other close; main() starts the app again once this process has ended
+                self.restart = true;
+                self.viewer = None;
+                event_loop.exit();
+            }
         }
     }
 }
@@ -1386,10 +1398,18 @@ fn main() {
         unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
     }
     let event_loop = EventLoop::new().unwrap();
-    event_loop.run_app(&mut App { maps, first, viewer: None }).unwrap();
+    let mut app = App { maps, first, viewer: None, restart: false };
+    event_loop.run_app(&mut app).unwrap();
     // The window is closed and the builds are stopped (what they did is on disk). Ending the process the usual way would run the
     // exit code of the CUDA and TensorRT libraries, which after a build takes tens of seconds and then crashes (SIGSEGV); the
     // system frees the video memory by itself, so this ends the process at once.
+    if app.restart {
+        // a moment's wait so that this process is gone (and the video memory and the locks of the maps it was making are free)
+        // before the new one starts
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new("sh").args(["-c", "sleep 1; exec \"$0\"", &exe.to_string_lossy()]).stdin(std::process::Stdio::null()).spawn();
+        }
+    }
     // SAFETY: `_exit` only ends the process.
     unsafe { libc::_exit(0) };
 }

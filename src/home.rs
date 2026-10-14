@@ -23,6 +23,8 @@ pub enum Action {
     StopInstall,
     RemovePack(String),
     DismissOffer,
+    /// Close the app and open it again (the runtime libraries it started with can't be changed while it runs).
+    Restart,
 }
 
 /// A map being made, as the page shows it.
@@ -823,7 +825,11 @@ fn runtime_offer(ui: &mut Ui, rt: &Manager, dismissible: bool, actions: &mut Vec
     if rt.restart {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label("The runtime changed. Close and open the app again for the models to use it.");
+            ui.label("The runtime changed. The app has to start again for the models to use it.");
+            ui.label(theme::muted("Maps being made are paused and carry on when it is open again."));
+            if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("Restart now").strong())).clicked() {
+                actions.push(Action::Restart);
+            }
         });
         ui.add_space(8.0);
         return;
