@@ -10,4 +10,4 @@ Rust, wgpu and egui. The photos are embedded on your own machine with ONNX Runti
 
 Not in git, made or downloaded here: `maps/` (your maps), `runtime/` (ONNX Runtime, CUDA, TensorRT), `.cache/` (models, engines, vocabulary vectors).
 
-Build: `cargo build --release`. The bundled JPEG decoder (libjpeg-turbo) needs `cmake` and `nasm` to compile.
+Build and run: `./cargo.sh run --release`. It is cargo with the package cache (`.cargo-home/`) and the build tools kept inside this folder. The bundled JPEG decoder (libjpeg-turbo) needs `cmake` and `nasm` to compile; the script finds them in `.venv/bin` and `.tools/nasm/usr/bin`, or use your own if they are installed system-wide.
