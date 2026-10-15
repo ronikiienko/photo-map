@@ -363,10 +363,15 @@ impl Gemma {
             ];
             let pooled = pool.run(inputs).map_err(err("running the photo pooling"))?;
             let (shape, data) = pooled["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
-            if shape[0] as usize != tokens {
-                return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
+            let made = shape[0] as usize;
+            // the blank photos that fill up a short group (CoreML's network takes exactly TENSORRT_BATCH) come last and each leaves a
+            // token or two of its own: the photos' tokens are the first `tokens`
+            let filler = self.apple.is_some() && made > tokens;
+            if made != tokens && !filler {
+                return Err(format!("the photo encoder made {made} tokens, expected {tokens}"));
             }
-            data.to_vec()
+            let width = data.len() / made.max(1);
+            data[..tokens * width].to_vec()
         } else {
             let (shape, data) = out["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
             if shape[0] as usize != tokens {
@@ -491,6 +496,30 @@ mod tests {
             eprintln!("{file}: cosine with Python {cos:.5} ({:?})", started.elapsed());
             assert!(cos > 0.99, "{file}: cosine {cos}");
         }
+    }
+
+    /// One photo alone and a group of fewer than the network takes at once (CoreML's network is made for four, the rest of the group is
+    /// blank photos) give the vectors of the photo in a full group: the blank ones' tokens do not count. Needs no photos but its own.
+    #[test]
+    fn a_short_group_is_the_same_as_a_full_one() {
+        let img = |seed: u32| image::RgbaImage::from_fn(200 + seed * 8, 150, |x, y| image::Rgba([(x * 3 + seed * 40) as u8, (y * 2) as u8, (x + y + seed * 17) as u8, 255]));
+        let shared = shared_model();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap().gemma();
+        let photos: Vec<Patches> = (0..4).map(|s| patches(&img(s)).unwrap()).collect();
+        let full = model.embed_patches(photos.iter().map(|c| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens }).collect());
+        for count in 1..4 {
+            let short = model.embed_patches(photos[..count].iter().map(|c| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens }).collect());
+            assert_eq!(short.len(), count);
+            for k in 0..count {
+                let (a, b) = (short[k].as_ref().unwrap(), full[k].as_ref().unwrap());
+                let cos: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+                assert!(cos > 0.999, "photo {k} of {count}: cosine {cos}");
+            }
+        }
+        let alone = model.embed_image(&img(0)).unwrap();
+        let cos: f32 = alone.iter().zip(full[0].as_ref().unwrap()).map(|(x, y)| x * y).sum();
+        assert!(cos > 0.999, "alone: cosine {cos}");
     }
 
     /// Photos embedded together (their token lists padded) give the same vectors as each one alone.

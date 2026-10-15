@@ -116,7 +116,8 @@ pub struct Job {
 pub struct VideoSettings {
     /// A picture is taken every this many seconds.
     pub every: f64,
-    /// A picture whose cosine to the scene so far is below this starts a new scene (scenes.rs).
+    /// A picture whose cosine to the scene so far (with the video's average vector taken away from both) is below this starts a new
+    /// scene (scenes.rs). Jobs started before that was so have 0.9 here, which is much stricter.
     pub threshold: f32,
     /// A video makes at most this many scenes (the most alike neighbours are joined).
     pub at_most: usize,
@@ -124,7 +125,7 @@ pub struct VideoSettings {
 
 impl Default for VideoSettings {
     fn default() -> Self {
-        Self { every: 2.0, threshold: 0.9, at_most: 40 }
+        Self { every: 2.0, threshold: crate::scenes::Settings::default().threshold, at_most: 40 }
     }
 }
 
