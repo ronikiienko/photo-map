@@ -456,7 +456,17 @@ mod tests {
             let features = model.encode_patches(cuts()).unwrap();
             let encode = t.elapsed().as_secs_f32();
             let t = std::time::Instant::now();
-            let n = model.embed_patches(cuts()).len();
+            // groups of 4, as the map builder sends them; a failure is shown, not timed
+            let mut results = Vec::new();
+            let mut all = cuts();
+            while !all.is_empty() {
+                let rest = all.split_off(4.min(all.len()));
+                results.extend(model.embed_patches(std::mem::replace(&mut all, rest)));
+            }
+            let n = results.len();
+            if let Some(Err(e)) = results.iter().find(|r| r.is_err()) {
+                panic!("a photo failed: {}", &e[..e.len().min(300)]);
+            }
             let all = t.elapsed().as_secs_f32();
             eprintln!("GEMMA {n} photos: encoder {encode:.2} s, encoder + text model {all:.2} s => {:.2} photos/s ({} tokens)", n as f32 / all, features.len() / 512);
         }
