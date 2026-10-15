@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 pub enum Action {
     Open(PathBuf),
-    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String, videos: Option<build::VideoSettings> },
+    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String, videos: Option<build::VideoSettings>, photos: bool },
     Pause(PathBuf),
     SetBackend(crate::backends::Backend),
     GetModel(String),
@@ -74,6 +74,8 @@ struct NewMap {
     count: Option<Receiver<Counts>>,
     /// What the sources hold, all of it.
     found: Option<Counts>,
+    /// Photos are put on the map (when there are any).
+    with_photos: bool,
     /// Videos are put on the map (when there are any), a picture every `video_every` seconds.
     with_videos: bool,
     video_every: f64,
@@ -148,7 +150,7 @@ impl Home {
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, found: None, with_videos: true, video_every: build::VideoSettings::default().every, every: 1, names_as_captions: false, model: crate::models::DEFAULT.to_string() });
+        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, found: None, with_photos: true, with_videos: true, video_every: build::VideoSettings::default().every, every: 1, names_as_captions: false, model: crate::models::DEFAULT.to_string() });
     }
 
     pub fn set_drag_over(&mut self, over: bool) {
@@ -663,7 +665,7 @@ impl Home {
                 return;
             }
             if !nm.with_videos {
-                ui.label(theme::muted("Without this the videos are ignored and the map is made from the photos only."));
+                ui.label(theme::muted("Without this the videos are ignored."));
                 return;
             }
             ui.horizontal(|ui| {
@@ -777,6 +779,10 @@ impl Home {
                 let photos = if nm.every > 1 { format!("{} photos found, {} of them used", thousands(n), thousands(n.div_ceil(nm.every))) } else { format!("{} photos found", thousands(n)) };
                 ui.label(theme::muted(if found.videos > 0 { format!("{photos}, {} video{} found", thousands(found.videos), if found.videos == 1 { "" } else { "s" }) } else { photos }));
                 if found.videos > 0 {
+                    if n > 0 && found.videos > found.unreadable {
+                        ui.add_space(6.0);
+                        ui.checkbox(&mut nm.with_photos, "Put the photos on the map").on_hover_text("Uncheck to make a map of the videos only.");
+                    }
                     Self::video_options(ui, nm, found);
                 }
             }
@@ -826,8 +832,10 @@ impl Home {
             ui.add_space(8.0);
             ui.label(theme::muted("It can take a while for many photos. You can pause, close the app and carry on later."));
             ui.add_space(8.0);
-            let ok = problem.is_none() && !sources.is_empty() && nm.found.is_some_and(|f| f.photos > 0 || (nm.with_videos && f.videos > f.unreadable)) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
-            let action = Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone(), videos: nm.found.filter(|f| nm.with_videos && f.videos > f.unreadable).map(|_| build::VideoSettings { every: nm.video_every, ..Default::default() }) };
+            // the photos box is only shown when there are videos to choose instead: without readable ones the photos are always in
+            let photos_on = nm.with_photos || nm.found.is_some_and(|f| f.videos <= f.unreadable);
+            let ok = problem.is_none() && !sources.is_empty() && nm.found.is_some_and(|f| (photos_on && f.photos > 0) || (nm.with_videos && f.videos > f.unreadable)) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
+            let action = Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone(), videos: nm.found.filter(|f| nm.with_videos && f.videos > f.unreadable).map(|_| build::VideoSettings { every: nm.video_every, ..Default::default() }), photos: photos_on };
             (ok, Some(action))
         }, |ui, (ok, action)| {
             // under the scrolling form, always in view

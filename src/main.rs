@@ -405,7 +405,7 @@ impl Viewer {
         use home::Action;
         match action {
             Action::Open(path) => self.open(path),
-            Action::Create { name, sources, names_as_captions, every, model, videos } => match build::create(self.library.dir(), &name, &sources, names_as_captions, every, &model, videos) {
+            Action::Create { name, sources, names_as_captions, every, model, videos, photos } => match build::create(self.library.dir(), &name, &sources, names_as_captions, every, &model, videos, photos) {
                 Ok(dir) => {
                     self.library.refresh();
                     self.queue.push(dir);

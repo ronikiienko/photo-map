@@ -109,9 +109,12 @@ pub struct Job {
     /// life of the job: its vectors, and the map's search, are only good with the same one.
     #[serde(default = "default_model")]
     pub model: String,
-    /// Videos are part of the map, as scenes, with these settings; `None`: only photos.
+    /// Videos are part of the map, as scenes, with these settings; `None`: no videos.
     #[serde(default)]
     pub videos: Option<VideoSettings>,
+    /// The photos are part of the map (jobs from before this could be unchecked have them).
+    #[serde(default = "yes")]
+    pub with_photos: bool,
 }
 
 /// How a video becomes scenes on the map. Fixed for the life of the job.
@@ -134,6 +137,10 @@ impl Default for VideoSettings {
 
 fn default_model() -> String {
     models::DEFAULT.to_string()
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn one() -> usize {
@@ -202,13 +209,16 @@ pub fn clean_name(name: &str) -> String {
 }
 
 /// Start a new build: its folder with job.json. Err with what is wrong (name taken, folder missing).
-pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: bool, every: usize, model: &str, videos: Option<VideoSettings>) -> Result<PathBuf, String> {
+pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: bool, every: usize, model: &str, videos: Option<VideoSettings>, with_photos: bool) -> Result<PathBuf, String> {
     if models::spec(model).is_none() {
         return Err(format!("unknown model {model}"));
     }
     let name = clean_name(name);
     if name.is_empty() {
         return Err("give the map a name".into());
+    }
+    if !with_photos && videos.is_none() {
+        return Err("choose photos, videos or both".into());
     }
     if sources.is_empty() || sources.iter().any(|s| !s.exists()) {
         return Err("that folder or photo doesn't exist".into());
@@ -221,7 +231,7 @@ pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: b
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, sources, created, stage: Stage::Scan, photos: 0, names_as_captions, every: every.max(1), model: model.to_string(), videos }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, sources, created, stage: Stage::Scan, photos: 0, names_as_captions, every: every.max(1), model: model.to_string(), videos, with_photos }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -546,7 +556,7 @@ fn shown_size(path: &Path) -> Option<(u32, u32)> {
 
 fn scan(ctx: &mut Ctx) -> Result<Flow, String> {
     ctx.progress(0, 0, "looking for photos");
-    let files = collect_photos(&ctx.job.sources, ctx.job.every);
+    let files = if ctx.job.with_photos { collect_photos(&ctx.job.sources, ctx.job.every) } else { Vec::new() };
     let total = files.len();
     ctx.progress(0, total, format!("{total} photo files, checking them"));
     let done = AtomicUsize::new(0);
@@ -569,7 +579,12 @@ fn scan(ctx: &mut Ctx) -> Result<Flow, String> {
     }
     let found: Vec<Found> = found.into_iter().flatten().collect();
     if found.is_empty() && !(ctx.job.videos.is_some() && !collect_files(&ctx.job.sources, is_video).is_empty()) {
-        return Err(if ctx.job.videos.is_some() { "no photos or videos in that folder" } else { "no photos in that folder" }.into());
+        return Err(match (ctx.job.with_photos, ctx.job.videos.is_some()) {
+            (true, true) => "no photos or videos in that folder",
+            (true, false) => "no photos in that folder",
+            _ => "no videos in that folder",
+        }
+        .into());
     }
     write_atomic(&ctx.dir.join("files.json"), &serde_json::to_vec(&found).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     ctx.job.photos = found.len();
@@ -1287,7 +1302,7 @@ mod tests {
         }
         let model = models::test_hub();
         let build = |name: &str| {
-            let dir = create(&maps, name, &[source.clone()], false, 1, models::DEFAULT, None).unwrap();
+            let dir = create(&maps, name, &[source.clone()], false, 1, models::DEFAULT, None, true).unwrap();
             let run = Run::start(dir, root.clone(), model.clone(), || {}).unwrap();
             while run.running() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1340,8 +1355,8 @@ mod tests {
         fs::write(source.join("notes.txt"), "not a photo").unwrap();
 
         let model = models::test_hub();
-        let dir = create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT, None).unwrap();
-        assert!(create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT, None).is_err(), "a second map with the same name");
+        let dir = create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT, None, true).unwrap();
+        assert!(create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT, None, true).is_err(), "a second map with the same name");
         // stop and go on a few times at arbitrary moments
         for pause_after_ms in [0u64, 150, 900, 2500] {
             let run = Run::start(dir.clone(), root.clone(), model.clone(), || {}).unwrap();
@@ -1412,7 +1427,7 @@ mod tests {
 
         let model = models::test_hub_with(models::SIGLIP_BASE_256);
         let settings = VideoSettings { every: 4.0, ..Default::default() };
-        let dir = create(&maps, "with video", &[source.clone()], false, 1, models::SIGLIP_BASE_256, Some(settings)).unwrap();
+        let dir = create(&maps, "with video", &[source.clone()], false, 1, models::SIGLIP_BASE_256, Some(settings), true).unwrap();
         for pause_after_ms in [0u64, 1500] {
             let run = Run::start(dir.clone(), root.clone(), model.clone(), || {}).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(pause_after_ms));
@@ -1482,7 +1497,7 @@ mod tests {
         }
         let hub = models::test_hub();
         let build = |name: &str, model: &str| {
-            let dir = create(&maps, name, &[source.clone()], false, 1, model, None).unwrap();
+            let dir = create(&maps, name, &[source.clone()], false, 1, model, None, true).unwrap();
             let run = Run::start(dir, root.clone(), hub.clone(), || {}).unwrap();
             while run.running() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1575,7 +1590,7 @@ mod tests {
         fs::create_dir_all(&maps).unwrap();
         let model = models::test_hub_with(models::SIGLIP_BASE_256);
         let settings = VideoSettings { every: 2.0, ..Default::default() };
-        let dir = create(&maps, "speed", &[media], false, 1, models::SIGLIP_BASE_256, Some(settings)).unwrap();
+        let dir = create(&maps, "speed", &[media], false, 1, models::SIGLIP_BASE_256, Some(settings), true).unwrap();
         let started = Instant::now();
         let run = Run::start(dir, root, model, || {}).unwrap();
         while run.running() {
