@@ -612,6 +612,23 @@ mod tests {
         m.graph.node.iter().filter(|n| n.op_type == op).count()
     }
 
+    /// What the text model of Gemma is made of: its operators, inputs and outputs. cargo test --release gemma_text_ops -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn gemma_text_ops() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache/onnx/embeddinggemma-2/onnx");
+        let m = load(&dir.join("model_fp16.onnx")).unwrap();
+        let g = m.graph.as_ref().unwrap();
+        let mut count: std::collections::BTreeMap<&str, usize> = Default::default();
+        for n in &g.node {
+            *count.entry(n.op_type.as_str()).or_default() += 1;
+        }
+        eprintln!("TEXT {} nodes: {count:?}", g.node.len());
+        let shape = |v: &onnx_protobuf::ValueInfoProto| format!("{}: {:?}", v.name, v.type_.as_ref().and_then(|t| t.tensor_type().shape.as_ref()).map(|s| s.dim.iter().map(|d| d.dim_param().to_string() + &d.dim_value().to_string()).collect::<Vec<_>>()));
+        eprintln!("TEXT inputs {:?}", g.input.iter().map(shape).collect::<Vec<_>>());
+        eprintln!("TEXT outputs {:?}", g.output.iter().map(shape).collect::<Vec<_>>());
+    }
+
     /// Gemma's photo encoder (its 112 KB network; the weights are not needed to patch it), downloaded into .cache/test/.
     /// cargo test --release patch -- --ignored
     #[test]
