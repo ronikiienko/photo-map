@@ -27,7 +27,7 @@ pub enum Action {
     /// Fetch what the runtime offer says (manager.rs).
     InstallRuntime,
     StopInstall,
-    RemovePack(String),
+    RemoveRuntime,
     DismissOffer,
     /// Close the app and open it again (the runtime libraries it started with can't be changed while it runs).
     Restart,
@@ -105,7 +105,7 @@ pub struct Home {
     confirm_delete: Option<PathBuf>,
     /// The window on the runtime libraries is open.
     runtime_open: bool,
-    confirm_remove: Option<String>,
+    confirm_remove: bool,
     /// The window on the models is open, and the model asked about removing.
     models_open: bool,
     confirm_remove_model: Option<String>,
@@ -115,7 +115,7 @@ const COVER: f32 = 200.0;
 
 impl Home {
     pub fn new() -> Self {
-        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: None, models_open: false, confirm_remove_model: None }
+        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: false, models_open: false, confirm_remove_model: None }
     }
 
     pub fn open_new_map(&mut self) {
@@ -191,7 +191,7 @@ impl Home {
                     self.models_open = true;
                     actions.push(Action::CountModels);
                 }
-                if ui.button("Runtime").on_hover_text("The libraries the models run on: what is installed and what could be").clicked() {
+                if ui.button("Runtime").on_hover_text("The libraries the models run on: what is there and what can be downloaded").clicked() {
                     self.runtime_open = true;
                 }
             });
@@ -702,7 +702,7 @@ impl Home {
             });
             if !crate::models::ALL.iter().any(|s| store.installed(s)) {
                 ui.horizontal(|ui| {
-                    ui.label(theme::muted("No model is installed."));
+                    ui.label(theme::muted("No model has been downloaded."));
                     if ui.button("Get a model").clicked() {
                         open_models = true;
                     }
@@ -764,13 +764,18 @@ impl Home {
             return;
         }
         let mut close = false;
+        let mut open_runtime = false;
         let response = theme::modal(ctx, "models", 560.0, Some("Models"), |ui| {
             ui.label(theme::muted("A map is made and searched with one model. Only the models you have are offered when a map is made. Getting a model is simulated for now: nothing is downloaded."));
             ui.add_space(8.0);
             if rt.setup.ort.is_none() {
-                ui.label(RichText::new("ONNX Runtime is not installed: no model can run without it.").color(Color32::from_rgb(235, 110, 100)));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("ONNX Runtime has not been downloaded: no model can run without it.").color(Color32::from_rgb(235, 110, 100)));
+                    if ui.button("Runtime…").on_hover_text("Get it in the Runtime window").clicked() {
+                        open_runtime = true;
+                    }
+                });
                 ui.add_space(4.0);
-                runtime_offer(ui, rt, false, actions);
             }
             for spec in crate::models::ALL.iter() {
                 theme::card().show(ui, |ui| {
@@ -789,7 +794,7 @@ impl Home {
                                 if ui.button("Remove").clicked() {
                                     self.confirm_remove_model = Some(spec.id.to_string());
                                 }
-                                ui.label(theme::muted("installed"));
+                                ui.label(theme::muted("downloaded"));
                             } else if ui.add_enabled(!store.fetching(), egui::Button::new("Get")).clicked() {
                                 actions.push(Action::GetModel(spec.id.to_string()));
                             }
@@ -831,9 +836,12 @@ impl Home {
                 close = true;
             }
         });
-        if close || response.should_close() {
+        if close || open_runtime || response.should_close() {
             self.models_open = false;
             self.confirm_remove_model = None;
+        }
+        if open_runtime {
+            self.runtime_open = true;
         }
     }
 
@@ -864,10 +872,20 @@ impl Home {
                     None => "looking…".into(),
                 });
             }
-            row(ui, "ONNX Runtime", rt.setup.ort.as_ref().map_or("not installed".into(), |p| format!("{}{}", manager::describe(p), if mac || rt.setup.ort_cuda { "" } else { "; processor only" })));
+            let installed = rt.installed();
+            // what photo-map downloaded is shown by its version and size; anything else by where it was found
+            let what = |place: Option<&crate::runtime::Place>| match place {
+                None => "not downloaded".to_string(),
+                Some(p) => match &p.source {
+                    crate::runtime::Source::Managed(id) => installed.iter().find(|i| &i.id == id).map_or_else(|| manager::describe(p), |i| format!("{}, {:.0} MB", i.version, i.bytes as f64 / 1048576.0)),
+                    _ => manager::describe(p),
+                },
+            };
+            row(ui, "ONNX Runtime", format!("{}{}", what(rt.setup.ort.as_ref()), if rt.setup.ort.is_none() || mac || rt.setup.ort_cuda { "" } else { "; processor only" }));
             if !mac {
-                row(ui, "CUDA and cuDNN", rt.setup.gpu.as_ref().map_or("not installed".into(), |g| manager::describe(&g.cuda)));
-                row(ui, "TensorRT", rt.setup.tensorrt.as_ref().map_or("not installed".into(), manager::describe));
+                row(ui, "CUDA", what(rt.setup.gpu.as_ref().map(|g| &g.cuda)));
+                row(ui, "cuDNN", what(rt.setup.gpu.as_ref().map(|g| &g.cudnn)));
+                row(ui, "TensorRT", what(rt.setup.tensorrt.as_ref()));
             }
             for note in &rt.wrong {
                 ui.label(theme::muted(format!("{note}, so it is not used.")));
@@ -887,41 +905,33 @@ impl Home {
                         actions.push(Action::SetBackend(b, on));
                     }
                     if !available {
-                        ui.label(theme::muted(if rt.setup.ort.is_none() { "needs ONNX Runtime" } else { "not installed" }));
+                        ui.label(theme::muted(if rt.setup.ort.is_none() { "needs ONNX Runtime" } else { "not downloaded" }));
                     }
                 });
             }
             ui.label(theme::muted("The processor is used for whatever the others can't run. Changes apply after a restart."));
 
-            let installed = rt.installed();
             if !installed.is_empty() {
                 ui.add_space(8.0);
-                ui.label("Installed by photo-map");
-                for pack in &installed {
+                ui.label(theme::muted("Libraries that were already on this computer are used when they fit but never removed from here."));
+                ui.add_space(4.0);
+                if self.confirm_remove {
                     ui.horizontal(|ui| {
-                        ui.label(format!("{} {}", crate::packs::pack(&pack.id).map_or(pack.id.as_str(), |p| p.label), pack.version));
-                        ui.label(theme::muted(format!("{:.0} MB", pack.bytes as f64 / 1048576.0)));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.add_enabled(!rt.installing(), egui::Button::new("Remove")).clicked() {
-                                self.confirm_remove = Some(pack.id.clone());
-                            }
-                        });
+                        ui.label("Remove them all? The models run slower or not at all until they are downloaded again.");
+                        if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Remove")).clicked() {
+                            actions.push(Action::RemoveRuntime);
+                            self.confirm_remove = false;
+                        }
+                        if ui.button("Keep them").clicked() {
+                            self.confirm_remove = false;
+                        }
                     });
+                } else {
+                    let total: u64 = installed.iter().map(|p| p.bytes).sum();
+                    if ui.add_enabled(!rt.installing(), egui::Button::new(format!("Remove all ({:.0} MB)", total as f64 / 1048576.0))).clicked() {
+                        self.confirm_remove = true;
+                    }
                 }
-                ui.label(theme::muted("Libraries you installed yourself, or the system's, are used when they fit but never removed from here."));
-            }
-            if let Some(id) = self.confirm_remove.clone() {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(format!("Remove {id}? The models run slower or not at all until it is installed again."));
-                    if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Remove")).clicked() {
-                        actions.push(Action::RemovePack(id.clone()));
-                        self.confirm_remove = None;
-                    }
-                    if ui.button("Keep it").clicked() {
-                        self.confirm_remove = None;
-                    }
-                });
             }
             if let Some(e) = &rt.failure {
                 ui.add_space(8.0);
@@ -934,7 +944,7 @@ impl Home {
         });
         if close || response.should_close() {
             self.runtime_open = false;
-            self.confirm_remove = None;
+            self.confirm_remove = false;
         }
     }
 }
@@ -983,7 +993,8 @@ fn runtime_offer(ui: &mut Ui, rt: &Manager, dismissible: bool, actions: &mut Vec
             theme::card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(&offer.why);
-                ui.label(theme::muted(format!("Download: about {}. It is kept in the runtime folder of the app and can be removed from the Runtime window.", size_text(offer.mb()))));
+                let names: Vec<&str> = offer.packs.iter().map(|p| p.label).collect();
+                ui.label(theme::muted(format!("{}: about {} in all. It is kept in the runtime folder of the app and can be removed from the Runtime window.", names.join(", "), size_text(offer.mb()))));
                 ui.horizontal(|ui| {
                     if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new(offer.title).strong())).clicked() {
                         actions.push(Action::InstallRuntime);

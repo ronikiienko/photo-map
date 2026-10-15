@@ -128,63 +128,59 @@ impl Manager {
         self.job.is_some()
     }
 
-    /// What to suggest, given what is installed and what the machine has. Never anything for a machine with no usable card, except
-    /// the one thing nothing runs without.
+    /// What to suggest, given what is installed and what the machine has: everything still missing, in one download, so one button
+    /// gets the whole runtime. Never anything for a machine with no usable card, except the one thing nothing runs without.
     pub fn advice(&self) -> Advice {
         if self.restart || !self.card_known() {
             return Advice::Nothing;
         }
-        let usable_card = self.nvidia.as_ref().filter(|c| c.driver_ok());
-        if self.setup.ort.is_none() {
-            return match usable_card {
-                Some(card) => Advice::Offer(Offer {
-                    packs: vec![&packs::ONNXRUNTIME_GPU, &packs::CUDA, &packs::CUDNN],
-                    title: "Download GPU acceleration",
-                    why: format!("The models need ONNX Runtime, which is not installed. {} was found; this installs the version that uses it, with the NVIDIA libraries it needs.", card.name),
-                }),
-                None => Advice::Offer(Offer {
-                    packs: vec![packs::onnxruntime_cpu()],
-                    title: "Download ONNX Runtime",
-                    why: if cfg!(target_os = "macos") {
-                        "The models need ONNX Runtime, which is not installed. This installs the version for this Mac: it runs on the processor and on the Apple chip.".into()
-                    } else {
-                        "The models need ONNX Runtime, which is not installed. This installs the version that runs on the processor.".into()
-                    },
-                }),
-            };
-        }
-        if let Some(card) = &self.nvidia {
-            if !card.driver_ok() {
-                return Advice::Driver(format!(
-                    "{} was found, but its driver only supports CUDA {} and CUDA 13 is needed to use it. Update the NVIDIA driver; until then the models run on the processor.",
-                    card.name,
-                    cuda_version(card.driver_cuda)
-                ));
-            }
-            if self.setup.gpu.is_none() || !self.setup.ort_cuda {
-                let mut missing = Vec::new();
-                if !self.setup.ort_cuda {
-                    missing.push(&packs::ONNXRUNTIME_GPU);
+        let Some(card) = self.nvidia.as_ref().filter(|c| c.driver_ok()) else {
+            if let Some(card) = &self.nvidia {
+                if self.setup.ort.is_some() {
+                    return Advice::Driver(format!(
+                        "{} was found, but its driver only supports CUDA {} and CUDA 13 is needed to use it. Update the NVIDIA driver; until then the models run on the processor.",
+                        card.name,
+                        cuda_version(card.driver_cuda)
+                    ));
                 }
-                if self.setup.gpu.is_none() {
-                    missing.push(&packs::CUDA);
-                    missing.push(&packs::CUDNN);
-                }
-                return Advice::Offer(Offer {
-                    packs: missing,
-                    title: "Download GPU acceleration",
-                    why: format!("{} was found, but the libraries to run the models on it are not installed, so they run on the processor.", card.name),
-                });
             }
-            if self.setup.tensorrt.is_none() && self.setup.ort_tensorrt {
-                return Advice::Offer(Offer {
-                    packs: vec![&packs::TENSORRT],
-                    title: "Download TensorRT",
-                    why: "TensorRT builds the photo encoder for your card (the first time a model is used, once). The models work without it.".into(),
-                });
+            if self.setup.ort.is_some() {
+                return Advice::Nothing;
             }
+            return Advice::Offer(Offer {
+                packs: vec![packs::onnxruntime_cpu()],
+                title: "Download ONNX Runtime",
+                why: if cfg!(target_os = "macos") {
+                    "The models need ONNX Runtime, which has not been downloaded. This downloads the version for this Mac: it runs on the processor and on the Apple chip.".into()
+                } else {
+                    "The models need ONNX Runtime, which has not been downloaded. This downloads the version that runs on the processor.".into()
+                },
+            });
+        };
+        let mut missing = Vec::new();
+        if !self.setup.ort_cuda {
+            missing.push(&packs::ONNXRUNTIME_GPU);
         }
-        Advice::Nothing
+        if self.setup.gpu.is_none() {
+            missing.push(&packs::CUDA);
+            missing.push(&packs::CUDNN);
+        }
+        // our ONNX Runtime pack can use TensorRT; one found on the computer may not
+        if self.setup.tensorrt.is_none() && (self.setup.ort_tensorrt || !self.setup.ort_cuda) {
+            missing.push(&packs::TENSORRT);
+        }
+        if missing.is_empty() {
+            return Advice::Nothing;
+        }
+        let why = if self.setup.ort.is_none() {
+            format!("The models need ONNX Runtime, which has not been downloaded. {} was found; this downloads the version that uses it, with the NVIDIA libraries it needs.", card.name)
+        } else if missing.len() == 1 && missing[0].id == packs::TENSORRT.id {
+            "TensorRT builds the photo encoder for your card (the first time a model is used, once). The models work without it.".into()
+        } else {
+            format!("{} was found, but the libraries to run the models on it are not all downloaded, so they run on the processor.", card.name)
+        };
+        let title = if self.setup.ort.is_none() { "Download ONNX Runtime and GPU acceleration" } else { "Download GPU acceleration" };
+        Advice::Offer(Offer { packs: missing, title, why })
     }
 
     /// Whether the offer should be shown where it can be dismissed (the New map form).
@@ -240,15 +236,15 @@ impl Manager {
         }
     }
 
-    /// Remove a pack this program installed.
-    pub fn remove(&mut self, id: &str) {
-        match packs::remove(&self.root, id) {
-            Ok(()) => {
-                self.failure = None;
-                self.restart = true; // what is loaded stays loaded until the program is restarted
+    /// Remove every pack this program downloaded.
+    pub fn remove_all(&mut self) {
+        self.failure = None;
+        for pack in packs::installed(&self.root) {
+            if let Err(e) = packs::remove(&self.root, &pack.id) {
+                self.failure = Some(e);
             }
-            Err(e) => self.failure = Some(e),
         }
+        self.restart = true; // what is loaded stays loaded until the program is restarted
         self.refresh();
     }
 
@@ -260,8 +256,8 @@ impl Manager {
 /// Where a set of libraries is from, in words.
 pub fn describe(place: &Place) -> String {
     match &place.source {
-        Source::Managed(_) => format!("installed by photo-map ({})", place.dir.display()),
-        Source::Project => format!("found in {} (not installed by photo-map)", place.dir.display()),
+        Source::Managed(_) => format!("downloaded by photo-map ({})", place.dir.display()),
+        Source::Project => format!("found in {} (not downloaded by photo-map)", place.dir.display()),
         Source::Override => format!("from PHOTO_MAP_RUNTIME ({})", place.dir.display()),
         Source::System => format!("found on this computer ({})", place.dir.display()),
     }
@@ -304,25 +300,28 @@ mod tests {
     #[test]
     fn nothing_runs_without_onnx_runtime_so_that_is_offered_first() {
         assert_eq!(ids(manager(Setup::default(), None).advice()), [packs::onnxruntime_cpu().id]);
-        assert_eq!(ids(manager(Setup::default(), Some(card(13000))).advice()), ["onnxruntime-gpu", "cuda-13", "cudnn-9"]);
+        assert_eq!(ids(manager(Setup::default(), Some(card(13000))).advice()), ["onnxruntime-gpu", "cuda-13", "cudnn-9", "tensorrt-10"]);
     }
 
     #[test]
     fn a_card_that_is_not_used_gets_the_pieces_that_are_missing() {
         let cpu_only = Setup { ort: Some(place("ort")), ..Setup::default() };
-        assert_eq!(ids(manager(cpu_only, Some(card(13000))).advice()), ["onnxruntime-gpu", "cuda-13", "cudnn-9"]);
+        assert_eq!(ids(manager(cpu_only, Some(card(13000))).advice()), ["onnxruntime-gpu", "cuda-13", "cudnn-9", "tensorrt-10"]);
         let no_cuda = Setup { gpu: None, ..gpu_setup(false) };
-        assert_eq!(ids(manager(no_cuda, Some(card(13000))).advice()), ["cuda-13", "cudnn-9"]);
+        assert_eq!(ids(manager(no_cuda, Some(card(13000))).advice()), ["cuda-13", "cudnn-9", "tensorrt-10"]);
+        let no_cuda_with_trt = Setup { gpu: None, ..gpu_setup(true) };
+        assert_eq!(ids(manager(no_cuda_with_trt, Some(card(13000))).advice()), ["cuda-13", "cudnn-9"]);
     }
 
     #[test]
     fn an_old_driver_is_told_to_update_not_offered_a_download() {
         let cpu_only = Setup { ort: Some(place("ort")), ..Setup::default() };
         assert_eq!(ids(manager(cpu_only, Some(card(12040))).advice()), ["driver"]);
+        assert_eq!(ids(manager(Setup::default(), Some(card(12040))).advice()), [packs::onnxruntime_cpu().id]);
     }
 
     #[test]
-    fn tensorrt_is_offered_only_when_the_rest_works_and_it_is_missing() {
+    fn tensorrt_alone_is_offered_when_only_it_is_missing() {
         assert_eq!(ids(manager(gpu_setup(false), Some(card(13000))).advice()), ["tensorrt-10"]);
         assert!(ids(manager(gpu_setup(true), Some(card(13000))).advice()).is_empty());
     }

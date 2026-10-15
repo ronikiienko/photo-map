@@ -150,7 +150,7 @@ impl Runtime {
     pub fn start(root: &Path) -> Result<Self> {
         let setup = Setup::detect(root);
         let Some(ort_place) = &setup.ort else {
-            return Err(format!("ONNX Runtime is not installed (looked in {})", root.join("runtime").display()));
+            return Err(format!("ONNX Runtime has not been downloaded (looked in {})", root.join("runtime").display()));
         };
         let onnx = ort_place.dir.join(runtime::ORT_LIB);
         let chosen = crate::backends::Choice::load(root);

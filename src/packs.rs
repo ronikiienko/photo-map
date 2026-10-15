@@ -147,15 +147,12 @@ pub const TENSORRT: Pack = Pack {
     }],
 };
 
+#[cfg(test)]
 pub const ALL: [&Pack; 6] = [&ONNXRUNTIME, &ONNXRUNTIME_MACOS, &ONNXRUNTIME_GPU, &CUDA, &CUDNN, &TENSORRT];
 
 /// The ONNX Runtime for a machine with no graphics card of the kind the other packs are for: this operating system's own build.
 pub fn onnxruntime_cpu() -> &'static Pack {
     if cfg!(target_os = "macos") { &ONNXRUNTIME_MACOS } else { &ONNXRUNTIME }
-}
-
-pub fn pack(id: &str) -> Option<&'static Pack> {
-    ALL.iter().copied().find(|p| p.id == id)
 }
 
 /// The files of a pack's wheel to take, for this card. Only TensorRT's list depends on it.
@@ -216,7 +213,7 @@ pub fn installed(root: &Path) -> Vec<Installed> {
 /// Remove a pack this program installed: exactly the files its `pack.json` lists. A folder without one is left alone.
 pub fn remove(root: &Path, id: &str) -> Result<(), String> {
     let dir = root.join("runtime").join(id);
-    let manifest: Manifest = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST)).map_err(|_| format!("{id} was not installed by this program; it is left alone"))?)
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST)).map_err(|_| format!("{id} was not downloaded by this program; it is left alone"))?)
         .map_err(|e| format!("reading {}: {e}", dir.join(MANIFEST).display()))?;
     if manifest.id != id {
         return Err(format!("{} belongs to {}, not {id}", dir.display(), manifest.id));
@@ -366,7 +363,7 @@ pub fn install(root: &Path, pack: &Pack, card: Option<&Nvidia>, stop: &AtomicBoo
     let runtime = root.join("runtime");
     let dest = runtime.join(pack.id);
     if dest.exists() && installed_id(&dest).as_deref() != Some(pack.id) {
-        return Err(format!("{} is there already and was not installed by this program; it is left alone", dest.display()));
+        return Err(format!("{} is there already and was not downloaded by this program; it is left alone", dest.display()));
     }
     let partial = runtime.join(format!(".{}.partial", pack.id));
     std::fs::create_dir_all(&partial).map_err(|e| format!("making {}: {e}", partial.display()))?;
@@ -381,7 +378,7 @@ pub fn install(root: &Path, pack: &Pack, card: Option<&Nvidia>, stop: &AtomicBoo
             let fixed = &picked[..wheel.wants.len()];
             let got = fingerprint(&mut zip, fixed)?;
             if got != wheel.pin {
-                return Err(format!("{} is not the file this version expects (fingerprint {got}); not installing it", wheel.url));
+                return Err(format!("{} is not the file this version expects (fingerprint {got}); not using it", wheel.url));
             }
         }
         let total: u64 = picked.iter().map(|(i, _)| zip.by_index_raw(*i).map(|e| e.compressed_size()).unwrap_or(0)).sum();

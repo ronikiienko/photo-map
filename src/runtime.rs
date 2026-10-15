@@ -200,7 +200,7 @@ impl Setup {
             }
             let major_wanted = wanted.rsplit('.').next().unwrap_or_default();
             if !others.is_empty() {
-                notes.push(format!("{what} {} is installed on this computer, but this program needs {what} {major_wanted}", others.join(" and ")));
+                notes.push(format!("{what} {} is on this computer, but this program needs {what} {major_wanted}", others.join(" and ")));
             }
         }
         notes

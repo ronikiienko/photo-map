@@ -447,7 +447,7 @@ impl Viewer {
             }
             Action::StopInstall => self.runtime.stop(),
             Action::SetBackend(b, on) => self.runtime.set_backend(b, on),
-            Action::RemovePack(id) => self.runtime.remove(&id),
+            Action::RemoveRuntime => self.runtime.remove_all(),
             Action::GetModel(id) => self.store.get(&id),
             Action::StopModelFetch => self.store.stop(),
             Action::CountModels => self.store.count(),
