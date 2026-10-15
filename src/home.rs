@@ -704,7 +704,7 @@ impl Home {
             }
         }
         // a click on the backdrop does not close this one (what you typed would be lost): Cancel or Esc does
-        theme::modal(ctx, "new-map", 480.0, Some("New map"), |ui| {
+        theme::modal_with_footer(ctx, "new-map", 480.0, Some("New map"), |ui| {
             // ONNX Runtime is not optional: nothing runs without it, so its offer is always shown (and can't be dismissed) until it is there
             let runtime_missing = rt.setup.ort.is_none();
             if runtime_missing || rt.nagging() || rt.installing() {
@@ -826,10 +826,15 @@ impl Home {
             ui.add_space(8.0);
             ui.label(theme::muted("It can take a while for many photos. You can pause, close the app and carry on later."));
             ui.add_space(8.0);
+            let ok = problem.is_none() && !sources.is_empty() && nm.found.is_some_and(|f| f.photos > 0 || (nm.with_videos && f.videos > f.unreadable)) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
+            let action = Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone(), videos: nm.found.filter(|f| nm.with_videos && f.videos > f.unreadable).map(|_| build::VideoSettings { every: nm.video_every, ..Default::default() }) };
+            (ok, Some(action))
+        }, |ui, (ok, action)| {
+            // under the scrolling form, always in view
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let ok = problem.is_none() && !sources.is_empty() && nm.found.is_some_and(|f| f.photos > 0 || (nm.with_videos && f.videos > f.unreadable)) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
-                if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
-                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone(), videos: nm.found.filter(|f| nm.with_videos && f.videos > f.unreadable).map(|_| build::VideoSettings { every: nm.video_every, ..Default::default() }) });
+                if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), *ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
+                    create = action.take();
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;

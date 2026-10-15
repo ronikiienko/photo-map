@@ -185,7 +185,6 @@ struct Job {
 /// The video's pictures, one every `every` seconds (the first at 0), in order, each handed to `each`, which says whether to go on.
 /// The groups are decoded side by side, a few at a time.
 pub fn frames(path: &Path, every: f64, mut each: impl FnMut(VideoFrame) -> bool) -> Result<()> {
-    use rayon::prelude::*;
     if every.is_nan() || every <= 0.0 {
         return Err("the interval between frames must be above zero".into());
     }
@@ -211,18 +210,52 @@ pub fn frames(path: &Path, every: f64, mut each: impl FnMut(VideoFrame) -> bool)
             jobs.push(Job { from, to, keep });
         }
     }
-    // a few groups at a time: their pictures wait in memory until they are handed over
-    for chunk in jobs.chunks(rayon::current_num_threads().max(1) * 2) {
-        let done: Vec<Result<Vec<VideoFrame>>> = chunk.par_iter().map(|job| decode_group(&video, job)).collect();
-        for frames in done {
-            for frame in frames? {
-                if !each(frame) {
-                    return Ok(());
+    // The groups are decoded side by side, a few ahead of the one being handed over (their pictures wait in memory until their turn);
+    // each is handed over as soon as it and all before it are done, so pictures keep coming while the rest are being decoded.
+    let ahead = rayon::current_num_threads().max(1) * 2;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<Vec<VideoFrame>>)>();
+    let mut outcome = Ok(());
+    rayon::in_place_scope(|scope| {
+        let launch = |k: usize| {
+            let (tx, video, job, stop) = (tx.clone(), &video, &jobs[k], &stop);
+            scope.spawn(move |_| {
+                let result = if stop.load(std::sync::atomic::Ordering::Relaxed) { Ok(Vec::new()) } else { decode_group(video, job) };
+                let _ = tx.send((k, result));
+            });
+        };
+        let mut launched = ahead.min(jobs.len());
+        (0..launched).for_each(&launch);
+        let mut waiting: std::collections::HashMap<usize, Result<Vec<VideoFrame>>> = std::collections::HashMap::new();
+        let mut next = 0;
+        while next < jobs.len() {
+            while !waiting.contains_key(&next) {
+                let Ok((k, result)) = rx.recv() else { return };
+                waiting.insert(k, result);
+                if launched < jobs.len() {
+                    launch(launched);
+                    launched += 1;
                 }
             }
+            match waiting.remove(&next).unwrap() {
+                Ok(frames) => {
+                    for frame in frames {
+                        if !each(frame) {
+                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    outcome = Err(e);
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+            }
+            next += 1;
         }
-    }
-    Ok(())
+    });
+    outcome
 }
 
 /// The wanted pictures of one group.
@@ -237,20 +270,21 @@ fn decode_group(video: &Opened, job: &Job) -> Result<Vec<VideoFrame>> {
     let last = job.keep.last().map_or(0, |k| k.0);
     let mut out = Vec::with_capacity(job.keep.len());
     let mut count = 0usize;
+    let wanted = |n: usize| job.keep.iter().any(|k| k.0 == n);
     let mut give = |image: RgbaImage, n: usize| {
         if let Some((_, seconds)) = job.keep.iter().find(|k| k.0 == n) {
             out.push(VideoFrame { seconds: *seconds, image: turn(image, video.turns) });
         }
     };
     match video.codec {
-        Codec::H264 => decode_h264(video, &packets, last, &mut count, &mut give)?,
-        Codec::H265 => decode_h265(video, &packets, last, &mut count, &mut give)?,
+        Codec::H264 => decode_h264(video, &packets, last, &mut count, &wanted, &mut give)?,
+        Codec::H265 => decode_h265(video, &packets, last, &mut count, &wanted, &mut give)?,
     }
     Ok(out)
 }
 
 /// Decode one group with OpenH264, giving each picture (in the order they show) until `last`.
-fn decode_h264(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usize, give: &mut dyn FnMut(RgbaImage, usize)) -> Result<()> {
+fn decode_h264(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usize, wanted: &dyn Fn(usize) -> bool, give: &mut dyn FnMut(RgbaImage, usize)) -> Result<()> {
     use openh264::decoder::{Decoder, DecoderConfig, Flush};
     use openh264::formats::YUVSource;
     let mut decoder = Decoder::with_api_config(openh264::OpenH264API::from_source(), DecoderConfig::new().flush_after_decode(Flush::NoFlush)).map_err(|e| format!("starting the H.264 decoder: {e}"))?;
@@ -258,6 +292,9 @@ fn decode_h264(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usi
         let n = *count;
         *count += 1;
         // only the wanted pictures are made into colours
+        if !wanted(n) {
+            return;
+        }
         let (w, h) = yuv.dimensions();
         let mut rgba = vec![0u8; w * h * 4];
         yuv.write_rgba8(&mut rgba);
@@ -284,13 +321,15 @@ fn decode_h264(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usi
 }
 
 /// Decode one group with the pure-Rust H.265 decoder.
-fn decode_h265(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usize, give: &mut dyn FnMut(RgbaImage, usize)) -> Result<()> {
+fn decode_h265(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usize, wanted: &dyn Fn(usize) -> bool, give: &mut dyn FnMut(RgbaImage, usize)) -> Result<()> {
     let mut decoder = rusty_h265::Decoder::new();
     let drain = |decoder: &mut rusty_h265::Decoder, count: &mut usize, give: &mut dyn FnMut(RgbaImage, usize)| -> bool {
         while let Ok(frame) = decoder.next_frame() {
             let n = *count;
             *count += 1;
-            give(h265_rgba(&frame.picture), n);
+            if wanted(n) {
+                give(h265_rgba(&frame.picture), n);
+            }
             if *count > last {
                 return true;
             }
