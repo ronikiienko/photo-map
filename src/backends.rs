@@ -168,11 +168,13 @@ mod tests {
     }
 
     #[test]
-    fn one_at_a_time_and_the_processor_when_the_choice_is_not_there() {
+    fn one_at_a_time_and_the_best_available_when_the_choice_is_not_there() {
         let setup = with_ort();
         let mut c = Choice(None);
         c.set(Backend::Cuda);
-        assert!(c.is_on(Backend::Cpu, &setup) && !c.cuda(&setup)); // no CUDA downloaded
+        // no CUDA here: the processor, or on a Mac the neural engine
+        let fallback = if cfg!(target_os = "macos") { Backend::AppleNeural } else { Backend::Cpu };
+        assert!(c.is_on(fallback, &setup) && !c.cuda(&setup));
         c.set(Backend::Cpu);
         assert_eq!(Backend::ALL.iter().filter(|b| c.is_on(**b, &setup)).count(), 1);
     }

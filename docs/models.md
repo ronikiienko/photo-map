@@ -25,7 +25,7 @@ computer itself. Nothing changed is ever hosted.
 | Processor | photo encoder in fp32 (`vision_model_fp16.processor.onnx`) | photo encoder and text model in fp32 |
 | CUDA | as published | fused attention (`vision_encoder_fp16.cuda.onnx`) |
 | TensorRT | layer norms in one piece (`vision_model_fp16.tensorrt.onnx`) | standard operators + separate pooling (`.tensorrt.onnx`, `.pool.onnx`) |
-| CoreML | first convolution's padding written out (`vision_model_fp16.coreml.onnx`) | as published |
+| CoreML | first convolution's padding written out, every `MatMul` by a weight a `Gemm` (`vision_model_fp16.coreml.onnx`) | standard operators, norms spelled out, separate pooling (`vision_encoder_fp16.coreml.onnx`, `.pool.onnx`); runs on the graphics chip |
 
 - **Processor, fp32**: ONNX Runtime's fp16 arithmetic on a processor is slower. SigLIP 256's photo encoder: 6.7 photos/s fp16,
   8.3 fp32 (Ryzen 5 5600H), identical vectors; Gemma was about twice as fast in fp32 on an M1. Every fp16 number is an fp32 number,
@@ -40,8 +40,23 @@ computer itself. Nothing changed is ever hosted.
   ONNX Runtime fuses that on the processor and CUDA, but TensorRT squares in fp16 and overflows: the vectors came out wrong
   (cosine 0.48 to the right ones). Each norm becomes one `LayerNormalization` (opset 17), with the same divide-by-16.
 - **SigLIP, CoreML**: ONNX Runtime's CoreML provider refuses a convolution without explicit padding ("Required param 'pad' is
-  missing"); the file is valid (no padding means zeros). The patch writes `pads = [0, 0, 0, 0]`. The Mac earlier used a bigger
-  rewrite (the convolution as reshape, transpose and matrix product); whether the small patch is enough is to be checked on a Mac.
+  missing"); the file is valid (no padding means zeros), and it says `auto_pad = VALID`, which the patch replaces by
+  `pads = [0, 0, 0, 0]`. That was enough for CoreML to take it (checked on an M-series Mac).
+- **SigLIP, CoreML, `Gemm` for `MatMul`** (`weights_as_gemm`): the provider writes a `MatMul`'s weight into CoreML's program as
+  text (a transposed copy, every number as a hex float), so SigLIP 256's `model.mil` was 1.1 GB, which CoreML parses and
+  serializes again at every load: **48 s** with the compiled network already cached, 2 to 3 minutes the first time (the same with
+  ONNX Runtime 1.29 from Python). A `Gemm` with `transB` keeps its weight in the binary weights file: `model.mil` 0.3 MB,
+  **1.8 s** a load (0.2 s of it CoreML), **16 s** the first time. The speed is the same (70.4 photos/s against 70.9 without it). The vectors are the same (cosine 0.99997 to the processor's).
+  SigLIP 256 on the neural engine: 71 photos/s, graphics 6, all parts 65, processor (fp32) 4, on 24 photos. SigLIP 512 on the neural
+  engine: 8.5 photos/s, 85 s the first load, 2 s after.
+- **Gemma, CoreML**: the published photo encoder uses ONNX Runtime's own operators (`MultiHeadAttention`, `SimplifiedLayerNormalization`),
+  which CoreML's provider does not take: the network came out as about 100 CoreML pieces, each compiled and every hand-over through
+  the processor (0.1 photos/s, longer than the processor alone: 0.2). The CoreML patch is the TensorRT one (attention and the layer
+  split from the pooling, which stays on the processor) with each norm spelled out (square, mean, add epsilon, square root,
+  divide, scale) in place of `RMSNormalization`, which CoreML does not have either: 2 pieces, 1349 of 1356 nodes. The neural
+  engine's compiler fails on it after 15 minutes (`ANECCompile() FAILED`), so Gemma's layers run on the graphics chip whatever
+  Apple option is chosen: **1.6 photos/s** (the processor 0.2), 6 s to load, the vectors' cosine to the processor's 0.99997.
+  What is left per photo is the text model on the processor.
 - Patched networks point at the publisher's weights where those are in a separate file (Gemma), so they take little room; SigLIP's
   weights are inside its files, so its patched copies are full copies (190 MB, or 370 MB in fp32).
 - ONNX files are read and written with the `onnx-protobuf` crate (pure Rust; it needs `protobuf` pinned to 3.4.0).
@@ -62,7 +77,7 @@ So maps made before keep working ("everything from usb" was made on TensorRT: th
 
 ## Open
 
-- The Mac: CoreML with the small SigLIP patch, Gemma on CoreML, speeds (see docs/macos-models-task.md).
+- The Mac: the text model of Gemma (it reads every photo, on the processor), maybe on CoreML too; the rest of the speeds (see docs/macos-models-task.md).
 - `tools/onnx_fuse_attention.py`, `tools/onnx_trt_ready.py` and `tools/siglip_export.py` are no longer used by anything.
 - Report the Conv/pads problem to ONNX Runtime.
 - In an installed Mac app, `maps/`, `runtime/` and `.cache/` should live in `~/Library/Application Support/photo-map` (and the

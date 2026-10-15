@@ -14,7 +14,8 @@
 //!   float32 (`to_float32`). ONNX Runtime's float16 arithmetic on a processor is slower: SigLIP 256 made 6.7 photos/s in float16
 //!   and 8.3 in float32 on a Ryzen 5 5600H (the same vectors); Gemma about twice as fast on an M1. Search words alone stay float16.
 //! - SigLIP on CoreML (`SIGLIP_COREML`): the first layer's convolution gets its padding written out (zeros, which is what no padding
-//!   means): ONNX Runtime's CoreML provider refuses a convolution without it.
+//!   means): ONNX Runtime's CoreML provider refuses a convolution without it. And every matrix product by a weight becomes a `Gemm`
+//!   (`weights_as_gemm`): the provider writes a product's weight into CoreML's program as text, which CoreML parses at every load.
 
 use onnx_protobuf::{AttributeProto, Message, ModelProto, NodeProto, TensorProto, attribute_proto::AttributeType, tensor_proto::DataType};
 use std::collections::{HashMap, HashSet};
@@ -24,6 +25,7 @@ type Result<T> = std::result::Result<T, String>;
 
 pub const GEMMA_CUDA: &str = "onnx/vision_encoder_fp16.cuda.onnx";
 pub const GEMMA_TENSORRT: &str = "onnx/vision_encoder_fp16.tensorrt.onnx";
+pub const GEMMA_COREML: &str = "onnx/vision_encoder_fp16.coreml.onnx";
 pub const GEMMA_POOL: &str = "onnx/vision_encoder_fp16.pool.onnx";
 pub const SIGLIP_COREML: &str = "onnx/vision_model_fp16.coreml.onnx";
 pub const SIGLIP_TENSORRT: &str = "onnx/vision_model_fp16.tensorrt.onnx";
@@ -41,10 +43,10 @@ pub fn ensure(dir: &Path, name: &str) -> Result<PathBuf> {
     }
     match name {
         GEMMA_CUDA => save(&gemma_fused(load(&dir.join(GEMMA_VISION))?)?, &path)?,
-        GEMMA_TENSORRT | GEMMA_POOL => {
-            let (layers, pool) = gemma_tensorrt(gemma_fused(load(&dir.join(GEMMA_VISION))?)?)?;
+        GEMMA_TENSORRT | GEMMA_POOL | GEMMA_COREML => {
+            let (layers, pool) = gemma_tensorrt(gemma_fused(load(&dir.join(GEMMA_VISION))?)?, name == GEMMA_COREML)?;
             save(&pool, &dir.join(GEMMA_POOL))?;
-            save(&layers, &dir.join(GEMMA_TENSORRT))?;
+            save(&layers, &dir.join(if name == GEMMA_COREML { GEMMA_COREML } else { GEMMA_TENSORRT }))?;
         }
         SIGLIP_COREML => save(&siglip_coreml(load(&dir.join("onnx/vision_model_fp16.onnx"))?)?, &path)?,
         SIGLIP_TENSORRT => save(&layer_norms(load(&dir.join("onnx/vision_model_fp16.onnx"))?)?, &path)?,
@@ -209,7 +211,7 @@ fn gemma_fused(mut model: ModelProto) -> Result<ModelProto> {
 
 /// See docs/models.md. Returns the transformer layers (for TensorRT, their result as float32 "hidden")
 /// and the pooling after them (for CUDA, from "hidden" and the patches' positions).
-fn gemma_tensorrt(mut model: ModelProto) -> Result<(ModelProto, ModelProto)> {
+fn gemma_tensorrt(mut model: ModelProto, spelled_norms: bool) -> Result<(ModelProto, ModelProto)> {
     // the sum of squares in a norm overflows TensorRT's float16 once a value is above 256: the input is divided by this first, and
     // epsilon by its square, which gives exactly the same result
     const SHRINK: f32 = 16.0;
@@ -218,7 +220,7 @@ fn gemma_tensorrt(mut model: ModelProto) -> Result<(ModelProto, ModelProto)> {
     // the mask bias is an Expand of a [batch, 1, 1, length] tensor: the small one broadcasts, no need for the big one
     let expanded: HashMap<String, String> = g.node.iter().filter(|n| n.op_type == "Expand").map(|n| (n.output[0].clone(), n.input[0].clone())).collect();
     let mut nodes = Vec::with_capacity(g.node.len() * 2);
-    let mut extra = vec![TensorProto { name: "trt_shrink".into(), data_type: DataType::FLOAT16 as i32, raw_data: half::f16::from_f32(1.0 / SHRINK).to_le_bytes().to_vec(), ..Default::default() }];
+    let mut extra = vec![int64s("trt_last_axis", &[-1]), TensorProto { name: "trt_shrink".into(), data_type: DataType::FLOAT16 as i32, raw_data: half::f16::from_f32(1.0 / SHRINK).to_le_bytes().to_vec(), ..Default::default() }];
     let (mut norms, mut attentions) = (0, 0);
     for n in std::mem::take(&mut g.node) {
         match n.op_type.as_str() {
@@ -230,7 +232,23 @@ fn gemma_tensorrt(mut model: ModelProto) -> Result<(ModelProto, ModelProto)> {
                 }
                 let small = format!("trt_norm{norms}_small");
                 nodes.push(node("Mul", &[&n.input[0], "trt_shrink"], &[&small], &format!("trt_norm{norms}_shrink"), vec![]));
-                nodes.push(node("RMSNormalization", &[&small, &n.input[1]], &[&n.output[0]], &format!("trt_norm{norms}"), vec![int("axis", -1), float("epsilon", eps / (SHRINK * SHRINK)), int("stash_type", 1)]));
+                let eps = eps / (SHRINK * SHRINK);
+                if spelled_norms {
+                    // CoreML has no RMSNormalization: x / sqrt(mean(x^2) + epsilon) * scale, spelled out
+                    let p = format!("trt_norm{norms}_");
+                    let s = |x: &str| format!("{p}{x}");
+                    extra.push(TensorProto { name: s("eps"), data_type: DataType::FLOAT16 as i32, raw_data: half::f16::from_f32(eps).to_le_bytes().to_vec(), ..Default::default() });
+                    nodes.extend([
+                        node("Mul", &[&small, &small], &[&s("square")], &s("sq"), vec![]),
+                        node("ReduceMean", &[&s("square"), "trt_last_axis"], &[&s("mean")], &s("mean_of"), vec![int("keepdims", 1)]),
+                        node("Add", &[&s("mean"), &s("eps")], &[&s("variance")], &s("plus_eps"), vec![]),
+                        node("Sqrt", &[&s("variance")], &[&s("root")], &s("root_of"), vec![]),
+                        node("Div", &[&small, &s("root")], &[&s("unit")], &s("divide"), vec![]),
+                        node("Mul", &[&s("unit"), &n.input[1]], &[&n.output[0]], &s("scale"), vec![]),
+                    ]);
+                } else {
+                    nodes.push(node("RMSNormalization", &[&small, &n.input[1]], &[&n.output[0]], &format!("trt_norm{norms}"), vec![int("axis", -1), float("epsilon", eps), int("stash_type", 1)]));
+                }
             }
             "MultiHeadAttention" => {
                 attentions += 1;
@@ -270,7 +288,7 @@ fn gemma_tensorrt(mut model: ModelProto) -> Result<(ModelProto, ModelProto)> {
     g.initializer.extend(extra);
     g.value_info.clear();
     for o in &mut model.opset_import {
-        if o.domain.is_empty() {
+        if o.domain.is_empty() && !spelled_norms {
             o.version = 23; // RMSNormalization is new in opset 23
         }
     }
@@ -432,12 +450,15 @@ fn layer_norms(mut model: ModelProto) -> Result<ModelProto> {
     Ok(model)
 }
 
-/// The convolutions get their padding written out (zeros), unless they say how to pad already.
+/// The convolutions get their padding written out as zeros (`pads`), in place of "VALID" (which CoreML does not take) or nothing;
+/// a convolution that pads some other way is left as it is. Then the matrix products by a weight become `Gemm`s (`weights_as_gemm`).
 fn siglip_coreml(mut model: ModelProto) -> Result<ModelProto> {
     let g = model.graph.as_mut().ok_or("no graph")?;
     let mut changed = 0;
     for n in g.node.iter_mut().filter(|n| n.op_type == "Conv") {
-        if attribute(n, "pads").is_none() && attribute(n, "auto_pad").is_none_or(|a| a.s == b"NOTSET") {
+        let auto = attribute(n, "auto_pad").map_or(&b"NOTSET"[..], |a| &a.s[..]);
+        if attribute(n, "pads").is_none() && (auto == b"NOTSET" || auto == b"VALID") {
+            n.attribute.retain(|a| a.name != "auto_pad");
             n.attribute.push(ints("pads", &[0, 0, 0, 0]));
             changed += 1;
         }
@@ -445,7 +466,74 @@ fn siglip_coreml(mut model: ModelProto) -> Result<ModelProto> {
     if changed == 0 {
         return Err("no convolution without padding: this is not the file the patch is for".into());
     }
+    if weights_as_gemm(g) == 0 {
+        return Err("no matrix product by a weight: this is not the file the patch is for".into());
+    }
     Ok(model)
+}
+
+/// Every `MatMul` of a tensor by a 2-D weight kept in the file becomes Reshape (to rows), `Gemm` with the weight turned the other
+/// way round (`transB`), Reshape back. The same numbers, but ONNX Runtime's CoreML provider writes a `MatMul`'s weight into the
+/// CoreML program as text (a transposed copy, every number spelled out: 1.1 GB for SigLIP 256, which CoreML parses again every
+/// time the model is loaded: 48 s, and 14 minutes the first time) while a `Gemm`'s weight goes to the binary weights file as it
+/// is (324 KB of program, loaded in 0.2 s, 14 s the first time). Returns how many were changed.
+fn weights_as_gemm(g: &mut onnx_protobuf::GraphProto) -> usize {
+    let weights: HashMap<String, usize> = g.initializer.iter().enumerate().map(|(i, t)| (t.name.clone(), i)).collect();
+    let mut count = 0;
+    let mut nodes = Vec::with_capacity(g.node.len() * 2);
+    for n in std::mem::take(&mut g.node) {
+        let weight = (n.op_type == "MatMul").then(|| weights.get(&n.input[1]).copied()).flatten().and_then(|i| turned(&g.initializer[i]));
+        let Some(turned) = weight else {
+            nodes.push(n);
+            continue;
+        };
+        let (rows, columns) = (turned.dims[1], turned.dims[0]); // turned: columns x rows of the weight
+        let k = format!("mm{count}");
+        let (flat, product, shape, lead, shape_lead) = (format!("{k}_flat"), format!("{k}_product"), format!("{k}_shape"), format!("{k}_lead"), format!("{k}_lead_dims"));
+        let new = |name: &str, values: &[i64]| int64s(&format!("{k}_{name}"), values);
+        let weight_name = format!("{}_turned", n.input[1]);
+        g.initializer.extend([
+            TensorProto { name: weight_name.clone(), ..turned },
+            new("rows", &[-1, rows]),
+            new("from", &[0]),
+            new("to", &[2]),
+            new("columns", &[columns]),
+        ]);
+        nodes.extend([
+            node("Reshape", &[&n.input[0], &format!("{k}_rows")], &[&flat], &format!("{k}_to_rows"), vec![]),
+            node("Gemm", &[&flat, &weight_name], &[&product], &format!("{k}_gemm"), vec![int("transB", 1)]),
+            node("Shape", &[&n.input[0]], &[&shape], &format!("{k}_shape_of"), vec![]),
+            node("Slice", &[&shape, &format!("{k}_from"), &format!("{k}_to")], &[&lead], &format!("{k}_lead_of"), vec![]),
+            node("Concat", &[&lead, &format!("{k}_columns")], &[&shape_lead], &format!("{k}_new_shape"), vec![int("axis", 0)]),
+            node("Reshape", &[&product, &shape_lead], &[&n.output[0]], &format!("{k}_back"), vec![]),
+        ]);
+        count += 1;
+    }
+    g.node = nodes;
+    let used: HashSet<String> = g.node.iter().flat_map(|n| n.input.iter().cloned()).chain(g.output.iter().map(|o| o.name.clone())).collect();
+    g.initializer.retain(|t| used.contains(&t.name));
+    g.value_info.clear();
+    count
+}
+
+/// A 2-D weight kept in the file itself (float16 or float32), turned over (rows and columns swapped).
+fn turned(t: &TensorProto) -> Option<TensorProto> {
+    let size = match t.data_type {
+        d if d == DataType::FLOAT16 as i32 => 2,
+        d if d == DataType::FLOAT as i32 => 4,
+        _ => return None,
+    };
+    if t.dims.len() != 2 || !t.external_data.is_empty() || t.raw_data.len() as i64 != t.dims[0] * t.dims[1] * size as i64 {
+        return None;
+    }
+    let (rows, columns) = (t.dims[0] as usize, t.dims[1] as usize);
+    let mut raw = vec![0u8; t.raw_data.len()];
+    for r in 0..rows {
+        for c in 0..columns {
+            raw[(c * rows + r) * size..][..size].copy_from_slice(&t.raw_data[(r * columns + c) * size..][..size]);
+        }
+    }
+    Some(TensorProto { data_type: t.data_type, dims: vec![t.dims[1], t.dims[0]], raw_data: raw, ..Default::default() })
 }
 
 /// The same network computing in float32: every float16 weight, constant and type made float32 (exactly: every float16 number is

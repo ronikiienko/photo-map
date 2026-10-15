@@ -260,14 +260,34 @@ impl Gemma {
                 }
             }
         }
-        // CUDA: the fused attention; the processor: float32; CoreML: as published (patch.rs)
-        let file = match (self.on_gpu, self.apple) {
-            (_, Some(_)) => self.model_dir.join("onnx/vision_encoder_fp16.onnx"),
-            (true, None) => crate::patch::ensure_or(&self.model_dir, crate::patch::GEMMA_CUDA, "onnx/vision_encoder_fp16.onnx"),
-            (false, None) => crate::patch::ensure_or(&self.model_dir, crate::patch::GEMMA_PROCESSOR, "onnx/vision_encoder_fp16.onnx"),
+        if self.apple.is_some() {
+            return self.open_coreml();
+        }
+        // CUDA: the fused attention; the processor: float32 (patch.rs)
+        let file = if self.on_gpu {
+            crate::patch::ensure_or(&self.model_dir, crate::patch::GEMMA_CUDA, "onnx/vision_encoder_fp16.onnx")
+        } else {
+            crate::patch::ensure_or(&self.model_dir, crate::patch::GEMMA_PROCESSOR, "onnx/vision_encoder_fp16.onnx")
         };
-        let session = vision_builder(&self.env, self.apple, &self.root.join(".cache/coreml/embeddinggemma-2"), &[("s11", TENSORRT_BATCH as i64), ("s35", PADDED as i64)]).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
+        let session = Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
         self.vision = Some(session);
+        Ok(())
+    }
+
+    /// CoreML takes the layers (standard operators only, `GEMMA_COREML`), on the graphics chip whatever Apple option is chosen: the
+    /// neural engine's compiler gives up on them (after 15 minutes). The pooling after them runs on the processor, as it runs on
+    /// CUDA beside TensorRT. As published, ONNX Runtime broke the network into about 100 pieces (its own operators are not
+    /// CoreML's), which took 0.1 photos/s and as many compilations.
+    fn open_coreml(&mut self) -> Result<()> {
+        let layers = crate::patch::ensure(&self.model_dir, crate::patch::GEMMA_COREML)?;
+        let pool = crate::patch::ensure(&self.model_dir, crate::patch::GEMMA_POOL)?;
+        let cache = self.root.join(".cache/coreml/embeddinggemma-2");
+        let layers = vision_builder(&self.env, Some(ep::coreml::ComputeUnits::CPUAndGPU), &cache, &[("s11", TENSORRT_BATCH as i64), ("s35", PADDED as i64)])
+            .and_then(|mut b| b.commit_from_file(&layers))
+            .map_err(err("loading the photo encoder on CoreML"))?;
+        let pool = Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&pool)).map_err(err("loading the photo pooling"))?;
+        self.vision = Some(layers);
+        self.pool = Some(pool);
         Ok(())
     }
 
