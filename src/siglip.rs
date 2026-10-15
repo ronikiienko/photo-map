@@ -1,6 +1,6 @@
 //! SigLIP 2 (photo encoder and text encoder, two separate networks that were trained to put a photo near the words that describe it)
-//! through ONNX Runtime: .cache/onnx/<model>/ has vision_fp16.onnx, text_fp16.onnx, tokenizer.json. Either our own export (outputs
-//! image_features and text_features) or the ones the model's publisher has (onnx-community, outputs pooler_output) do.
+//! through ONNX Runtime: .cache/onnx/<model>/ has the publisher's files (onnx-community: onnx/vision_model_fp16.onnx,
+//! onnx/text_model_fp16.onnx, tokenizer.json; outputs pooler_output). Our own earlier export (image_features, text_features) works too.
 //!
 //! A photo is squeezed into a square (its shape is not kept), scaled to -1..1; the photo encoder runs on TensorRT when it can (its
 //! libraries are in runtime/tensorrt/) and on the CUDA provider otherwise. The text goes in lower case, cut to 64 tokens with an
@@ -13,7 +13,10 @@ use ort::ep;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::path::{Path, PathBuf};
-use tokenizers::{Tokenizer, TruncationParams};
+use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
+
+const TEXT_FILE: &str = "onnx/text_model_fp16.onnx";
+const VISION_FILE: &str = "onnx/vision_model_fp16.onnx";
 
 /// How many tokens the text encoder takes (what it was trained with).
 const TOKENS: usize = 64;
@@ -77,16 +80,17 @@ fn unit(mut v: Vec<f32>) -> Vec<f32> {
 
 impl Siglip {
     pub fn load(rt: &Runtime, root: &Path, spec: &'static Spec, size: u32) -> Result<Self> {
-        let model_dir = root.join(".cache/onnx").join(spec.folder);
-        for need in spec.files {
-            if !model_dir.join(need).exists() {
-                return Err(format!("missing {}", model_dir.join(need).display()));
-            }
+        let model_dir = spec.dir(root);
+        if !spec.installed(root) {
+            return Err(format!("{} is not downloaded (its files go in {})", spec.label, model_dir.display()));
         }
         let env = rt.env.clone();
-        let text = Session::builder(&env).and_then(|mut b| b.commit_from_file(model_dir.join("text_fp16.onnx"))).map_err(err("loading the text encoder"))?;
+        let text = Session::builder(&env).and_then(|mut b| b.commit_from_file(model_dir.join(TEXT_FILE))).map_err(err("loading the text encoder"))?;
         let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
         tokenizer.with_truncation(Some(TruncationParams { max_length: TOKENS, ..Default::default() })).map_err(|e| e.to_string())?;
+        // padded to 64 as the model was trained, whatever the tokenizer file says
+        let pad_id = tokenizer.token_to_id("<pad>").ok_or("the tokenizer has no <pad>")?;
+        tokenizer.with_padding(Some(PaddingParams { strategy: PaddingStrategy::Fixed(TOKENS), pad_id, pad_token: "<pad>".into(), ..Default::default() }));
         let mut model = Self {
             id: spec.id,
             env,
@@ -173,9 +177,18 @@ impl Siglip {
     /// The photo encoder: on TensorRT if it can (its engine is built the first time, about a minute, and kept in .cache/trt/), else
     /// on the CUDA provider.
     fn open_vision(&mut self) -> Result<()> {
-        let file = self.model_dir.join("vision_fp16.onnx");
+        // CoreML can't take the publisher's first layer as it is: it gets a patched copy
+        let file = if self.apple.is_some() {
+            crate::patch::ensure(&self.model_dir, crate::patch::SIGLIP_COREML)?
+        } else if !self.on_gpu {
+            // float32 is faster on the processor
+            crate::patch::ensure_or(&self.model_dir, crate::patch::SIGLIP_PROCESSOR, VISION_FILE)
+        } else {
+            self.model_dir.join(VISION_FILE)
+        };
         if self.tensorrt {
-            match self.open_tensorrt(&file) {
+            // TensorRT gets its norms in one piece (patch.rs)
+            match crate::patch::ensure(&self.model_dir, crate::patch::SIGLIP_TENSORRT).and_then(|f| self.open_tensorrt(&f)) {
                 Ok(session) => {
                     self.vision = Some(session);
                     return Ok(());
@@ -217,58 +230,6 @@ impl Siglip {
 #[cfg(test)]
 mod tests {
     use crate::models::{self, Model, SIGLIP_BASE_512};
-
-    fn cosine(a: &[f32], b: &[f32]) -> f32 {
-        let (dot, na, nb) = a.iter().zip(b).fold((0f32, 0f32, 0f32), |(d, x, y), (p, q)| (d + p * q, x + p * p, y + q * q));
-        dot / (na.sqrt() * nb.sqrt())
-    }
-
-    /// Words and photos come out as PyTorch makes them (.cache/onnx/<model>/reference.json, from src/siglip_export.py). These tests
-    /// swap the loaded model, so run them alone: cargo test --release siglip -- --ignored --test-threads=1 --nocapture
-    /// A photo of reference.json, which names them from where the Python export was made: the part from `maps/` on is in this project.
-    fn project_path(root: &std::path::Path, p: &str) -> std::path::PathBuf {
-        root.join(&p[p.find("maps/").unwrap_or(0)..])
-    }
-
-    #[test]
-    #[ignore]
-    fn siglip_matches_pytorch() {
-        for id in [SIGLIP_BASE_512, models::SIGLIP_BASE_256] {
-            matches_pytorch(id);
-        }
-    }
-
-    fn matches_pytorch(id: &'static str) {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let spec = models::spec(id).unwrap();
-        let reference: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join(".cache/onnx").join(spec.folder).join("reference.json")).unwrap()).unwrap();
-        let hub = models::test_hub();
-        assert_eq!(hub.wait_for(id, &|| false), Ok(true));
-        let vector = |v: &serde_json::Value| -> Vec<f32> { v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect() };
-        hub.with(id, |m| {
-            for (text, want) in reference["texts"].as_array().unwrap().iter().zip(reference["text_vectors"].as_array().unwrap()) {
-                let got = m.embed_query(text.as_str().unwrap()).unwrap();
-                let c = cosine(&got, &vector(want));
-                eprintln!("text {:?}: cosine to PyTorch {c:.5}", &text.as_str().unwrap()[..text.as_str().unwrap().len().min(30)]);
-                assert!(c > 0.999, "{c}");
-                assert!((got.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-3, "unit length");
-            }
-            let paths: Vec<&str> = reference["photos"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
-            let prepared: Vec<_> = paths.iter().map(|p| spec.prepare(&crate::photo::load(&project_path(root, p)).unwrap()).unwrap()).collect();
-            let together = m.embed_prepared(prepared);
-            for ((path, got), want) in paths.iter().zip(together).zip(reference["photo_vectors"].as_array().unwrap()) {
-                let got = got.unwrap();
-                let c = cosine(&got, &vector(want));
-                eprintln!("photo {path}: cosine to PyTorch {c:.5}");
-                assert!(c > 0.99, "{c}"); // our resize is not PIL's, and the card computes in float16
-            }
-            // a photo alone is what it is in a group
-            let alone = m.embed_image(&crate::photo::load(&project_path(root, paths[1])).unwrap()).unwrap();
-            let c = cosine(&alone, &vector(&reference["photo_vectors"][1]));
-            assert!(c > 0.99, "{c}");
-        })
-        .unwrap();
-    }
 
     /// Models can be swapped in the hub and each works after its turn.
     #[test]

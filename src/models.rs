@@ -35,9 +35,23 @@ pub struct Spec {
     pub max_tokens: Option<usize>,
     /// What the search box says for a map made with it.
     pub query_hint: &'static str,
-    /// Its files, under .cache/onnx/: the folder, and the files that must be in it.
+    /// Where its files come from: a Hugging Face repository at a fixed revision. They are kept under .cache/onnx/<folder>/ with
+    /// the paths they have there.
+    pub repo: &'static str,
+    pub revision: &'static str,
     pub folder: &'static str,
-    pub files: &'static [&'static str],
+    pub files: &'static [File],
+}
+
+/// A file of a model as its publisher has it: refused if it is not exactly this.
+pub struct File {
+    pub path: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+}
+
+const fn file(path: &'static str, size: u64, sha256: &'static str) -> File {
+    File { path, size, sha256 }
 }
 
 pub const ALL: [Spec; 3] = [
@@ -49,8 +63,16 @@ pub const ALL: [Spec; 3] = [
         kind: Kind::Gemma,
         max_tokens: None,
         query_hint: "Search the map: describe what you look for, or drop in a photo",
+        repo: "onnx-community/embeddinggemma-2-ONNX",
+        revision: "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
         folder: "embeddinggemma-2",
-        files: &["onnx/model_fp16.onnx", "tokenizer.json"],
+        files: &[
+            file("tokenizer.json", 32170510, "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4"),
+            file("onnx/model_fp16.onnx", 425780, "a49e227d7e0e5f4ee606d79879d084264366367bc6318f344ab179e35d4fd6a4"),
+            file("onnx/model_fp16.onnx_data", 542085120, "b9dbe09415d77c8686ba6e216a244086f4ada1608238c13f2bfaa587ba627207"),
+            file("onnx/vision_encoder_fp16.onnx", 112253, "3e2b6d5648a3ae61b572cc3ec0a23b13ebfda3b63e3c9c343c593636392a879c"),
+            file("onnx/vision_encoder_fp16.onnx_data", 335513088, "9f374070808b8b96252f7d04c9c4eae34df60283473fde5a3fbf4d9205495e19"),
+        ],
     },
     Spec {
         id: SIGLIP_BASE_512,
@@ -60,8 +82,14 @@ pub const ALL: [Spec; 3] = [
         kind: Kind::Siglip { size: 512 },
         max_tokens: Some(64),
         query_hint: "Search the map: a few words on what you look for, or drop in a photo",
+        repo: "onnx-community/siglip2-base-patch16-512-ONNX",
+        revision: "323fe16b35d8ced8182f8d9ff5e5ec935dd79bd7",
         folder: "siglip2-base-patch16-512",
-        files: &["vision_fp16.onnx", "text_fp16.onnx", "tokenizer.json"],
+        files: &[
+            file("tokenizer.json", 34363039, "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322"),
+            file("onnx/text_model_fp16.onnx", 564862230, "0026e285ac559977f36afae61dde214c75475007822eb8a4dd544ffc22f5634b"),
+            file("onnx/vision_model_fp16.onnx", 187312043, "70cad97773fbda5d8edbd7df3abd6023346e3ce4bf18747557d28dde570bdec8"),
+        ],
     },
     Spec {
         id: SIGLIP_BASE_256,
@@ -71,8 +99,14 @@ pub const ALL: [Spec; 3] = [
         kind: Kind::Siglip { size: 256 },
         max_tokens: Some(64),
         query_hint: "Search the map: a few words on what you look for, or drop in a photo",
+        repo: "onnx-community/siglip2-base-patch16-256-ONNX",
+        revision: "d1114256522a37ffa257a0a58017348ab0058db2",
         folder: "siglip2-base-patch16-256",
-        files: &["vision_fp16.onnx", "text_fp16.onnx", "tokenizer.json"],
+        files: &[
+            file("tokenizer.json", 34363039, "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322"),
+            file("onnx/text_model_fp16.onnx", 564862230, "80954edffdc689599e5d5bc6a1738380bc9e8139a18e5c8892485f248b6b4890"),
+            file("onnx/vision_model_fp16.onnx", 186131676, "fe9ad8020a6d3d98d394c9be8f07064066135fc2f87ec11692de0b677c0ac4db"),
+        ],
     },
 ];
 
@@ -81,10 +115,20 @@ pub fn spec(id: &str) -> Option<&'static Spec> {
 }
 
 impl Spec {
-    /// Are its files there? (The photo encoder is checked when it is first needed.)
+    /// The folder its files are kept in.
+    pub fn dir(&self, root: &Path) -> std::path::PathBuf {
+        root.join(".cache/onnx").join(self.folder)
+    }
+
+    /// Are its files there? (A file is only put there once it was checked whole, so its size is enough.)
     pub fn installed(&self, root: &Path) -> bool {
-        let dir = root.join(".cache/onnx").join(self.folder);
-        self.files.iter().all(|f| dir.join(f).exists())
+        let dir = self.dir(root);
+        self.files.iter().all(|f| std::fs::metadata(dir.join(f.path)).is_ok_and(|m| m.len() == f.size))
+    }
+
+    /// What its files take to download, in bytes.
+    pub fn download_size(&self) -> u64 {
+        self.files.iter().map(|f| f.size).sum()
     }
 
     /// How long the longer side of a photo of this size must at least be for `prepare`, 0 if it can't be prepared.
@@ -298,6 +342,12 @@ impl Hub {
 /// A hub holding Gemma, loaded once for the tests (ONNX Runtime allows one environment in a process).
 #[cfg(test)]
 pub fn test_hub() -> Arc<Hub> {
+    test_hub_with(GEMMA)
+}
+
+/// The tests' hub, holding this model.
+#[cfg(test)]
+pub fn test_hub_with(id: &str) -> Arc<Hub> {
     static HUB: std::sync::OnceLock<Arc<Hub>> = std::sync::OnceLock::new();
     let hub = HUB
         .get_or_init(|| {
@@ -305,6 +355,104 @@ pub fn test_hub() -> Arc<Hub> {
             Hub::start(root, || {})
         })
         .clone();
-    assert_eq!(hub.wait_for(GEMMA, &|| false), Ok(true));
+    assert_eq!(hub.wait_for(id, &|| false), Ok(true));
     hub
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let (dot, na, nb) = a.iter().zip(b).fold((0f32, 0f32, 0f32), |(d, x, y), (p, q)| (d + p * q, x + p * p, y + q * q));
+        dot / (na.sqrt() * nb.sqrt())
+    }
+
+    /// The publisher's files, as patched for the backend in use (patch.rs), give the vectors that maps already made with the model
+    /// hold, so those maps can still be searched. Models that are not downloaded are skipped. Run alone, once per backend:
+    /// PHOTO_MAP_BACKEND=cpu|cuda|tensorrt cargo test --release match_the_maps -- --ignored --test-threads=1 --nocapture
+    #[test]
+    #[ignore]
+    fn models_match_the_maps() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut hub = None;
+        for (id, map) in [(SIGLIP_BASE_256, "rare-species 2"), (SIGLIP_BASE_256, "nasa"), (GEMMA, "rare-species"), (GEMMA, "everything from usb")] {
+            let spec = spec(id).unwrap();
+            if !spec.installed(root) {
+                eprintln!("{} is not downloaded: skipped", spec.label);
+                continue;
+            }
+            let hub = hub.get_or_insert_with(|| test_hub_with(id)).clone();
+            let dir = root.join("maps").join(format!("{map}.photomap"));
+            let photos: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(dir.join("photos.json")).unwrap()).unwrap();
+            let stored = std::fs::read(dir.join("embeddings.bin")).unwrap();
+            let rows: Vec<usize> = (0..photos.len()).step_by(photos.len() / 24).take(24).collect();
+            let prepared: Vec<_> = rows
+                .iter()
+                .map(|&r| {
+                    let source = std::path::PathBuf::from(photos[r]["source"].as_str().unwrap());
+                    let path = if source.exists() { source } else { dir.join(photos[r]["file"].as_str().unwrap()) };
+                    spec.prepare(&crate::photo::load_for(&path, |w, h| spec.longest_side_needed(w, h)).unwrap()).unwrap()
+                })
+                .collect();
+            assert_eq!(hub.wait_for(id, &|| false), Ok(true));
+            let got = hub.with(id, |m| m.embed_prepared(prepared)).unwrap();
+            let mut all: Vec<f32> = rows
+                .iter()
+                .zip(got)
+                .map(|(&r, got)| {
+                    let want: Vec<f32> = stored[r * spec.dim * 2..(r + 1) * spec.dim * 2].chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();
+                    cosine(&got.unwrap(), &want)
+                })
+                .collect();
+            all.sort_by(f32::total_cmp);
+            eprintln!("{} on {map}: cosine to the map's vectors over {} photos: lowest {:.5}, median {:.5}", spec.label, rows.len(), all[0], all[all.len() / 2]);
+            assert!(all[0] > 0.99, "{}", all[0]);
+        }
+    }
+
+    /// For machines without the maps above (a Mac): every downloaded model's vectors for 24 photos of the folder PHOTO_MAP_PHOTOS
+    /// and a few search words, on the backend in use, kept in .cache/test/agree/; on any backend but the processor they are compared
+    /// with the processor's. Run with cpu first, then each other backend:
+    /// PHOTO_MAP_PHOTOS=~/Pictures PHOTO_MAP_BACKEND=cpu cargo test --release backends_agree -- --ignored --test-threads=1 --nocapture
+    #[test]
+    #[ignore]
+    fn backends_agree() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let folder = std::path::PathBuf::from(std::env::var("PHOTO_MAP_PHOTOS").expect("PHOTO_MAP_PHOTOS: a folder of photos"));
+        let backend = format!("{:?}", crate::backends::Choice::load(root).selected(&crate::runtime::Setup::detect(root)));
+        let mut files: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| ["jpg", "jpeg", "png", "webp"].contains(&e.to_string_lossy().to_lowercase().as_str()))).collect();
+        files.sort();
+        let files: Vec<_> = files.iter().step_by((files.len() / 24).max(1)).take(24).cloned().collect();
+        let words = ["a dog on a beach", "mountains at sunset", "a plate of food", "a crowded street at night"];
+        let keep = root.join(".cache/test/agree");
+        std::fs::create_dir_all(&keep).unwrap();
+        let mut hub = None;
+        for spec in ALL.iter().filter(|s| s.installed(root)) {
+            let hub = hub.get_or_insert_with(|| test_hub_with(spec.id)).clone();
+            assert_eq!(hub.wait_for(spec.id, &|| false), Ok(true));
+            let prepared: Vec<_> = files.iter().map(|f| spec.prepare(&crate::photo::load_for(f, |w, h| spec.longest_side_needed(w, h)).unwrap()).unwrap()).collect();
+            let started = std::time::Instant::now();
+            let photos: Vec<Vec<f32>> = hub.with(spec.id, |m| m.embed_prepared(prepared)).unwrap().into_iter().map(|v| v.unwrap()).collect();
+            let speed = files.len() as f32 / started.elapsed().as_secs_f32();
+            let texts: Vec<Vec<f32>> = words.iter().map(|w| hub.with(spec.id, |m| m.embed_query(w)).unwrap().unwrap()).collect();
+            let name = |b: &str| keep.join(format!("{}.{b}.json", crate::naming::slug(spec.id)));
+            std::fs::write(name(&backend), serde_json::to_vec(&serde_json::json!({ "files": files, "photos": photos, "words": texts })).unwrap()).unwrap();
+            eprintln!("{} on {backend}: {speed:.1} photos/s (with the first run's preparing)", spec.label);
+            if backend == "Cpu" {
+                continue;
+            }
+            let Ok(cpu) = std::fs::read(name("Cpu")) else {
+                eprintln!("  no processor vectors to compare with: run with PHOTO_MAP_BACKEND=cpu first");
+                continue;
+            };
+            let cpu: serde_json::Value = serde_json::from_slice(&cpu).unwrap();
+            let rows = |v: &serde_json::Value| -> Vec<Vec<f32>> { v.as_array().unwrap().iter().map(|r| r.as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect()).collect() };
+            for (what, ours, theirs) in [("photos", &photos, rows(&cpu["photos"])), ("words", &texts, rows(&cpu["words"]))] {
+                let lowest = ours.iter().zip(&theirs).map(|(a, b)| cosine(a, b)).fold(1f32, f32::min);
+                eprintln!("  {what}: lowest cosine to the processor's {lowest:.5}");
+                assert!(lowest > 0.99, "{} {what}: {lowest}", spec.label);
+            }
+        }
+    }
 }

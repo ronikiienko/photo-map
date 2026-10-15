@@ -15,7 +15,7 @@ pub enum Action {
     Open(PathBuf),
     Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String },
     Pause(PathBuf),
-    SetBackend(crate::backends::Backend, bool),
+    SetBackend(crate::backends::Backend),
     GetModel(String),
     StopModelFetch,
     RemoveModel(String),
@@ -766,7 +766,7 @@ impl Home {
         let mut close = false;
         let mut open_runtime = false;
         let response = theme::modal(ctx, "models", 560.0, Some("Models"), |ui| {
-            ui.label(theme::muted("A map is made and searched with one model. Only the models you have are offered when a map is made. Getting a model is simulated for now: nothing is downloaded."));
+            ui.label(theme::muted("A map is made and searched with one model. Only the models you have are offered when a map is made. They are downloaded from their publishers on Hugging Face."));
             ui.add_space(8.0);
             if rt.setup.ort.is_none() {
                 ui.horizontal(|ui| {
@@ -897,19 +897,17 @@ impl Home {
             ui.label("Run the models on");
             for b in crate::backends::Backend::ALL.into_iter().filter(|b| b.exists_here()) {
                 let available = b.available(&rt.setup) && !(matches!(b, crate::backends::Backend::Cuda | crate::backends::Backend::TensorRt) && rt.nvidia.is_none());
-                let mut on = available && rt.backends.is_on(b, &rt.setup);
-                let was = on;
+                let on = available && rt.backends.is_on(b, &rt.setup);
                 ui.horizontal(|ui| {
-                    let response = ui.add_enabled(available, egui::Checkbox::new(&mut on, b.label())).on_hover_text(b.note());
-                    if response.changed() && on != was {
-                        actions.push(Action::SetBackend(b, on));
+                    if ui.add_enabled(available, egui::RadioButton::new(on, b.label())).on_hover_text(b.note()).clicked() && !on {
+                        actions.push(Action::SetBackend(b));
                     }
                     if !available {
                         ui.label(theme::muted(if rt.setup.ort.is_none() { "needs ONNX Runtime" } else { "not downloaded" }));
                     }
                 });
             }
-            ui.label(theme::muted("The processor is used for whatever the others can't run. Changes apply after a restart."));
+            ui.label(theme::muted("Whatever the chosen one can't run goes to the processor. Changes apply after a restart."));
 
             if !installed.is_empty() {
                 ui.add_space(8.0);

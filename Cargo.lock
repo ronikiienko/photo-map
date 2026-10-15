@@ -2532,6 +2532,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "onnx-protobuf"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c82bcd4b77209b2f1e3de24e71272dffa46670e36ee0bc29d28d60f4e376d08"
+dependencies = [
+ "protobuf",
+]
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2656,8 +2665,10 @@ dependencies = [
  "libloading 0.9.0",
  "memmap2",
  "ndarray",
+ "onnx-protobuf",
  "ort",
  "pollster",
+ "protobuf",
  "rayon",
  "rfd",
  "rusty_dds",
@@ -2826,6 +2837,26 @@ checksum = "4488a4a36b9a4ba6b9334a32a39971f77c1436ec82c38707bce707699cc3bbcb"
 dependencies = [
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "protobuf"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58678a64de2fced2bdec6bca052a6716a0efe692d6e3f53d1bda6a1def64cfc0"
+dependencies = [
+ "once_cell",
+ "protobuf-support",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "protobuf-support"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1ed294a835b0f30810e13616b1cd34943c6d1e84a8f3b0dcfe466d256c3e7e7"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]

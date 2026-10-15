@@ -1,7 +1,7 @@
 //! Gemma embeddings (words and photos) through ONNX Runtime, in this process (no Python).
 //!
 //! Everything it needs lives in the project folder: ONNX Runtime and the CUDA libraries in runtime/, the model and tokenizer in
-//! .cache/onnx/embeddinggemma-2/ (the ONNX export of Gemma; vision_encoder_fp16_fused.onnx is for photos). The CUDA libraries are loaded by
+//! .cache/onnx/embeddinggemma-2/ (the publisher's ONNX files, and the patched copies made from them for CUDA and TensorRT: patch.rs). The CUDA libraries are loaded by
 //! full path before the first session is made, so nothing has to be installed or put on a search path.
 
 use crate::runtime::{self, Setup};
@@ -183,12 +183,12 @@ impl Gemma {
             }
         }
         let env = rt.env.clone();
-        let session = Session::builder(&env)
-            .and_then(|mut b| b.commit_from_file(model_dir.join("onnx/model_fp16.onnx")))
-            .map_err(err("loading the model"))?;
+        // the text model reads every photo too: on the processor it runs in float32 (patch.rs), on a card as published
+        let text = if rt.on_gpu { model_dir.join("onnx/model_fp16.onnx") } else { crate::patch::ensure_or(&model_dir, crate::patch::GEMMA_TEXT_PROCESSOR, "onnx/model_fp16.onnx") };
+        let session = Session::builder(&env).and_then(|mut b| b.commit_from_file(text)).map_err(err("loading the model"))?;
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
         let on_gpu = rt.on_gpu || rt.apple.is_some();
-        let tensorrt = rt.tensorrt && model_dir.join("onnx/vision_encoder_fp16_trt.onnx").exists() && model_dir.join("onnx/vision_pool.onnx").exists();
+        let tensorrt = rt.tensorrt;
         let mut model = Self { env, session, vision: None, pool: None, tokenizer, root: root.to_path_buf(), model_dir, on_gpu, tensorrt, apple: rt.apple };
         // CoreML and TensorRT prepare the network for the chip or card when it is opened (minutes the first time): here, where a map being made can still be paused
         if model.apple.is_some() || model.tensorrt {
@@ -260,15 +260,20 @@ impl Gemma {
                 }
             }
         }
-        // the fused attention is for CUDA; the plain export (the one the model's publisher has) is what other machines run
-        let fused = self.model_dir.join("onnx/vision_encoder_fp16_fused.onnx");
-        let file = if fused.exists() && self.apple.is_none() { fused } else { self.model_dir.join("onnx/vision_encoder_fp16.onnx") };
+        // CUDA: the fused attention; the processor: float32; CoreML: as published (patch.rs)
+        let file = match (self.on_gpu, self.apple) {
+            (_, Some(_)) => self.model_dir.join("onnx/vision_encoder_fp16.onnx"),
+            (true, None) => crate::patch::ensure_or(&self.model_dir, crate::patch::GEMMA_CUDA, "onnx/vision_encoder_fp16.onnx"),
+            (false, None) => crate::patch::ensure_or(&self.model_dir, crate::patch::GEMMA_PROCESSOR, "onnx/vision_encoder_fp16.onnx"),
+        };
         let session = vision_builder(&self.env, self.apple, &self.root.join(".cache/coreml/embeddinggemma-2"), &[("s11", TENSORRT_BATCH as i64), ("s35", PADDED as i64)]).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?;
         self.vision = Some(session);
         Ok(())
     }
 
     fn open_tensorrt(&mut self) -> Result<()> {
+        let layers = crate::patch::ensure(&self.model_dir, crate::patch::GEMMA_TENSORRT)?;
+        let pool = crate::patch::ensure(&self.model_dir, crate::patch::GEMMA_POOL)?;
         let cache = self.root.join(".cache/trt");
         std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
         let shapes = |n: usize| format!("pixel_values:{n}x{PADDED}x{PATCH_VALUES},pixel_position_ids:{n}x{PADDED}x2");
@@ -286,9 +291,9 @@ impl Gemma {
         // (the CUDA provider is already registered for every session by the environment, and takes what TensorRT leaves)
         let layers = Session::builder(&self.env)
             .and_then(|b| b.with_execution_providers([trt]).map_err(|e| e.into()))
-            .and_then(|mut b| b.commit_from_file(self.model_dir.join("onnx/vision_encoder_fp16_trt.onnx")))
+            .and_then(|mut b| b.commit_from_file(&layers))
             .map_err(err("loading the photo encoder on TensorRT"))?;
-        let pool = Session::builder(&self.env).and_then(|mut b| b.commit_from_file(self.model_dir.join("onnx/vision_pool.onnx"))).map_err(err("loading the photo pooling"))?;
+        let pool = Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&pool)).map_err(err("loading the photo pooling"))?;
         self.vision = Some(layers);
         self.pool = Some(pool);
         Ok(())

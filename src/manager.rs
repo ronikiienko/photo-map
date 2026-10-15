@@ -113,9 +113,9 @@ impl Manager {
         }
     }
 
-    /// Tick or untick a backend; kept for the next start.
-    pub fn set_backend(&mut self, b: crate::backends::Backend, on: bool) {
-        self.backends.set(b, on, &self.setup);
+    /// Choose what the models run on; kept for the next start.
+    pub fn set_backend(&mut self, b: crate::backends::Backend) {
+        self.backends.set(b);
         self.backends.save(&self.root);
         self.restart = true;
     }

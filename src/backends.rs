@@ -1,7 +1,6 @@
 //! What the models may run on: the choice made in the Runtime window, kept in `.cache/backends` (one name a line).
 //!
-//! The processor always works; the rest is a choice among what the machine has and what is installed. Nothing chosen yet means
-//! everything that is available (on a Mac the neural engine, which was the fastest and leaves the graphics chip to the viewer).
+//! One of them is chosen; the processor always works. Nothing chosen yet means the best one available (see `PREFERRED`).
 
 use crate::runtime::Setup;
 use ort::ep::coreml::ComputeUnits;
@@ -45,12 +44,12 @@ impl Backend {
 
     pub fn note(self) -> &'static str {
         match self {
-            Backend::Cpu => "Works everywhere, slowest. Ticking it unticks the others.",
+            Backend::Cpu => "Works everywhere, slowest.",
             Backend::AppleAll => "CoreML picks the part for each piece of the model.",
             Backend::AppleGpu => "CoreML on the graphics chip: as fast as the neural engine, but busy while the map is shown.",
             Backend::AppleNeural => "CoreML on the neural engine: fast, and the graphics chip stays free. Applies to the photo encoders.",
             Backend::Cuda => "Needs CUDA and cuDNN.",
-            Backend::TensorRt => "On top of CUDA; faster, and slow to start the first time.",
+            Backend::TensorRt => "Faster than CUDA; slow to start the first time a model is used.",
         }
     }
 
@@ -71,91 +70,67 @@ impl Backend {
             Backend::TensorRt => setup.gpu.is_some() && setup.ort_cuda && setup.ort_tensorrt && setup.tensorrt.is_some(),
         }
     }
-
-    fn apple(self) -> bool {
-        matches!(self, Backend::AppleAll | Backend::AppleGpu | Backend::AppleNeural)
-    }
 }
 
-/// The backends ticked. `None`: never chosen, so the default.
+/// The one backend chosen. `None`: never chosen, so the best one available.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Choice(Option<Vec<Backend>>);
+pub struct Choice(Option<Backend>);
 
 fn file(root: &Path) -> PathBuf {
     root.join(".cache/backends")
 }
 
+/// The default, best first (on a Mac the neural engine, which was the fastest and leaves the graphics chip to the viewer).
+const PREFERRED: [Backend; 4] = [Backend::TensorRt, Backend::Cuda, Backend::AppleNeural, Backend::Cpu];
+
 impl Choice {
     pub fn load(root: &Path) -> Self {
         // for benchmarks: PHOTO_MAP_COREML = off, cpu, gpu, ane or all
         if cfg!(target_os = "macos") {
-            let one = |b| Choice(Some(vec![b]));
             match std::env::var("PHOTO_MAP_COREML").as_deref() {
-                Ok("off") | Ok("cpu") => return one(Backend::Cpu),
-                Ok("gpu") => return one(Backend::AppleGpu),
-                Ok("ane") => return one(Backend::AppleNeural),
-                Ok("all") => return one(Backend::AppleAll),
+                Ok("off") | Ok("cpu") => return Choice(Some(Backend::Cpu)),
+                Ok("gpu") => return Choice(Some(Backend::AppleGpu)),
+                Ok("ane") => return Choice(Some(Backend::AppleNeural)),
+                Ok("all") => return Choice(Some(Backend::AppleAll)),
                 _ => {}
             }
         }
+        // for tests and benchmarks: PHOTO_MAP_BACKEND = cpu, cuda, tensorrt, apple-neural, apple-gpu or apple-all
+        if let Some(b) = std::env::var("PHOTO_MAP_BACKEND").ok().and_then(|v| Backend::ALL.into_iter().find(|b| b.name() == v)) {
+            return Choice(Some(b));
+        }
+        // the file once held a list ("cuda" and "tensorrt" together): the last of Backend::ALL in it is the one
         match std::fs::read_to_string(file(root)) {
-            Ok(text) => Choice(Some(text.lines().filter_map(|l| Backend::ALL.into_iter().find(|b| b.name() == l.trim())).collect())),
+            Ok(text) => Choice(Backend::ALL.into_iter().rev().find(|b| text.lines().any(|l| l.trim() == b.name()))),
             Err(_) => Choice(None),
         }
     }
 
     pub fn save(&self, root: &Path) {
-        if let Some(list) = &self.0 {
+        if let Some(b) = self.0 {
             let _ = std::fs::create_dir_all(root.join(".cache"));
-            let _ = std::fs::write(file(root), list.iter().map(|b| format!("{}\n", b.name())).collect::<String>());
+            let _ = std::fs::write(file(root), format!("{}\n", b.name()));
         }
     }
 
-    /// What is ticked, given what is available (an unavailable one is never in use, whatever was chosen).
+    /// The backend in use: the one chosen if it is available here, else the best one that is.
+    pub fn selected(&self, setup: &Setup) -> Backend {
+        let usable = |b: &Backend| b.exists_here() && b.available(setup);
+        self.0.filter(usable).or_else(|| PREFERRED.into_iter().find(usable)).unwrap_or(Backend::Cpu)
+    }
+
+    /// Is this the one in use (never one that is not available)?
     pub fn is_on(&self, b: Backend, setup: &Setup) -> bool {
-        if !b.exists_here() || !b.available(setup) {
-            return false;
-        }
-        match &self.0 {
-            Some(list) if b == Backend::Cpu => !list.iter().any(|x| *x != Backend::Cpu && x.exists_here() && x.available(setup)),
-            Some(list) => list.contains(&b),
-            None => b == Backend::AppleNeural || b == Backend::Cuda || b == Backend::TensorRt || b == Backend::Cpu && !Backend::ALL.iter().any(|x| *x != Backend::Cpu && x.exists_here() && x.available(setup)),
-        }
+        b.exists_here() && b.available(setup) && self.selected(setup) == b
     }
 
-    fn current(&self, setup: &Setup) -> Vec<Backend> {
-        Backend::ALL.into_iter().filter(|b| self.is_on(*b, setup)).collect()
+    pub fn set(&mut self, b: Backend) {
+        self.0 = Some(b);
     }
 
-    /// Tick or untick one. Only one part of the Apple chip is used at a time, and TensorRT works on top of CUDA.
-    pub fn set(&mut self, b: Backend, on: bool, setup: &Setup) {
-        if b == Backend::Cpu {
-            // the processor is what is left when nothing else is ticked: ticking it unticks the rest, unticking it does nothing
-            if on {
-                self.0 = Some(vec![Backend::Cpu]);
-            }
-            return;
-        }
-        let mut list = self.current(setup);
-        list.retain(|x| *x != b && *x != Backend::Cpu);
-        if on {
-            if b.apple() {
-                list.retain(|x| !x.apple());
-            }
-            if b == Backend::TensorRt {
-                list.push(Backend::Cuda);
-            }
-            list.push(b);
-        } else if b == Backend::Cuda {
-            list.retain(|x| *x != Backend::TensorRt);
-        }
-        list.sort_by_key(|x| Backend::ALL.iter().position(|y| y == x));
-        list.dedup();
-        self.0 = Some(list);
-    }
-
+    /// TensorRT runs on top of CUDA: whatever it can't take runs there.
     pub fn cuda(&self, setup: &Setup) -> bool {
-        self.is_on(Backend::Cuda, setup)
+        self.is_on(Backend::Cuda, setup) || self.is_on(Backend::TensorRt, setup)
     }
 
     pub fn tensorrt(&self, setup: &Setup) -> bool {
@@ -163,14 +138,12 @@ impl Choice {
     }
 
     pub fn apple(&self, setup: &Setup) -> Option<ComputeUnits> {
-        if self.is_on(Backend::AppleNeural, setup) {
-            Some(ComputeUnits::CPUAndNeuralEngine)
-        } else if self.is_on(Backend::AppleGpu, setup) {
-            Some(ComputeUnits::CPUAndGPU)
-        } else if self.is_on(Backend::AppleAll, setup) {
-            Some(ComputeUnits::All)
-        } else {
-            None
+        match self.selected(setup) {
+            b if !self.is_on(b, setup) => None,
+            Backend::AppleNeural => Some(ComputeUnits::CPUAndNeuralEngine),
+            Backend::AppleGpu => Some(ComputeUnits::CPUAndGPU),
+            Backend::AppleAll => Some(ComputeUnits::All),
+            _ => None,
         }
     }
 }
@@ -178,10 +151,14 @@ impl Choice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{Place, Source};
+    use crate::runtime::{Gpu, Place, Source};
+
+    fn place() -> Place {
+        Place { dir: PathBuf::from("/x"), source: Source::Project }
+    }
 
     fn with_ort() -> Setup {
-        Setup { ort: Some(Place { dir: PathBuf::from("/x"), source: Source::Project }), ..Setup::default() }
+        Setup { ort: Some(place()), ..Setup::default() }
     }
 
     #[test]
@@ -190,25 +167,37 @@ mod tests {
         assert!(Backend::ALL.iter().all(|b| !none.is_on(*b, &Setup::default())));
     }
 
+    #[test]
+    fn one_at_a_time_and_the_processor_when_the_choice_is_not_there() {
+        let setup = with_ort();
+        let mut c = Choice(None);
+        c.set(Backend::Cuda);
+        assert!(c.is_on(Backend::Cpu, &setup) && !c.cuda(&setup)); // no CUDA downloaded
+        c.set(Backend::Cpu);
+        assert_eq!(Backend::ALL.iter().filter(|b| c.is_on(**b, &setup)).count(), 1);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn tensorrt_is_one_choice_and_uses_cuda_underneath() {
+        let setup = Setup { ort: Some(place()), ort_cuda: true, ort_tensorrt: true, gpu: Some(Gpu { cuda: place(), cudnn: place() }), tensorrt: Some(place()) };
+        let mut c = Choice(None);
+        assert!(c.is_on(Backend::TensorRt, &setup) && !c.is_on(Backend::Cuda, &setup) && c.cuda(&setup));
+        c.set(Backend::Cuda);
+        assert!(c.is_on(Backend::Cuda, &setup) && !c.tensorrt(&setup));
+        let no_trt = Setup { tensorrt: None, ..setup };
+        assert!(Choice(Some(Backend::TensorRt)).is_on(Backend::Cuda, &no_trt));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn one_part_of_the_apple_chip_at_a_time() {
         let setup = with_ort();
         let mut c = Choice(None);
         assert!(c.is_on(Backend::AppleNeural, &setup) && !c.is_on(Backend::Cpu, &setup));
-        c.set(Backend::AppleGpu, true, &setup);
+        c.set(Backend::AppleGpu);
         assert!(c.is_on(Backend::AppleGpu, &setup) && !c.is_on(Backend::AppleNeural, &setup));
-        c.set(Backend::AppleGpu, false, &setup);
+        c.set(Backend::Cpu);
         assert!(c.is_on(Backend::Cpu, &setup) && c.apple(&setup).is_none());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_processor_is_not_ticked_beside_another() {
-        let setup = with_ort();
-        let mut c = Choice(None);
-        c.set(Backend::Cpu, true, &setup);
-        c.set(Backend::AppleGpu, true, &setup);
-        assert!(c.is_on(Backend::AppleGpu, &setup) && !c.is_on(Backend::Cpu, &setup));
     }
 }

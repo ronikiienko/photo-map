@@ -20,6 +20,7 @@ mod manager;
 mod modelstore;
 mod models;
 mod packs;
+mod patch;
 mod runtime;
 mod naming;
 mod pages;
@@ -446,7 +447,7 @@ impl Viewer {
                 }
             }
             Action::StopInstall => self.runtime.stop(),
-            Action::SetBackend(b, on) => self.runtime.set_backend(b, on),
+            Action::SetBackend(b) => self.runtime.set_backend(b),
             Action::RemoveRuntime => self.runtime.remove_all(),
             Action::GetModel(id) => self.store.get(&id),
             Action::StopModelFetch => self.store.stop(),

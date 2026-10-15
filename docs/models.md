@@ -1,67 +1,69 @@
-# Models: where they come from, what is done to them, and what we want
+# Models: where they come from and what is done to them
 
-Written during the macOS work. It collects the open questions about the model files and what the owner wants. The measurements
-behind it are from an M1 Mac (Python ONNX Runtime 1.29 probes and Rust tests); vectors are compared with the processor's fp32 output
-because the PyTorch reference vectors were not available on the Mac.
+One workflow on every computer: the app downloads the publisher's files, and makes what a runtime needs from them on the
+computer itself. Nothing changed is ever hosted.
 
-## What the owner wants
+## Download (src/modelstore.rs, list in src/models.rs)
 
-1. **No hosting.** The project does not host model files or converted copies.
-2. **Fetch from the public sources** (for example the `onnx-community` repositories on Hugging Face), with the address and a
-   hash of each file pinned in the app, so a changed upstream file is refused, as packs do for the runtime libraries.
-3. **Patch on the user's machine** where a model needs it, after the download, so no patched file is ever hosted.
-4. **Models are chosen in the app**: a Models window lists them, "Get" fetches one, "Remove" deletes the files and everything made
-   for them (prepared networks, vocabulary vectors). The app starts with no models; a map can only be made with an installed one.
-   (Getting is simulated for now: it links the files in `.cache/upstream/`. The real fetch is still to do.)
-5. **Preparing a model for a runtime happens when a map is made** (status line in "Understand"), not when it is downloaded, so
-   changing runtime later does not leave a model without a prepared network.
-
-## What is done to the files today
-
-| Model | Source on the Mac | Changes |
-|---|---|---|
-| SigLIP 2 Base 256 / 512 | `onnx-community/siglip2-base-patch16-{256,512}-ONNX` | The first layer, a convolution that cuts the photo into 16 x 16 patches, is replaced by reshape, transpose, matrix multiply and add for the one fixed image size (script not in the repo: `/tmp/pm-scratch/patchify.py` on the Mac). Everything else is as published. The 512 files in use are fp32, the 256 ones fp16. |
-| EmbeddingGemma 2 | `onnx-community/embeddinggemma-2-ONNX` | None on the Mac. |
-| SigLIP on Linux | the project's own PyTorch export (`tools/siglip_export.py`) | outputs `image_features` / `text_features`; the app accepts upstream's `pooler_output` too |
-| Gemma on Linux | `onnx-community/embeddinggemma-2-ONNX`, snapshot `daa72c51243991dfcaf9f9137d2c573d8f7790c0` (fetched 2026-10-11; `model_fp16` and `vision_encoder_fp16` match its file hashes) | `tools/onnx_fuse_attention.py` (CUDA) and `tools/onnx_trt_ready.py` (TensorRT: standard operators only, plus `vision_pool.onnx`). The `_b4` files are for `tools/bench_*.py` only |
-
-### Why the SigLIP patch is needed
-
-ONNX Runtime's CoreML provider (ML Program format) refuses a Conv without explicit pads ("Required param 'pad' is missing"). The
-published files are valid ONNX (no pads means zero padding), so this is a gap in the provider, not in the files. Precision does not
-matter: the layer is the same in the fp16 and fp32 files. The patched files compute the same thing and use only standard operators,
-so any provider can run them. They are not needed on CUDA or TensorRT.
-
-## Measurements (photos/s, M1; cosine to the processor's fp32 vectors)
-
-| Model | Processor | CoreML neural engine | CoreML all parts | MLX plugin |
+| Model | Repository (Hugging Face) | Revision | Files | Size |
 |---|---|---|---|---|
-| SigLIP 256 | 5.7 | **61.6** (fp16, cos 0.9999) | 60.7 | 27 (fp32); fp16 gives wrong vectors (cos 0.48) |
-| SigLIP 512 | 1.0 | 7.9 | **8.8** (cos 0.9999) | 4.5 (fp32) |
-| Gemma | 0.4 (fp32), 0.2 (fp16) | vision part 0.1 | not finished | not finished |
+| EmbeddingGemma 2 | `onnx-community/embeddinggemma-2-ONNX` | `daa72c51` | `tokenizer.json`, `onnx/model_fp16.onnx` (+ `_data`), `onnx/vision_encoder_fp16.onnx` (+ `_data`) | 0.91 GB |
+| SigLIP 2 Base 512 | `onnx-community/siglip2-base-patch16-512-ONNX` | `323fe16b` | `tokenizer.json`, `onnx/text_model_fp16.onnx`, `onnx/vision_model_fp16.onnx` | 0.79 GB |
+| SigLIP 2 Base 256 | `onnx-community/siglip2-base-patch16-256-ONNX` | `d1114256` | the same | 0.79 GB |
 
-- fp16 on CoreML is about 2.6 times faster than fp32 and matches it; batch size makes no difference to speed.
-- The first CoreML run compiles the network for the chip: 2 to 4 minutes, sometimes much longer; the result (about 1 GB per
-  model) is cached. ONNX Runtime and Apple give no progress while it runs.
-- Gemma is a heavy model (0.4 photos/s on the processor) and its inputs have open sizes (batch, patch count, and an output length
-  that depends on the data), which CoreML needs fixed. Its vision graph also has 113 `SimplifiedLayerNormalization` and 16
-  `MultiHeadAttention` nodes (ONNX Runtime's own operators), so on CoreML it would be cut into many pieces. A properly measured
-  Gemma on CoreML has not been done; the "standard operators" file from `tools/onnx_trt_ready.py` with fixed shapes is the candidate.
-- MLX (GPU only, no neural engine) works through the `onnxruntime-ep-mlx` plugin without patches, but is slower than CoreML on
-  SigLIP and has the fp16 problem, so it is not offered. Using MLX directly (`mlx-rs`, `mlx-embeddings`) is untested.
+- Every file is pinned by size and SHA-256 and refused if it differs. Files are fetched in 16 MB pieces with retries; a stopped
+  download carries on where it was. They are kept in `.cache/onnx/<model>/` under the paths they have in the repository.
+- fp16 everywhere: half the download, and the publisher's fp16 conversion is used as is (going down from fp32 needs care that they
+  have taken; going up is exact).
+- SigLIP's tokenizer is the same file as Google's own (same SHA-256). The app pads search words to 64 tokens itself.
+- Removing a model removes its folder (downloaded and patched files), its CoreML and TensorRT networks and its vocabulary vectors.
 
-## Open questions (with recommended answers)
+## Patches (src/patch.rs), made when the model is loaded for a map or a search
 
-1. **Where do the patch steps live?** Recommended: a small recipe table in the app (URL, hash, steps per backend) and the steps
-   written in Rust (the SigLIP convolution patch is small; the Gemma TensorRT rewrite is large and can stay Python-made for now).
-   The Python scripts in `tools/` stay as the reference.
-2. **Which protobuf crate for editing ONNX files in Rust**, without a C++ build dependency? Not checked yet.
-3. **Run the patch only for CoreML?** Recommended: yes. The unpatched public file is used on the processor, CUDA and TensorRT.
-4. **Where did the Gemma ONNX files on Linux come from?** Answered: `onnx-community/embeddinggemma-2-ONNX` at snapshot `daa72c51`, the
-   same repository as on the Mac (see the table). If the Mac fetched a later snapshot, the reference vectors in `tests/` can show
-   whether it is still the same model (not run yet).
-5. **SigLIP 512 uses fp32 files on the Mac** and the 256 ones fp16: use fp16 for both once the patch step exists.
-6. **Report the Conv/pads problem to ONNX Runtime**, and keep the patch as a stopgap.
-7. **Upstream file changes**: refuse on a hash mismatch and say so in the Models window; fall back to the processor.
-8. **Where do `maps/`, `runtime/` and `.cache/` live in an installed Mac app?** Recommended: `~/Library/Application Support/photo-map`
-   for maps and models, `~/Library/Caches/photo-map` for what can be made again (prepared networks).
+| Runtime | SigLIP | Gemma |
+|---|---|---|
+| Processor | photo encoder in fp32 (`vision_model_fp16.processor.onnx`) | photo encoder and text model in fp32 |
+| CUDA | as published | fused attention (`vision_encoder_fp16.cuda.onnx`) |
+| TensorRT | layer norms in one piece (`vision_model_fp16.tensorrt.onnx`) | standard operators + separate pooling (`.tensorrt.onnx`, `.pool.onnx`) |
+| CoreML | first convolution's padding written out (`vision_model_fp16.coreml.onnx`) | as published |
+
+- **Processor, fp32**: ONNX Runtime's fp16 arithmetic on a processor is slower. SigLIP 256's photo encoder: 6.7 photos/s fp16,
+  8.3 fp32 (Ryzen 5 5600H), identical vectors; Gemma was about twice as fast in fp32 on an M1. Every fp16 number is an fp32 number,
+  so the copy is the same model. Search words alone stay fp16 (SigLIP's text encoder would be 1.1 GB in fp32).
+- **Gemma, CUDA**: the export widens attention heads from 64 to 68 to carry the padding mask, which keeps ONNX Runtime off its
+  fused attention; the patch puts them back to 64 and passes the mask as attention bias.
+- **Gemma, TensorRT**: TensorRT can't read ONNX Runtime's own `SimplifiedLayerNormalization` and `MultiHeadAttention`; they are
+  written with standard operators (`RMSNormalization`, opset 23; matrix products and softmax). Each norm's input is divided by 16
+  and epsilon by 256 first (the same result), because TensorRT squares in fp16 and overflows above 256. The pooling after the
+  layers comes out wrong in TensorRT, so it is a second small network on CUDA.
+- **SigLIP, TensorRT**: the publisher's files are opset 14, so every layer norm is spelled out (mean, subtract, square, ...).
+  ONNX Runtime fuses that on the processor and CUDA, but TensorRT squares in fp16 and overflows: the vectors came out wrong
+  (cosine 0.48 to the right ones). Each norm becomes one `LayerNormalization` (opset 17), with the same divide-by-16.
+- **SigLIP, CoreML**: ONNX Runtime's CoreML provider refuses a convolution without explicit padding ("Required param 'pad' is
+  missing"); the file is valid (no padding means zeros). The patch writes `pads = [0, 0, 0, 0]`. The Mac earlier used a bigger
+  rewrite (the convolution as reshape, transpose and matrix product); whether the small patch is enough is to be checked on a Mac.
+- Patched networks point at the publisher's weights where those are in a separate file (Gemma), so they take little room; SigLIP's
+  weights are inside its files, so its patched copies are full copies (190 MB, or 370 MB in fp32).
+- ONNX files are read and written with the `onnx-protobuf` crate (pure Rust; it needs `protobuf` pinned to 3.4.0).
+
+## Checks (on Linux, RTX 3050 Ti; `models_match_the_maps` in src/models.rs)
+
+The public files, patched for each runtime, against vectors that existing maps hold (made with the earlier files: our own SigLIP
+export, and Gemma's Python-patched files). Lowest cosine over 24 photos per map:
+
+| Model, map | Processor | CUDA | TensorRT |
+|---|---|---|---|
+| SigLIP 256, rare-species 2 | 0.99996 | 0.99996 | 0.99998 |
+| SigLIP 256, nasa | 0.99988 | 0.99988 | 0.99995 |
+| Gemma, rare-species | 0.99879 | 0.99880 | 0.99851 |
+| Gemma, everything from usb | 0.99986 | 0.99983 | 1.00000 |
+
+So maps made before keep working ("everything from usb" was made on TensorRT: the Rust patch gives exactly what the Python one did). On a computer without these maps, `backends_agree` compares every backend with the processor.
+
+## Open
+
+- The Mac: CoreML with the small SigLIP patch, Gemma on CoreML, speeds (see docs/macos-models-task.md).
+- `tools/onnx_fuse_attention.py`, `tools/onnx_trt_ready.py` and `tools/siglip_export.py` are no longer used by anything.
+- Report the Conv/pads problem to ONNX Runtime.
+- In an installed Mac app, `maps/`, `runtime/` and `.cache/` should live in `~/Library/Application Support/photo-map` (and the
+  remakeable part in `~/Library/Caches/photo-map`).
