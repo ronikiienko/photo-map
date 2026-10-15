@@ -56,6 +56,7 @@ struct Opened {
 
 const START: [u8; 4] = [0, 0, 0, 1];
 
+
 fn open(path: &Path) -> Result<Opened> {
     let mut file = File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
@@ -192,7 +193,15 @@ pub fn frames(path: &Path, every: f64, mut each: impl FnMut(VideoFrame) -> bool)
     // the groups: from a key frame to the next one
     let mut starts: Vec<usize> = (0..video.samples.len()).filter(|i| video.samples[*i].sync || *i == 0).collect();
     starts.push(video.samples.len());
-    let mut next = 0u64; // the next wanted time is next * every
+    // When each group first shows: a key frame is decoded by itself, so a wanted time near one is moved onto it. Any other picture
+    // costs the decoding of everything between it and its key frame (on average, half a group), which is most of the work.
+    let shows: Vec<f64> = (0..starts.len() - 1).map(|g| video.samples[starts[g]..starts[g + 1]].iter().map(|s| s.seconds).fold(f64::INFINITY, f64::min)).collect();
+    let snap = |t: f64| {
+        let at = shows.partition_point(|s| *s < t);
+        let nearest = [at.checked_sub(1), (at < shows.len()).then_some(at)].into_iter().flatten().map(|i| shows[i]).min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()));
+        nearest.filter(|s| (s - t).abs() <= every / 2.0).unwrap_or(t)
+    };
+    let mut next = 0u64; // the next wanted time is snap(next * every)
     let mut jobs = Vec::new();
     for g in 0..starts.len() - 1 {
         let (from, to) = (starts[g], starts[g + 1]);
@@ -201,8 +210,8 @@ pub fn frames(path: &Path, every: f64, mut each: impl FnMut(VideoFrame) -> bool)
         // this group shows from its first picture to the next group's first
         let until = if g + 2 < starts.len() { video.samples[starts[g + 1]..starts[g + 2]].iter().map(|s| s.seconds).fold(f64::INFINITY, f64::min) } else { video.seconds };
         let mut targets = Vec::new();
-        while (next as f64 * every) < until {
-            targets.push(next as f64 * every);
+        while snap(next as f64 * every) < until {
+            targets.push(snap(next as f64 * every));
             next += 1;
         }
         if !targets.is_empty() {
@@ -424,5 +433,25 @@ mod tests {
         })
         .unwrap();
         eprintln!("{n} frames in {:.1} s", started.elapsed().as_secs_f32());
+    }
+
+    /// Where the time goes for one video in PHOTO_MAP_VIDEO: opening it, and decoding with few or many pictures wanted.
+    #[test]
+    #[ignore]
+    fn video_where_time_goes() {
+        let path = std::path::PathBuf::from(std::env::var("PHOTO_MAP_VIDEO").expect("PHOTO_MAP_VIDEO"));
+        let t = std::time::Instant::now();
+        let about = info(&path).unwrap();
+        eprintln!("WHERE open: {:.2} s ({:.0} s of video)", t.elapsed().as_secs_f64(), about.seconds);
+        for every in [100000.0, 20.0, 2.0, 1.0] {
+            let t = std::time::Instant::now();
+            let mut n = 0;
+            frames(&path, every, |_| {
+                n += 1;
+                true
+            })
+            .unwrap();
+            eprintln!("WHERE every {every}: {n} frames in {:.2} s", t.elapsed().as_secs_f64());
+        }
     }
 }

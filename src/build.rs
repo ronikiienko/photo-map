@@ -29,6 +29,9 @@ pub const VIDEO_TYPES: [&str; 3] = ["mp4", "mov", "m4v"];
 /// Photos the encoder runs on at once.
 const BATCH: usize = 4;
 
+/// How many pictures of a video are cut and handed to the model at once.
+const CUT: usize = 16;
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
@@ -708,62 +711,84 @@ fn understand_videos(ctx: &mut Ctx) -> Result<Flow, String> {
         let label = |at: f64| format!("video {} of {}: {name}, {} of {}", k + 1, files.len(), clock(at), clock(info.seconds));
         ctx.progress(before as usize, total.ceil() as usize, label(0.0));
 
-        // the pictures, understood four at a time
-        let mut vectors: Vec<(f64, Vec<f32>)> = Vec::new();
-        let mut pending: Vec<(Prepared, image::RgbaImage, f64, usize)> = Vec::new();
-        let mut taken = 0usize;
-        let mut fatal: Option<String> = None;
+        // The pictures are cut CUT at a time, side by side on all the processor's cores, and handed to a thread of their own that feeds
+        // the model: the card works on one lot while the next is being cut (and the decoders keep going meanwhile).
+        let pictures = cache.join("pictures");
         let mut paused = false;
-        let flush = |pending: &mut Vec<(Prepared, image::RgbaImage, f64, usize)>, vectors: &mut Vec<(f64, Vec<f32>)>, fatal: &mut Option<String>| {
-            if pending.is_empty() {
-                return;
-            }
-            let batch = std::mem::take(pending);
-            let (prepared, rest): (Vec<Prepared>, Vec<(image::RgbaImage, f64, usize)>) = batch.into_iter().map(|(p, t, s, i)| (p, (t, s, i))).unzip();
-            let results = match ctx.hub.with(&model_id, |m| m.embed_prepared(prepared)) {
-                Ok(r) => r,
-                Err(e) => rest.iter().map(|_| Err(e.clone())).collect(),
+        let stopped = AtomicBool::new(false);
+        let (read, vectors, fatal) = std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<(Prepared, image::RgbaImage, f64)>, f64)>(2);
+            let (ctx, label, stopped, model_id) = (&*ctx, &label, &stopped, &model_id);
+            let feeder = scope.spawn(move || {
+                let mut vectors: Vec<(f64, Vec<f32>)> = Vec::new();
+                let mut fatal: Option<String> = None;
+                for (lot, at) in rx {
+                    if fatal.is_some() {
+                        continue; // the cutting side is stopping: what is still on its way is dropped
+                    }
+                    let (prepared, rest): (Vec<Prepared>, Vec<(image::RgbaImage, f64)>) = lot.into_iter().map(|(p, t, s)| (p, (t, s))).unzip();
+                    let results = match ctx.hub.with(model_id, |m| m.embed_prepared(prepared)) {
+                        Ok(r) => r,
+                        Err(e) => rest.iter().map(|_| Err(e.clone())).collect(),
+                    };
+                    let (mut thumbs, mut head) = (Vec::new(), None);
+                    for ((thumb, seconds), result) in rest.into_iter().zip(results) {
+                        match result {
+                            Ok(v) => {
+                                head = Some(v[..HEAD].to_vec());
+                                vectors.push((seconds, v));
+                                thumbs.push(thumb);
+                            }
+                            Err(e) if e.contains("running") || e.contains("loading") => {
+                                fatal = Some(e);
+                                stopped.store(true, Ordering::Relaxed);
+                            }
+                            Err(_) => {} // a picture the model couldn't understand is left out
+                        }
+                    }
+                    ctx.show_recent(thumbs, head);
+                    ctx.set_done((before + at) as usize);
+                    ctx.shared.state.lock().unwrap().message = label(at);
+                }
+                (vectors, fatal)
+            });
+            let mut taken = 0usize; // pictures are named by their order among those asked for
+            let mut waiting: Vec<crate::video::VideoFrame> = Vec::new();
+            let mut hand_over = |waiting: &mut Vec<crate::video::VideoFrame>| {
+                let frames = std::mem::take(waiting);
+                let (first, at) = (taken, frames.last().map_or(0.0, |f| f.seconds));
+                taken += frames.len();
+                let made: Vec<Option<(Prepared, image::RgbaImage, f64)>> = frames
+                    .par_iter()
+                    .enumerate()
+                    .map(|(j, frame)| {
+                        let needed = spec.longest_side_needed(frame.image.width(), frame.image.height());
+                        let prepared = spec.prepare(&crate::photo::fit(&frame.image, needed, false)).ok()?;
+                        let shown = crate::photo::fit(&frame.image, SCENE_PICTURE, false);
+                        save_jpeg(&shown, &pictures.join(format!("{:05}.jpg", first + j)), 85).ok()?;
+                        Some((prepared, thumbnail(&frame.image), frame.seconds))
+                    })
+                    .collect();
+                tx.send((made.into_iter().flatten().collect(), at)).is_ok()
             };
-            let (mut thumbs, mut head) = (Vec::new(), None);
-            for ((thumb, seconds, index), result) in rest.into_iter().zip(results) {
-                match result {
-                    Ok(v) => {
-                        head = Some(v[..HEAD].to_vec());
-                        vectors.push((seconds, v));
-                        let _ = index;
-                        thumbs.push(thumb);
-                    }
-                    Err(e) if e.contains("running") || e.contains("loading") => *fatal = Some(e),
-                    Err(_) => {} // a picture the model couldn't understand is left out
+            let read = crate::video::frames(file, settings.every, |frame| {
+                if ctx.paused() {
+                    paused = true;
+                    return false;
                 }
-            }
-            ctx.show_recent(thumbs, head);
-        };
-        let read = crate::video::frames(file, settings.every, |frame| {
-            if ctx.paused() {
-                paused = true;
-                return false;
-            }
-            let needed = spec.longest_side_needed(frame.image.width(), frame.image.height());
-            let small = crate::photo::fit(&frame.image, needed, false);
-            match spec.prepare(&small) {
-                Ok(prepared) => {
-                    let shown = crate::photo::fit(&frame.image, SCENE_PICTURE, false);
-                    if save_jpeg(&shown, &cache.join("pictures").join(format!("{taken:05}.jpg")), 85).is_ok() {
-                        pending.push((prepared, thumbnail(&frame.image), frame.seconds, taken));
-                        taken += 1;
-                    }
+                waiting.push(frame);
+                if waiting.len() >= CUT && !hand_over(&mut waiting) {
+                    return false;
                 }
-                Err(_) => {}
+                !stopped.load(Ordering::Relaxed)
+            });
+            if !waiting.is_empty() {
+                hand_over(&mut waiting);
             }
-            if pending.len() >= BATCH {
-                flush(&mut pending, &mut vectors, &mut fatal);
-                ctx.set_done((before + frame.seconds) as usize);
-                ctx.shared.state.lock().unwrap().message = label(frame.seconds);
-            }
-            fatal.is_none()
+            drop(tx);
+            let (vectors, fatal) = feeder.join().expect("the feeding thread");
+            (read, vectors, fatal)
         });
-        flush(&mut pending, &mut vectors, &mut fatal);
         if let Some(e) = fatal {
             return Err(e);
         }
@@ -1506,5 +1531,78 @@ mod tests {
         let again = build("by siglip again", models::SIGLIP_BASE_512);
         assert_eq!(fs::read(again.join("embeddings.bin")).unwrap(), vectors);
         fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// Times what the videos stage does to each picture besides the model, on the video in PHOTO_MAP_VIDEO (every 2 s).
+    /// cargo test --release video_cpu_steps -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn video_cpu_steps() {
+        let path = PathBuf::from(std::env::var("PHOTO_MAP_VIDEO").expect("PHOTO_MAP_VIDEO"));
+        let spec = models::spec(models::SIGLIP_BASE_256).expect("spec");
+        let out = std::env::temp_dir().join("photo-map-video-steps");
+        fs::create_dir_all(&out).unwrap();
+        let t = |_name: &str, total: &mut [f64; 6], k: usize, since: &mut Instant| {
+            total[k] += since.elapsed().as_secs_f64();
+            *since = Instant::now();
+        };
+        let mut decoded = 0usize;
+        let bare = Instant::now();
+        crate::video::frames(&path, 2.0, |_| {
+            decoded += 1;
+            true
+        })
+        .unwrap();
+        eprintln!("decoding alone: {decoded} frames in {:.1} s = {:.1} frames/s", bare.elapsed().as_secs_f64(), decoded as f64 / bare.elapsed().as_secs_f64());
+        let mut total = [0f64; 6];
+        let mut n = 0usize;
+        let started = Instant::now();
+        crate::video::frames(&path, 2.0, |frame| {
+            let mut since = Instant::now();
+            let needed = spec.longest_side_needed(frame.image.width(), frame.image.height());
+            let small = crate::photo::fit(&frame.image, needed, false);
+            t("fit to model size", &mut total, 0, &mut since);
+            let prepared = spec.prepare(&small);
+            t("prepare", &mut total, 1, &mut since);
+            let shown = crate::photo::fit(&frame.image, SCENE_PICTURE, false);
+            t("fit to 1024", &mut total, 2, &mut since);
+            let _ = save_jpeg(&shown, &out.join("a.jpg"), 85);
+            t("jpeg", &mut total, 3, &mut since);
+            let _thumb = thumbnail(&frame.image);
+            t("thumbnail", &mut total, 4, &mut since);
+            drop(prepared);
+            n += 1;
+            true
+        })
+        .unwrap();
+        let wall = started.elapsed().as_secs_f64();
+        let steps = ["fit to model size", "prepare", "fit to 1024", "jpeg", "thumbnail"];
+        eprintln!("{n} frames in {wall:.1} s wall = {:.1} frames/s; the steps below run on one thread, in the order the frames arrive:", n as f64 / wall);
+        for (name, secs) in steps.iter().zip(total) {
+            eprintln!("  {name:>18}: {:6.1} ms per frame", secs * 1000.0 / n as f64);
+        }
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    /// How long a map of one folder of videos takes, start to finish, without pausing. PHOTO_MAP_MEDIA: the folder.
+    /// PHOTO_MAP_MEDIA=<dir> cargo test --release video_map_speed -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn video_map_speed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+        let media = PathBuf::from(std::env::var("PHOTO_MAP_MEDIA").expect("PHOTO_MAP_MEDIA"));
+        let maps = std::env::temp_dir().join(format!("photo-map-speed-{}", std::process::id()));
+        fs::create_dir_all(&maps).unwrap();
+        let model = models::test_hub_with(models::SIGLIP_BASE_256);
+        let settings = VideoSettings { every: 2.0, ..Default::default() };
+        let dir = create(&maps, "speed", &[media], false, 1, models::SIGLIP_BASE_256, Some(settings)).unwrap();
+        let started = Instant::now();
+        let run = Run::start(dir, root, model, || {}).unwrap();
+        while run.running() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(run.state().error.is_none(), "{:?}", run.state().error);
+        eprintln!("SPEED: {:.1} s", started.elapsed().as_secs_f64());
+        fs::remove_dir_all(&maps).unwrap();
     }
 }
