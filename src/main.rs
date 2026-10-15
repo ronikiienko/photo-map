@@ -323,6 +323,7 @@ impl Viewer {
                     name: b.job.name.clone(),
                     source: build::describe(&b.job.sources),
                     stage: state.as_ref().map_or(b.job.stage, |s| s.stage),
+                    videos: b.job.videos.is_some(),
                     running: run.is_some_and(|r| r.running()),
                     backend: backend.clone(),
                     queued: self.queue.contains(&b.dir),
@@ -404,7 +405,7 @@ impl Viewer {
         use home::Action;
         match action {
             Action::Open(path) => self.open(path),
-            Action::Create { name, sources, names_as_captions, every, model } => match build::create(self.library.dir(), &name, &sources, names_as_captions, every, &model) {
+            Action::Create { name, sources, names_as_captions, every, model, videos } => match build::create(self.library.dir(), &name, &sources, names_as_captions, every, &model, videos) {
                 Ok(dir) => {
                     self.library.refresh();
                     self.queue.push(dir);

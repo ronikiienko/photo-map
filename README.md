@@ -1,7 +1,9 @@
 # photo-map
 
 A viewer that lays your photos out as a map: similar photos sit close together, and you search them with words or another photo.
-Rust, wgpu and egui. The photos are embedded on your own machine with ONNX Runtime (CUDA and TensorRT when there is an NVIDIA card).
+Rust, wgpu and egui. The photos are embedded on your own machine with ONNX Runtime (CUDA and TensorRT when there is an NVIDIA card, CoreML on a Mac).
+Videos (MP4 and MOV, H.264 and H.265) become scenes on the map, understood by their pictures only (no sound): see `docs/video.md`, which
+starts with what a map of videos takes for granted.
 
 - `src/` the viewer and the map builder (scan, copy, embed, layout, regions, names, bake)
 - `tests/` fixtures for the tests

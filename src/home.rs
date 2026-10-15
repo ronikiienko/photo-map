@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 pub enum Action {
     Open(PathBuf),
-    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String },
+    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String, videos: Option<build::VideoSettings> },
     Pause(PathBuf),
     SetBackend(crate::backends::Backend),
     GetModel(String),
@@ -40,6 +40,8 @@ pub struct BuildView {
     /// Where the photos came from, in words.
     pub source: String,
     pub stage: Stage,
+    /// The map has videos in it (the list of steps has a step for them).
+    pub videos: bool,
     pub running: bool,
     /// What the models run on while it is made ("on the graphics card"), once a model is loaded.
     pub backend: String,
@@ -69,14 +71,41 @@ struct NewMap {
     name_edited: bool,
     /// Which list of sources `photos` counts (the list as text).
     counted: String,
-    count: Option<Receiver<usize>>,
-    /// How many photos the sources hold, all of them.
-    photos: Option<usize>,
+    count: Option<Receiver<Counts>>,
+    /// What the sources hold, all of it.
+    found: Option<Counts>,
+    /// Videos are put on the map (when there are any), a picture every `video_every` seconds.
+    with_videos: bool,
+    video_every: f64,
     /// Use every Nth photo.
     every: usize,
     names_as_captions: bool,
     /// The id of the model that will make the photos' vectors (models.rs).
     model: String,
+}
+
+/// What a list of folders and files holds.
+#[derive(Clone, Copy, Default)]
+struct Counts {
+    photos: usize,
+    videos: usize,
+    /// Videos the app can't read (another codec or container).
+    unreadable: usize,
+    /// Seconds of video, of those it can read.
+    seconds: f64,
+}
+
+/// Look through the sources: how many photos and videos, and how long the videos are (from their headers).
+fn count(sources: &[PathBuf]) -> Counts {
+    let videos = build::collect_files(sources, build::is_video);
+    let infos: Vec<_> = videos.iter().map(|v| crate::video::info(v)).collect();
+    Counts { photos: build::collect_photos(sources, 1).len(), videos: videos.len(), unreadable: infos.iter().filter(|i| i.is_err()).count(), seconds: infos.iter().flatten().map(|i| i.seconds).sum() }
+}
+
+/// 3 h 20 min, 12 min, 40 s.
+fn long_time(seconds: f64) -> String {
+    let s = seconds.round() as u64;
+    if s >= 3600 { format!("{} h {} min", s / 3600, s % 3600 / 60) } else if s >= 60 { format!("{} min", s / 60) } else { format!("{s} s") }
 }
 
 impl NewMap {
@@ -119,7 +148,7 @@ impl Home {
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, every: 1, names_as_captions: false, model: crate::models::DEFAULT.to_string() });
+        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, found: None, with_videos: true, video_every: build::VideoSettings::default().every, every: 1, names_as_captions: false, model: crate::models::DEFAULT.to_string() });
     }
 
     pub fn set_drag_over(&mut self, over: bool) {
@@ -130,7 +159,7 @@ impl Home {
     /// of them was a folder or a photo.
     pub fn dropped(&mut self, paths: Vec<PathBuf>) -> bool {
         self.drag_over = false;
-        let usable: Vec<PathBuf> = paths.into_iter().filter(|p| p.is_dir() || build::is_photo(p)).collect();
+        let usable: Vec<PathBuf> = paths.into_iter().filter(|p| p.is_dir() || build::is_photo(p) || build::is_video(p)).collect();
         if usable.is_empty() {
             return false;
         }
@@ -285,7 +314,7 @@ impl Home {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let steps: Vec<Stage> = Stage::ALL.into_iter().filter(|&s| s != Stage::Finish).collect();
+                    let steps: Vec<Stage> = Stage::ALL.into_iter().filter(|&s| s != Stage::Finish && (s != Stage::Videos || b.videos)).collect();
                     for (i, s) in steps.iter().enumerate() {
                         step(ui, *s, b.stage, i + 1 == steps.len());
                     }
@@ -300,7 +329,7 @@ impl Home {
                     }
                     Some(s) if b.running => {
                         let frac = if s.total > 0 { (s.done as f32 / s.total as f32).clamp(0.0, 1.0) } else { 0.0 };
-                        if b.stage == Stage::Embed {
+                        if matches!(b.stage, Stage::Embed | Stage::Videos) {
                             self.film(ui, s);
                         }
                         ui.add(egui::ProgressBar::new(frac).desired_height(8.0).fill(theme::ACCENT));
@@ -499,7 +528,28 @@ impl Home {
         let response = theme::modal(ctx, "storage", 480.0, None, |ui| {
             closed = theme::window_header(ui, &format!("What takes space in “{}”", entry.name));
             ui.label(RichText::new(format!("{} on disk", storage::human(sizes.total()))).size(17.0));
-            ui.label(theme::muted(format!("for {} photos", thousands(entry.photos))));
+            // a map with videos: its entities are the photos and then the scenes of the videos (videos.json says how many)
+            let videos: Option<serde_json::Value> = std::fs::read(path.join("videos.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+            let scenes = videos.as_ref().and_then(|v| v["scenes"].as_u64()).unwrap_or(0) as usize;
+            if let Some(v) = videos.as_ref().filter(|_| scenes > 0) {
+                let (all, left_out) = (v["videos"].as_u64().unwrap_or(0), v["skipped"].as_array().map_or(0, Vec::len));
+                ui.label(theme::muted(format!("for {} photos and {} scenes of {} video{}", thousands(entry.photos.saturating_sub(scenes)), thousands(scenes), all - left_out as u64, if all - left_out as u64 == 1 { "" } else { "s" })));
+            } else {
+                ui.label(theme::muted(format!("for {} photos", thousands(entry.photos))));
+            }
+            if let Some(left_out) = videos.as_ref().and_then(|v| v["skipped"].as_array()).filter(|l| !l.is_empty()) {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("{} video{} left out of the map", left_out.len(), if left_out.len() == 1 { " was" } else { "s were" })).color(Color32::from_rgb(235, 150, 100)));
+                for item in left_out.iter().take(6) {
+                    ui.label(theme::muted(format!("• {}: {}", item["file"].as_str().and_then(|f| Path::new(f).file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), item["why"].as_str().unwrap_or(""))));
+                }
+                if left_out.len() > 6 {
+                    ui.label(theme::muted(format!("and {} more (all are listed in videos.json in the map's folder)", left_out.len() - 6)));
+                }
+            }
+            if scenes > 0 {
+                ui.label(theme::muted("The videos are not copied into the map: it holds one picture for each scene and points at the video where it is. A scene is found by its video's name and time."));
+            }
             ui.add_space(8.0);
             let total = sizes.total().max(1) as f32;
             for (i, part) in sizes.parts().iter().enumerate() {
@@ -599,11 +649,48 @@ impl Home {
         self.models_window(ctx, rt, store, actions);
     }
 
+    /// What the videos in the sources will do, in plain words (what is assumed is said here, not left to be found out).
+    fn video_options(ui: &mut Ui, nm: &mut NewMap, found: Counts) {
+        let readable = found.videos - found.unreadable;
+        ui.add_space(6.0);
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.checkbox(&mut nm.with_videos, "Put the videos on the map").on_hover_text("Each video becomes scenes, and each scene is one picture on the map.");
+            if found.unreadable > 0 {
+                ui.label(RichText::new(format!("{} video{} can't be read and will be left out: this version reads MP4 and MOV files holding H.264 or H.265 (most phone and camera videos), not other formats.", found.unreadable, if found.unreadable == 1 { "" } else { "s" })).color(Color32::from_rgb(235, 150, 100)));
+            }
+            if readable == 0 {
+                return;
+            }
+            if !nm.with_videos {
+                ui.label(theme::muted("Without this the videos are ignored and the map is made from the photos only."));
+                return;
+            }
+            ui.horizontal(|ui| {
+                ui.label("A picture every");
+                theme::segmented(ui, &mut nm.video_every, &[(1.0, "1 s", "a picture every second: the most detailed, the slowest"), (2.0, "2 s", "a picture every 2 seconds"), (5.0, "5 s", "a picture every 5 seconds"), (10.0, "10 s", "a picture every 10 seconds: fast, short scenes may be missed")]);
+            });
+            let pictures = (found.seconds / nm.video_every).ceil() as usize;
+            ui.label(theme::muted(format!("{} of video: about {} pictures will be understood, each taking as long as a photo.", long_time(found.seconds), thousands(pictures))));
+            ui.add_space(4.0);
+            ui.label(RichText::new("What to expect").size(13.0).strong());
+            for line in [
+                "A scene is a run of pictures that look alike. It goes on the map as one picture (its most typical one), named with the video and the time it covers. A video makes at most 40 scenes.",
+                "Only what the picture shows is used. The sound is ignored.",
+                "The map can't play a video in this version. A scene shows its picture, the video's name and the time, so you can find the moment in your own player.",
+                "Your videos stay where they are and are not copied into the map: if you move or delete one, its scenes stay on the map but point at nothing.",
+                "How videos are cut into scenes is a guess that works best on footage with clear changes. A long steady shot is one scene.",
+            ] {
+                ui.label(theme::muted(format!("• {line}")));
+            }
+        });
+    }
+
     fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         let Some(nm) = &mut self.new_map else { return };
         if let Some(rx) = &nm.count {
-            if let Ok(n) = rx.try_recv() {
-                nm.photos = Some(n);
+            if let Ok(found) = rx.try_recv() {
+                nm.found = Some(found);
                 nm.count = None;
             }
         }
@@ -649,8 +736,9 @@ impl Home {
                         nm.add(folders);
                     }
                 }
-                if ui.button("Add photos…").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().set_title("Photos").add_filter("Photos", &build::TYPES).pick_files() {
+                if ui.button("Add photos or videos…").clicked() {
+                    let all: Vec<&str> = build::TYPES.iter().chain(build::VIDEO_TYPES.iter()).copied().collect();
+                    if let Some(files) = rfd::FileDialog::new().set_title("Photos and videos").add_filter("Photos and videos", &all).add_filter("Photos", &build::TYPES).add_filter("Videos", &build::VIDEO_TYPES).pick_files() {
                         nm.add(files);
                     }
                 }
@@ -659,14 +747,14 @@ impl Home {
             let key = sources.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
             if nm.counted != key {
                 nm.counted = key;
-                nm.photos = None;
+                nm.found = None;
                 nm.count = None;
                 if !sources.is_empty() {
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     let list = sources.clone();
                     std::thread::spawn(move || {
-                        let _ = tx.send(build::collect_photos(&list, 1).len());
+                        let _ = tx.send(count(&list));
                         ctx.request_repaint();
                     });
                     nm.count = Some(rx);
@@ -683,9 +771,14 @@ impl Home {
             if sources.is_empty() {
                 // nothing to count yet
             } else if nm.count.is_some() {
-                ui.label(theme::muted("Counting photos…"));
-            } else if let Some(n) = nm.photos {
-                ui.label(theme::muted(if nm.every > 1 { format!("{} photos found, {} of them used", thousands(n), thousands(n.div_ceil(nm.every))) } else { format!("{} photos found", thousands(n)) }));
+                ui.label(theme::muted("Counting photos and videos…"));
+            } else if let Some(found) = nm.found {
+                let n = found.photos;
+                let photos = if nm.every > 1 { format!("{} photos found, {} of them used", thousands(n), thousands(n.div_ceil(nm.every))) } else { format!("{} photos found", thousands(n)) };
+                ui.label(theme::muted(if found.videos > 0 { format!("{photos}, {} video{} found", thousands(found.videos), if found.videos == 1 { "" } else { "s" }) } else { photos }));
+                if found.videos > 0 {
+                    Self::video_options(ui, nm, found);
+                }
             }
             ui.add_space(8.0);
             ui.label("How many");
@@ -734,9 +827,9 @@ impl Home {
             ui.label(theme::muted("It can take a while for many photos. You can pause, close the app and carry on later."));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
+                let ok = problem.is_none() && !sources.is_empty() && nm.found.is_some_and(|f| f.photos > 0 || (nm.with_videos && f.videos > f.unreadable)) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
-                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone() });
+                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone(), videos: nm.found.filter(|f| nm.with_videos && f.videos > f.unreadable).map(|_| build::VideoSettings { every: nm.video_every, ..Default::default() }) });
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;
@@ -1021,6 +1114,7 @@ fn step(ui: &mut Ui, step: Stage, current: Stage, last: bool) {
     let short = match step {
         Stage::Scan => "Find",
         Stage::Copy => "Copy",
+        Stage::Videos => "Videos",
         Stage::Embed => "Understand",
         Stage::Layout => "Lay out",
         Stage::Regions => "Regions",

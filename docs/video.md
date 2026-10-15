@@ -1,6 +1,41 @@
-# Video (src/video.rs, src/scenes.rs)
+# Video (src/video.rs, src/scenes.rs, the Videos stage in src/build.rs)
 
-Not yet part of a map: these are the two parts a map of videos is made from. What is missing is in "Open".
+Videos in a folder become scenes on the map. **Read the assumptions first: each is a choice that can be changed, and each is said to
+the user in the New map form.**
+
+## Assumptions (what a map with videos takes for granted)
+
+1. **Only what the pictures show is used. The sound is ignored.** (Audio is not looked at at all; see "Open".)
+2. **Which videos**: MP4, MOV and M4V files holding H.264 or H.265. Anything else (MKV, AVI, WebM, VP9, AV1, ProRes...) is left out,
+   counted in the form ("3 videos can't be read") and listed in the map's details and in `videos.json`.
+3. **A picture is taken every 2 s** (1, 2, 5 or 10 in the form) and understood by the map's model like a photo, so each costs as much
+   as a photo. The setting is fixed for the map.
+4. **A scene is a run of pictures that look alike**: a picture starts a new scene when its vector's cosine to the scene so far is
+   under 0.9; scenes under 3 s are joined to the neighbour they resemble; a video makes **at most 40 scenes** (the most alike
+   neighbours are joined). The numbers are guesses (see "Scenes"); a long steady shot is one scene.
+5. **A scene is one entity of the map, like a photo**: its picture is the frame nearest the scene's average (JPEG, 1024 px on the long
+   side, in `originals/`), its vector is the scene's average vector, its title is "▶ name, 0:08 to 0:20". It is laid out, put in
+   regions, named and searched exactly as photos are. Scenes come after the photos in `photos.json`.
+6. **No playback**: the map shows the picture, the video's name and the time. The video's path and times are in the photo's `meta`
+   (`video`, `from`, `to`, `pictures`).
+7. **Videos are not copied or linked into the map.** Move or delete one and its scenes stay on the map but point at nothing.
+8. **Videos are never reused from earlier maps** (photos are, by file): a bigger map of the same videos reads them again.
+9. **A pause in the middle of a video loses that video's progress** (the finished videos are kept); the video is read again.
+10. `1 in N` ("How many") applies to photos only.
+
+## How a build does it
+
+- Scan counts photos only; the form counts both (`home::count`: videos by their headers, so it also knows their length and which it
+  can't read). A folder of only videos is a map.
+- **Videos stage** (between Copy and Embed; shown in the list of steps only for maps with videos): each video is read by
+  `video::frames`, its pictures kept as small JPEGs in `videos/<k>/pictures/`, understood four at a time, split with
+  `scenes::split`; the scene pictures and vectors are kept in `videos/<k>/` (`done.json` marks a video finished, or says why it was
+  left out). When all are done the scenes are appended to `photos.json` (the first N entries, N = the photos Copy wrote, are kept, so
+  the stage can run again), their pictures to `originals/`, and their vectors go to `scene_vectors.bin`.
+- **Embed stage** treats the scenes as already embedded: their vectors come from `scene_vectors.bin`, no model run.
+- Finish keeps `videos.json` (counts, videos left out with the reason) in the map, adds `videos` to the manifest, and removes the working
+  files.
+- Progress is in seconds of video; the card shows the pictures going by, as for photos.
 
 ## Reading frames (`video::frames`)
 
@@ -29,8 +64,11 @@ and saves each one's picture in .cache/test/scenes/.
 
 ## Open
 
-- Putting scenes in a map: the build steps (Find, Copy, Understand, ...) know photos only. A scene needs an entity that refers to a
-  video and a time span, a picture for the map's tiles, a search result that opens the video at the time, and re-use of vectors when
-  a map is made again.
-- Settings: the frame interval, the threshold, the most scenes per video (and an estimate of the time from the model's speed).
+- Playing a scene: in the map (needs a player: the decoder is there, a renderer and sound are not) or in the system's player at the
+  time (opening a file with its default program does not seek).
+- The threshold and the cap are not in the form (only the interval is); the threshold depends on the model and the footage.
+- Time left for the Videos stage is a percentage, not an estimate from the model's speed.
 - Audio: not looked at (see the notes on EmbeddingGemma 2 in docs/models.md).
+- Reusing a video's pictures when a map is made again; resuming inside a video.
+- Other codecs and containers; hardware decoding (needs unsafe bindings to the system's decoder).
+- A scene's frames are not kept (only its typical one), so a scene can't be shown as a strip.

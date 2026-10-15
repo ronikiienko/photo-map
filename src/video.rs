@@ -254,7 +254,7 @@ fn decode_h264(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usi
     use openh264::decoder::{Decoder, DecoderConfig, Flush};
     use openh264::formats::YUVSource;
     let mut decoder = Decoder::with_api_config(openh264::OpenH264API::from_source(), DecoderConfig::new().flush_after_decode(Flush::NoFlush)).map_err(|e| format!("starting the H.264 decoder: {e}"))?;
-    let mut handle = |yuv: &openh264::decoder::DecodedYUV, count: &mut usize, give: &mut dyn FnMut(RgbaImage, usize)| {
+    let handle = |yuv: &openh264::decoder::DecodedYUV, count: &mut usize, give: &mut dyn FnMut(RgbaImage, usize)| {
         let n = *count;
         *count += 1;
         // only the wanted pictures are made into colours
@@ -286,7 +286,7 @@ fn decode_h264(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usi
 /// Decode one group with the pure-Rust H.265 decoder.
 fn decode_h265(video: &Opened, packets: &[Vec<u8>], last: usize, count: &mut usize, give: &mut dyn FnMut(RgbaImage, usize)) -> Result<()> {
     let mut decoder = rusty_h265::Decoder::new();
-    let mut drain = |decoder: &mut rusty_h265::Decoder, count: &mut usize, give: &mut dyn FnMut(RgbaImage, usize)| -> bool {
+    let drain = |decoder: &mut rusty_h265::Decoder, count: &mut usize, give: &mut dyn FnMut(RgbaImage, usize)| -> bool {
         while let Ok(frame) = decoder.next_frame() {
             let n = *count;
             *count += 1;
