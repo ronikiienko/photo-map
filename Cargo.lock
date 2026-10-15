@@ -1987,6 +1987,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nasm-rs"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "706bf8a5e8c8ddb99128c3291d31bd21f4bcde17f0f4c20ec678d85c74faa149"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2150,6 +2159,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -2541,6 +2551,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "openh264"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc9071a0b5f9c501ddd01066c2600d922cc799dc450a52975222bcda7755a08"
+dependencies = [
+ "openh264-sys2",
+ "wide",
+]
+
+[[package]]
+name = "openh264-sys2"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ada29a4cadc13d4d326737af87c13e224210d7d99fe47594e9f3f9b0102fd70"
+dependencies = [
+ "cc",
+ "nasm-rs",
+ "walkdir",
+]
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2666,12 +2697,15 @@ dependencies = [
  "memmap2",
  "ndarray",
  "onnx-protobuf",
+ "openh264",
  "ort",
  "pollster",
  "protobuf",
  "rayon",
+ "re_mp4",
  "rfd",
  "rusty_dds",
+ "rusty_h265",
  "serde",
  "serde_json",
  "sha2",
@@ -3083,6 +3117,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "re_mp4"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63d71dca1bc07c053ed67ccfd0b52df652192a6541fbdf85cc3d46142e20d709"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "num-rational",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "read-fonts"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3316,10 +3364,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_h265"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "153eb6abc0c03ba508fecda4ce5b4e7b268a2e697b67ce186fb821db25475e85"
+dependencies = [
+ "rusty_h265-accel",
+]
+
+[[package]]
+name = "rusty_h265-accel"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bba7bb825f634907ff7684a14f4abd999d477e8f7b7a9a8ebbf79ba3ffe0b329"
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "same-file"
@@ -4541,6 +4613,16 @@ dependencies = [
  "raw-window-handle",
  "static_assertions",
  "web-sys",
+]
+
+[[package]]
+name = "wide"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]

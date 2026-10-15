@@ -27,9 +27,11 @@ mod pages;
 mod regions;
 mod reuse;
 mod photo;
+mod scenes;
 mod search;
 mod siglip;
 mod storage;
+mod video;
 mod stream;
 mod theme;
 
