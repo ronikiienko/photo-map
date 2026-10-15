@@ -23,7 +23,7 @@ because the PyTorch reference vectors were not available on the Mac.
 | SigLIP 2 Base 256 / 512 | `onnx-community/siglip2-base-patch16-{256,512}-ONNX` | The first layer, a convolution that cuts the photo into 16 x 16 patches, is replaced by reshape, transpose, matrix multiply and add for the one fixed image size (script not in the repo: `/tmp/pm-scratch/patchify.py` on the Mac). Everything else is as published. The 512 files in use are fp32, the 256 ones fp16. |
 | EmbeddingGemma 2 | `onnx-community/embeddinggemma-2-ONNX` | None on the Mac. |
 | SigLIP on Linux | the project's own PyTorch export (`tools/siglip_export.py`) | outputs `image_features` / `text_features`; the app accepts upstream's `pooler_output` too |
-| Gemma on Linux | origin not recorded in the repo; file names and edges match the onnx-community files | `tools/onnx_fuse_attention.py` (CUDA) and `tools/onnx_trt_ready.py` (TensorRT: standard operators only) |
+| Gemma on Linux | `onnx-community/embeddinggemma-2-ONNX`, snapshot `daa72c51243991dfcaf9f9137d2c573d8f7790c0` (fetched 2026-10-11; `model_fp16` and `vision_encoder_fp16` match its file hashes) | `tools/onnx_fuse_attention.py` (CUDA) and `tools/onnx_trt_ready.py` (TensorRT: standard operators only, plus `vision_pool.onnx`). The `_b4` files are for `tools/bench_*.py` only |
 
 ### Why the SigLIP patch is needed
 
@@ -57,8 +57,9 @@ so any provider can run them. They are not needed on CUDA or TensorRT.
    The Python scripts in `tools/` stay as the reference.
 2. **Which protobuf crate for editing ONNX files in Rust**, without a C++ build dependency? Not checked yet.
 3. **Run the patch only for CoreML?** Recommended: yes. The unpatched public file is used on the processor, CUDA and TensorRT.
-4. **Where did the Gemma ONNX files on Linux come from?** Check with the Linux machine's history; then document it here. The reference
-   vectors in `tests/` can show that the Mac's Gemma files are the same model (not run yet).
+4. **Where did the Gemma ONNX files on Linux come from?** Answered: `onnx-community/embeddinggemma-2-ONNX` at snapshot `daa72c51`, the
+   same repository as on the Mac (see the table). If the Mac fetched a later snapshot, the reference vectors in `tests/` can show
+   whether it is still the same model (not run yet).
 5. **SigLIP 512 uses fp32 files on the Mac** and the 256 ones fp16: use fp16 for both once the patch step exists.
 6. **Report the Conv/pads problem to ONNX Runtime**, and keep the patch as a stopgap.
 7. **Upstream file changes**: refuse on a hash mismatch and say so in the Models window; fall back to the processor.
