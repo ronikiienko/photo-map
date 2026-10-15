@@ -69,12 +69,7 @@ pub fn fit(img: &RgbaImage, long: u32, enlarge: bool) -> RgbaImage {
     }
     let s = long as f32 / cur as f32;
     let (w, h) = (((img.width() as f32 * s).round() as u32).max(1), ((img.height() as f32 * s).round() as u32).max(1));
-    // the bilinear filter, widened when the picture shrinks, is the triangle filter: every source pixel counts
-    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer, images::{Image, ImageRef}};
-    let from = ImageRef::new(img.width(), img.height(), img.as_raw(), PixelType::U8x4).expect("the buffer is the picture's");
-    let mut to = Image::new(w, h, PixelType::U8x4);
-    Resizer::new().resize(&from, &mut to, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))).expect("same pixel type");
-    RgbaImage::from_raw(w, h, to.into_vec()).expect("w x h x 4 bytes")
+    image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle)
 }
 
 #[cfg(test)]
@@ -122,20 +117,5 @@ mod tests {
         }
         assert!(worst < 12, "the scaled picture differs from the full size by up to {worst} of 255");
         let _ = std::fs::remove_file(path);
-    }
-
-    /// How far the resize of `fit` is from the `image` crate's triangle filter it replaced, on the picture in PHOTO_MAP_PICTURE.
-    #[test]
-    #[ignore]
-    fn fit_matches_the_old_resize() {
-        let img = image::open(std::env::var("PHOTO_MAP_PICTURE").expect("PHOTO_MAP_PICTURE")).unwrap().into_rgba8();
-        for long in [256u32, 1024] {
-            let new = fit(&img, long, false);
-            let s = long as f32 / img.width().max(img.height()) as f32;
-            let old = image::imageops::resize(&img, new.width(), new.height(), image::imageops::FilterType::Triangle);
-            let diffs: Vec<u8> = old.as_raw().iter().zip(new.as_raw()).map(|(a, b)| a.abs_diff(*b)).collect();
-            let mean = diffs.iter().map(|d| *d as f64).sum::<f64>() / diffs.len() as f64;
-            eprintln!("FIT {}x{} -> {}x{} (x{s:.3}): mean difference {mean:.3} of 255, largest {}, over 2: {:.3}%", img.width(), img.height(), new.width(), new.height(), diffs.iter().max().unwrap(), 100.0 * diffs.iter().filter(|d| **d > 2).count() as f64 / diffs.len() as f64);
-        }
     }
 }
