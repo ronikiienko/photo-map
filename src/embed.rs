@@ -363,10 +363,11 @@ impl Gemma {
             ];
             let pooled = pool.run(inputs).map_err(err("running the photo pooling"))?;
             let (shape, data) = pooled["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
-            if shape[0] as usize != tokens {
+            // CoreML's filler photos come last and may leave a token of their own: it is cut off
+            if shape[0] as usize != tokens && !(self.apple.is_some() && shape[0] as usize > tokens) {
                 return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
             }
-            data.to_vec()
+            data[..tokens * (data.len() / shape[0] as usize)].to_vec()
         } else {
             let (shape, data) = out["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
             if shape[0] as usize != tokens {
@@ -437,6 +438,29 @@ pub fn shared_model() -> std::sync::Arc<crate::models::Hub> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where the time goes per photo once everything is warm: the layers, the pooling, the text model. PHOTO_MAP_PHOTOS=<folder>.
+    #[test]
+    #[ignore]
+    fn gemma_where_time_goes() {
+        let folder = std::env::var("PHOTO_MAP_PHOTOS").expect("PHOTO_MAP_PHOTOS");
+        let mut files: Vec<_> = std::fs::read_dir(folder).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "jpg")).collect();
+        files.sort();
+        let cuts = || -> Vec<Patches> { files.iter().take(8).map(|f| patches(&image::open(f).unwrap().into_rgba8()).unwrap()).collect() };
+        let shared = shared_model();
+        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = guard.as_mut().unwrap().gemma();
+        model.embed_patches(cuts().into_iter().take(4).collect());
+        for _ in 0..2 {
+            let t = std::time::Instant::now();
+            let features = model.encode_patches(cuts()).unwrap();
+            let encode = t.elapsed().as_secs_f32();
+            let t = std::time::Instant::now();
+            let n = model.embed_patches(cuts()).len();
+            let all = t.elapsed().as_secs_f32();
+            eprintln!("GEMMA {n} photos: encoder {encode:.2} s, encoder + text model {all:.2} s => {:.2} photos/s ({} tokens)", n as f32 / all, features.len() / 512);
+        }
+    }
 
     /// Same token ids and (nearly) the same vectors as the Python / PyTorch side (tests/query_vectors.json).
     #[test]
