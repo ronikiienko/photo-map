@@ -131,6 +131,74 @@ pub struct Runtime {
     pub apple: Option<ep::coreml::ComputeUnits>,
 }
 
+/// The encoder on one group of at most `TENSORRT_BATCH` photos: their soft tokens one after the other (512 numbers each).
+fn encode_group(vision: &mut Session, pool: &mut Option<Session>, apple: bool, mut cuts: Vec<Patches>) -> Result<Vec<f32>> {
+    let tokens: usize = cuts.iter().map(|c| c.soft_tokens).sum();
+    if apple {
+        // CoreML's network is made for exactly this many photos: a short group is filled up with blank ones (all filler, no tokens)
+        while cuts.len() < TENSORRT_BATCH {
+            cuts.push(Patches { pixels: vec![0f32; PADDED * PATCH_VALUES], positions: vec![-1i64; PADDED * 2], soft_tokens: 0 });
+        }
+    }
+    let batch = cuts.len();
+    let mut pixels = Vec::with_capacity(batch * PADDED * PATCH_VALUES);
+    let mut positions = Vec::with_capacity(batch * PADDED * 2);
+    for c in cuts {
+        pixels.extend(c.pixels);
+        positions.extend(c.positions);
+    }
+    let pool_positions = pool.is_some().then(|| positions.clone());
+    let inputs = ort::inputs![
+        "pixel_values" => Tensor::from_array(([batch, PADDED, PATCH_VALUES], pixels)).map_err(err("tensor"))?,
+        "pixel_position_ids" => Tensor::from_array(([batch, PADDED, 2], positions)).map_err(err("tensor"))?,
+    ];
+    let out = vision.run(inputs).map_err(err("running the photo encoder"))?;
+    let features: Vec<f32> = if let (Some(pool), Some(positions)) = (pool.as_mut(), pool_positions) {
+        // TensorRT ran the layers; the pooling after them runs on CUDA
+        let (_, hidden) = out["hidden"].try_extract_tensor::<f32>().map_err(err("reading the hidden states"))?;
+        let inputs = ort::inputs![
+            "hidden" => Tensor::from_array(([batch, PADDED, 768usize], hidden.to_vec())).map_err(err("tensor"))?,
+            "pixel_position_ids" => Tensor::from_array(([batch, PADDED, 2], positions)).map_err(err("tensor"))?,
+        ];
+        let pooled = pool.run(inputs).map_err(err("running the photo pooling"))?;
+        let (shape, data) = pooled["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
+        // CoreML's filler photos come last and may leave a token of their own: it is cut off
+        if shape[0] as usize != tokens && !(apple && shape[0] as usize > tokens) {
+            return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
+        }
+        data[..tokens * (data.len() / shape[0] as usize)].to_vec()
+    } else {
+        let (shape, data) = out["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
+        if shape[0] as usize != tokens {
+            return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
+        }
+        data.to_vec()
+    };
+    Ok(features)
+}
+
+/// The text model's vectors for a group of photos, from their soft tokens one after the other.
+fn read_photos(session: &mut Session, soft: Vec<usize>, features: Vec<f32>) -> Vec<Result<Vec<f32>>> {
+    let n = soft.len();
+    // the text model takes the photos together: their token lists padded to the longest, the padding masked out
+    let mut start = 0;
+    let photos: Vec<(Vec<i64>, Vec<f32>)> = soft
+        .into_iter()
+        .map(|tokens| {
+            let part = features[start * 512..(start + tokens) * 512].to_vec();
+            start += tokens;
+            let mut ids = vec![BOS, BOI];
+            ids.extend(std::iter::repeat_n(SOFT, tokens));
+            ids.extend([EOI, EOS]);
+            (ids, part)
+        })
+        .collect();
+    match Gemma::run_together(session, photos) {
+        Ok(vectors) => vectors.into_iter().map(Ok).collect(),
+        Err(e) => (0..n).map(|_| Err(e.clone())).collect(),
+    }
+}
+
 /// A session builder for a photo encoder: with CoreML when the machine has it and `apple` says so.
 /// `sizes`: the dimensions the model leaves open, fixed to these sizes (CoreML needs shapes that do not change).
 pub fn vision_builder(env: &Environment, apple: Option<ep::coreml::ComputeUnits>, cache: &Path, sizes: &[(&str, i64)]) -> ort::Result<ort::session::builder::SessionBuilder> {
@@ -221,31 +289,44 @@ impl Gemma {
         self.embed_patches(vec![cut]).pop().unwrap()
     }
 
-    /// Several photos at once (already cut up, see `patches`): the encoder runs on them together, which is faster.
-    pub fn embed_patches(&mut self, cuts: Vec<Patches>) -> Vec<Result<Vec<f32>>> {
+    /// Several photos at once (already cut up, see `patches`): the encoder runs on them together, which is faster. The encoder works
+    /// in groups; while the text model reads one group's tokens (on the processor on a Mac) the encoder is already on the next.
+    pub fn embed_patches(&mut self, mut cuts: Vec<Patches>) -> Vec<Result<Vec<f32>>> {
         let n = cuts.len();
-        let soft: Vec<usize> = cuts.iter().map(|c| c.soft_tokens).collect();
-        let features = match self.encode_patches(cuts) {
-            Ok(f) => f,
-            Err(e) => return (0..n).map(|_| Err(e.clone())).collect(),
-        };
-        // the text model takes the photos together as well: their token lists padded to the longest, the padding masked out
-        let mut start = 0;
-        let photos: Vec<(Vec<i64>, Vec<f32>)> = soft
-            .into_iter()
-            .map(|tokens| {
-                let part = features[start * 512..(start + tokens) * 512].to_vec();
-                start += tokens;
-                let mut ids = vec![BOS, BOI];
-                ids.extend(std::iter::repeat_n(SOFT, tokens));
-                ids.extend([EOI, EOS]);
-                (ids, part)
-            })
-            .collect();
-        match self.run_together(photos) {
-            Ok(vectors) => vectors.into_iter().map(Ok).collect(),
-            Err(e) => (0..n).map(|_| Err(e.clone())).collect(),
+        if self.vision.is_none() {
+            if let Err(e) = self.open_vision() {
+                return (0..n).map(|_| Err(e.clone())).collect();
+            }
         }
+        let mut groups = Vec::new();
+        while !cuts.is_empty() {
+            let rest = cuts.split_off(TENSORRT_BATCH.min(cuts.len()));
+            groups.push(std::mem::replace(&mut cuts, rest));
+        }
+        let Self { session, vision, pool, apple, tokenizer: _, .. } = self;
+        let (vision, apple) = (vision.as_mut().unwrap(), apple.is_some());
+        let (send, receive) = std::sync::mpsc::sync_channel::<(Vec<usize>, Result<Vec<f32>>)>(1);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                let mut out = Vec::with_capacity(n);
+                for (soft, features) in receive {
+                    match features {
+                        Ok(features) => out.extend(read_photos(session, soft, features)),
+                        Err(e) => out.extend(soft.iter().map(|_| Err(e.clone()))),
+                    }
+                }
+                out
+            });
+            for group in groups {
+                let soft: Vec<usize> = group.iter().map(|c| c.soft_tokens).collect();
+                let features = encode_group(vision, pool, apple, group);
+                if send.send((soft, features)).is_err() {
+                    break;
+                }
+            }
+            drop(send);
+            reader.join().unwrap_or_else(|_| (0..n).map(|_| Err("the text model stopped".to_string())).collect())
+        })
     }
 
     /// Open the photo encoder: on TensorRT if it can, else on the CUDA provider. TensorRT builds its engine the first time (about a
@@ -333,54 +414,13 @@ impl Gemma {
             }
             return Ok(out);
         }
-        let tokens: usize = cuts.iter().map(|c| c.soft_tokens).sum();
-        if self.apple.is_some() {
-            // CoreML's network is made for exactly this many photos: a short group is filled up with blank ones (all filler, no tokens)
-            while cuts.len() < TENSORRT_BATCH {
-                cuts.push(Patches { pixels: vec![0f32; PADDED * PATCH_VALUES], positions: vec![-1i64; PADDED * 2], soft_tokens: 0 });
-            }
-        }
-        let batch = cuts.len();
-        let mut pixels = Vec::with_capacity(batch * PADDED * PATCH_VALUES);
-        let mut positions = Vec::with_capacity(batch * PADDED * 2);
-        for c in cuts {
-            pixels.extend(c.pixels);
-            positions.extend(c.positions);
-        }
-        let pool_positions = self.pool.is_some().then(|| positions.clone());
-        let vision = self.vision.as_mut().unwrap();
-        let inputs = ort::inputs![
-            "pixel_values" => Tensor::from_array(([batch, PADDED, PATCH_VALUES], pixels)).map_err(err("tensor"))?,
-            "pixel_position_ids" => Tensor::from_array(([batch, PADDED, 2], positions)).map_err(err("tensor"))?,
-        ];
-        let out = vision.run(inputs).map_err(err("running the photo encoder"))?;
-        let features: Vec<f32> = if let (Some(pool), Some(positions)) = (self.pool.as_mut(), pool_positions) {
-            // TensorRT ran the layers; the pooling after them runs on CUDA
-            let (_, hidden) = out["hidden"].try_extract_tensor::<f32>().map_err(err("reading the hidden states"))?;
-            let inputs = ort::inputs![
-                "hidden" => Tensor::from_array(([batch, PADDED, 768usize], hidden.to_vec())).map_err(err("tensor"))?,
-                "pixel_position_ids" => Tensor::from_array(([batch, PADDED, 2], positions)).map_err(err("tensor"))?,
-            ];
-            let pooled = pool.run(inputs).map_err(err("running the photo pooling"))?;
-            let (shape, data) = pooled["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
-            // CoreML's filler photos come last and may leave a token of their own: it is cut off
-            if shape[0] as usize != tokens && !(self.apple.is_some() && shape[0] as usize > tokens) {
-                return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
-            }
-            data[..tokens * (data.len() / shape[0] as usize)].to_vec()
-        } else {
-            let (shape, data) = out["image_features"].try_extract_tensor::<f32>().map_err(err("reading the photo features"))?;
-            if shape[0] as usize != tokens {
-                return Err(format!("the photo encoder made {} tokens, expected {tokens}", shape[0]));
-            }
-            data.to_vec()
-        };
-        Ok(features)
+        let apple = self.apple.is_some();
+        encode_group(self.vision.as_mut().unwrap(), &mut self.pool, apple, cuts)
     }
 
     /// Run the text model on several photos at once: (token ids, soft token features) each. The ids are padded on the right to the
     /// longest and the padding is masked, so each result is what `run` gives for that photo alone.
-    fn run_together(&mut self, photos: Vec<(Vec<i64>, Vec<f32>)>) -> Result<Vec<Vec<f32>>> {
+    fn run_together(session: &mut Session, photos: Vec<(Vec<i64>, Vec<f32>)>) -> Result<Vec<Vec<f32>>> {
         let batch = photos.len();
         let longest = photos.iter().map(|(ids, _)| ids.len()).max().unwrap_or(0);
         let mut ids = vec![0i64; batch * longest]; // 0 is the pad token
@@ -399,7 +439,7 @@ impl Gemma {
             "video_features" => Tensor::from_array(([0usize, 512], Vec::<f32>::new())).map_err(err("tensor"))?,
             "audio_features" => Tensor::from_array(([0usize, 512], Vec::<f32>::new())).map_err(err("tensor"))?,
         ];
-        let outputs = self.session.run(inputs).map_err(err("running the model"))?;
+        let outputs = session.run(inputs).map_err(err("running the model"))?;
         let (_, data) = outputs["sentence_embedding"].try_extract_tensor::<f32>().map_err(err("reading the result"))?;
         Ok(data
             .chunks_exact(768)
@@ -456,13 +496,8 @@ mod tests {
             let features = model.encode_patches(cuts()).unwrap();
             let encode = t.elapsed().as_secs_f32();
             let t = std::time::Instant::now();
-            // groups of 4, as the map builder sends them; a failure is shown, not timed
-            let mut results = Vec::new();
-            let mut all = cuts();
-            while !all.is_empty() {
-                let rest = all.split_off(4.min(all.len()));
-                results.extend(model.embed_patches(std::mem::replace(&mut all, rest)));
-            }
+            // a group as the map builder sends it
+            let results = model.embed_patches(cuts());
             let n = results.len();
             if let Some(Err(e)) = results.iter().find(|r| r.is_err()) {
                 panic!("a photo failed: {}", &e[..e.len().min(300)]);
@@ -680,7 +715,7 @@ mod tests {
                     (ids, part)
                 })
                 .collect();
-            model.run_together(photos).unwrap();
+            Gemma::run_together(&mut model.session, photos).unwrap();
             text += started.elapsed();
         }
         let n = cuts.len() as f32;

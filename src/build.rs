@@ -24,8 +24,8 @@ use std::time::Instant;
 pub const SHARD: usize = 256;
 /// The photo files a folder is searched for.
 pub const TYPES: [&str; 8] = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff"];
-/// Photos the encoder runs on at once.
-const BATCH: usize = 4;
+/// Photos handed to the model at once (Gemma overlaps its photo encoder with its text model inside the group, in fours).
+const BATCH: usize = 16;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "snake_case")]
