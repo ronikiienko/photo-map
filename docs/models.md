@@ -79,6 +79,14 @@ So maps made before keep working ("everything from usb" was made on TensorRT: th
 
 - The Mac: the text model of Gemma (it reads every photo, on the processor), maybe on CoreML too; the rest of the speeds (see docs/macos-models-task.md).
 - `tools/onnx_fuse_attention.py`, `tools/onnx_trt_ready.py` and `tools/siglip_export.py` are no longer used by anything.
-- Report the Conv/pads problem to ONNX Runtime.
+- Report to ONNX Runtime: the Conv with `auto_pad = VALID` that its CoreML provider refuses, and that a `MatMul`'s weight is written
+  into the CoreML program as text (1.1 GB for SigLIP 256, parsed at every load) where a `Gemm`'s goes to the binary weights file.
+- Ready-made Core ML models exist, from the community and not from Google or Apple (found by search, not opened or measured):
+  SigLIP 2 base 256 as separate image and text `.mlpackage` encoders, 8-bit palettized, macOS 15 or later, text padded to 64
+  tokens without a mask (Hugging Face: asamkhya, karthikramesh, karaiman, kuluruvineeth/siglip2-base-coreml; kanevry is a mirror),
+  the so400m image tower only (antonlnz/siglip2-so400m-image-coreml), and EmbeddingGemma's text model only, int8 with 128 tokens
+  (visible-cx/embeddinggemma-300m-CoreML, valindotai/embeddinggemma-300m-coreml). Their weights are quantized, so the vectors
+  would differ from ours, and they are third-party files without the publisher's hashes; the patched publisher files already run at
+  70 photos/s (SigLIP 256). Worth a benchmark only if a faster or smaller route is needed. Gemma's photo encoder has none.
 - In an installed Mac app, `maps/`, `runtime/` and `.cache/` should live in `~/Library/Application Support/photo-map` (and the
   remakeable part in `~/Library/Caches/photo-map`).
