@@ -665,7 +665,7 @@ fn save_jpeg(image: &image::RgbaImage, path: &Path, quality: u8) -> Result<(), S
     image::codecs::jpeg::JpegEncoder::new_with_quality(io::BufWriter::new(file), quality).encode_image(&rgb).map_err(|e| e.to_string())
 }
 
-/// The longer side of the picture a scene is shown with (and the video's pictures are kept at until its scenes are known).
+/// The longer side of the picture a scene is shown with.
 const SCENE_PICTURE: u32 = 1024;
 
 /// Videos become scenes: a picture every few seconds is understood by the model like a photo, a run of pictures that look alike is
@@ -707,13 +707,12 @@ fn understand_videos(ctx: &mut Ctx) -> Result<Flow, String> {
             continue;
         }
         let _ = fs::remove_dir_all(&cache);
-        fs::create_dir_all(cache.join("pictures")).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
         let label = |at: f64| format!("video {} of {}: {name}, {} of {}", k + 1, files.len(), clock(at), clock(info.seconds));
         ctx.progress(before as usize, total.ceil() as usize, label(0.0));
 
         // The pictures are cut CUT at a time, side by side on all the processor's cores, and handed to a thread of their own that feeds
         // the model: the card works on one lot while the next is being cut (and the decoders keep going meanwhile).
-        let pictures = cache.join("pictures");
         let mut paused = false;
         let stopped = AtomicBool::new(false);
         let (read, vectors, fatal) = std::thread::scope(|scope| {
@@ -752,20 +751,15 @@ fn understand_videos(ctx: &mut Ctx) -> Result<Flow, String> {
                 }
                 (vectors, fatal)
             });
-            let mut taken = 0usize; // pictures are named by their order among those asked for
             let mut waiting: Vec<crate::video::VideoFrame> = Vec::new();
-            let mut hand_over = |waiting: &mut Vec<crate::video::VideoFrame>| {
+            let hand_over = |waiting: &mut Vec<crate::video::VideoFrame>| {
                 let frames = std::mem::take(waiting);
-                let (first, at) = (taken, frames.last().map_or(0.0, |f| f.seconds));
-                taken += frames.len();
+                let at = frames.last().map_or(0.0, |f| f.seconds);
                 let made: Vec<Option<(Prepared, image::RgbaImage, f64)>> = frames
                     .par_iter()
-                    .enumerate()
-                    .map(|(j, frame)| {
+                    .map(|frame| {
                         let needed = spec.longest_side_needed(frame.image.width(), frame.image.height());
                         let prepared = spec.prepare(&crate::photo::fit(&frame.image, needed, false)).ok()?;
-                        let shown = crate::photo::fit(&frame.image, SCENE_PICTURE, false);
-                        save_jpeg(&shown, &pictures.join(format!("{:05}.jpg", first + j)), 85).ok()?;
                         Some((prepared, thumbnail(&frame.image), frame.seconds))
                     })
                     .collect();
@@ -797,32 +791,40 @@ fn understand_videos(ctx: &mut Ctx) -> Result<Flow, String> {
         }
         if let Err(why) = read {
             // part of a video can't be read: the video is left out, whole, and the map says so
-            let _ = fs::remove_dir_all(cache.join("pictures"));
             write_done(&cache, &VideoDone { skipped: Some(why), scenes: Vec::new() })?;
             before += info.seconds;
             continue;
         }
         if vectors.is_empty() {
-            let _ = fs::remove_dir_all(cache.join("pictures"));
             write_done(&cache, &VideoDone { skipped: Some("no picture of it could be understood".into()), scenes: Vec::new() })?;
             before += info.seconds;
             continue;
         }
 
-        // the scenes: the picture standing for each is kept, the rest are not
+        // the scenes: the picture standing for each is made now, from its picture of the video decoded again (the others were not kept)
         let scenes = crate::scenes::split(&vectors, info.seconds, &crate::scenes::Settings { threshold: settings.threshold, at_most: Some(settings.at_most.max(1)), ..Default::default() });
-        // the pictures were numbered as they were taken; a picture left out (not understood) makes the numbering differ from `vectors`
-        // only if some failed, so the picture of vector j is found by its time
+        let best: Vec<f64> = scenes.iter().map(|scene| vectors[scene.best].0).collect();
+        let mut made = vec![false; scenes.len()];
+        let mut saving: Result<(), String> = Ok(());
+        let again = crate::video::pictures_at(file, &best, |frame| {
+            // (a scene's picture is found by its moment: the time of a picture of the video is exactly the one it was understood at)
+            let Some(n) = best.iter().position(|t| *t == frame.seconds) else { return true };
+            saving = save_jpeg(&crate::photo::fit(&frame.image, SCENE_PICTURE, false), &cache.join(format!("scene_{n:03}.jpg")), 85);
+            made[n] = saving.is_ok();
+            saving.is_ok()
+        });
+        if let Err(why) = again.and(saving).and_then(|_| if made.iter().all(|m| *m) { Ok(()) } else { Err("a picture standing for a scene could not be read again".to_string()) }) {
+            write_done(&cache, &VideoDone { skipped: Some(why), scenes: Vec::new() })?;
+            before += info.seconds;
+            continue;
+        }
         let mut vector_bytes = Vec::with_capacity(scenes.len() * dim * 2);
         let mut spans = Vec::new();
-        for (n, scene) in scenes.iter().enumerate() {
-            let picture = nearest_picture(&cache.join("pictures"), vectors[scene.best].0, settings.every);
-            fs::copy(&picture, cache.join(format!("scene_{n:03}.jpg"))).map_err(|e| format!("{}: {e}", picture.display()))?;
+        for scene in &scenes {
             vector_bytes.extend(scene.vector.iter().flat_map(|&x| half::f16::from_f32(x).to_le_bytes()));
             spans.push(SceneSpan { start: scene.start, end: scene.end, pictures: scene.frames.len() });
         }
         fs::write(cache.join("vectors.f16"), vector_bytes).map_err(|e| e.to_string())?;
-        let _ = fs::remove_dir_all(cache.join("pictures"));
         write_done(&cache, &VideoDone { skipped: None, scenes: spans })?;
         before += info.seconds;
         ctx.set_done(before as usize);
@@ -841,14 +843,6 @@ fn understand_videos(ctx: &mut Ctx) -> Result<Flow, String> {
 
 fn write_done(cache: &Path, done: &VideoDone) -> Result<(), String> {
     write_atomic(&cache.join("done.json"), &serde_json::to_vec(done).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
-}
-
-/// The picture taken nearest `seconds`: pictures are named by their order and were taken every `every` seconds from 0, so the order
-/// is the time over `every` (rounded), unless some were left out and the next one is the nearest.
-fn nearest_picture(dir: &Path, seconds: f64, every: f64) -> PathBuf {
-    let guess = (seconds / every).round().max(0.0) as usize;
-    let at = |n: usize| dir.join(format!("{n:05}.jpg"));
-    (0..=guess).rev().map(at).find(|p| p.exists()).or_else(|| (guess..guess + 100).map(at).find(|p| p.exists())).unwrap_or_else(|| at(guess))
 }
 
 /// Put the scenes of the videos done after the photos in photos.json (the first `photos_count` entries stay), their pictures in
@@ -1273,20 +1267,6 @@ mod tests {
         assert_eq!(collect_photos(&[temp.join("trip")], 1).len(), 1);
         assert!(is_video(&temp.join("trip/b.MOV")) && !is_photo(&temp.join("trip/b.MOV")));
         fs::remove_dir_all(&temp).unwrap();
-    }
-
-    /// The picture that stands for a scene is found by its time among the pictures kept, also when some were not kept.
-    #[test]
-    fn a_scenes_picture_is_found_by_its_time() {
-        let dir = std::env::temp_dir().join(format!("photo-map-pictures-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        for n in [0, 1, 3, 4] {
-            fs::write(dir.join(format!("{n:05}.jpg")), b"x").unwrap(); // the third (n = 2) was not kept
-        }
-        assert_eq!(nearest_picture(&dir, 4.0, 2.0), dir.join("00002.jpg").parent().unwrap().join("00001.jpg"), "the one before when it is missing");
-        assert_eq!(nearest_picture(&dir, 6.0, 2.0), dir.join("00003.jpg"));
-        assert_eq!(nearest_picture(&dir, 0.0, 2.0), dir.join("00000.jpg"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A photo an earlier map already holds a vector for (same file, not changed since) is not embedded again: its row is copied.

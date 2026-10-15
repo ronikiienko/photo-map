@@ -181,27 +181,58 @@ struct Job {
     to: usize,
     /// The pictures wanted, counted in the order they show, and when each shows.
     keep: Vec<(usize, f64)>,
+    /// The group's pictures show in the order they are coded (no B-frames): then the n-th shown is the n-th coded, and nothing after
+    /// the last wanted one has to be read or decoded (the decoder is asked for what it still holds back).
+    in_order: bool,
 }
 
 /// The video's pictures, one every `every` seconds (the first at 0), in order, each handed to `each`, which says whether to go on.
 /// The groups are decoded side by side, a few at a time.
-pub fn frames(path: &Path, every: f64, mut each: impl FnMut(VideoFrame) -> bool) -> Result<()> {
+pub fn frames(path: &Path, every: f64, each: impl FnMut(VideoFrame) -> bool) -> Result<()> {
     if every.is_nan() || every <= 0.0 {
         return Err("the interval between frames must be above zero".into());
     }
     let video = open(path)?;
-    // the groups: from a key frame to the next one
-    let mut starts: Vec<usize> = (0..video.samples.len()).filter(|i| video.samples[*i].sync || *i == 0).collect();
-    starts.push(video.samples.len());
+    let starts = group_starts(&video);
     // When each group first shows: a key frame is decoded by itself, so a wanted time near one is moved onto it. Any other picture
     // costs the decoding of everything between it and its key frame (on average, half a group), which is most of the work.
-    let shows: Vec<f64> = (0..starts.len() - 1).map(|g| video.samples[starts[g]..starts[g + 1]].iter().map(|s| s.seconds).fold(f64::INFINITY, f64::min)).collect();
+    let shows = group_shows(&video, &starts);
     let snap = |t: f64| {
         let at = shows.partition_point(|s| *s < t);
         let nearest = [at.checked_sub(1), (at < shows.len()).then_some(at)].into_iter().flatten().map(|i| shows[i]).min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()));
         nearest.filter(|s| (s - t).abs() <= every / 2.0).unwrap_or(t)
     };
-    let mut next = 0u64; // the next wanted time is snap(next * every)
+    let jobs = plan(&video, &starts, &|n| Some(snap(n as f64 * every)));
+    run(&video, jobs, each)
+}
+
+/// The pictures showing at `times` (as `VideoFrame::seconds` gave them: the moments of pictures of this video), in order, each
+/// handed to `each`, which says whether to go on. Only the groups holding them are decoded.
+pub fn pictures_at(path: &Path, times: &[f64], each: impl FnMut(VideoFrame) -> bool) -> Result<()> {
+    let mut times = times.to_vec();
+    times.sort_by(f64::total_cmp);
+    times.dedup();
+    let video = open(path)?;
+    let starts = group_starts(&video);
+    let jobs = plan(&video, &starts, &|n| times.get(n).copied());
+    run(&video, jobs, each)
+}
+
+/// The groups of pictures, as the sample each starts at (a key frame), and the end.
+fn group_starts(video: &Opened) -> Vec<usize> {
+    let mut starts: Vec<usize> = (0..video.samples.len()).filter(|i| video.samples[*i].sync || *i == 0).collect();
+    starts.push(video.samples.len());
+    starts
+}
+
+/// When each group first shows.
+fn group_shows(video: &Opened, starts: &[usize]) -> Vec<f64> {
+    (0..starts.len() - 1).map(|g| video.samples[starts[g]..starts[g + 1]].iter().map(|s| s.seconds).fold(f64::INFINITY, f64::min)).collect()
+}
+
+/// The groups with something wanted in them. `target(n)` is the n-th wanted time (they rise), None after the last.
+fn plan(video: &Opened, starts: &[usize], target: &dyn Fn(usize) -> Option<f64>) -> Vec<Job> {
+    let mut next = 0usize;
     let mut jobs = Vec::new();
     for g in 0..starts.len() - 1 {
         let (from, to) = (starts[g], starts[g + 1]);
@@ -210,15 +241,21 @@ pub fn frames(path: &Path, every: f64, mut each: impl FnMut(VideoFrame) -> bool)
         // this group shows from its first picture to the next group's first
         let until = if g + 2 < starts.len() { video.samples[starts[g + 1]..starts[g + 2]].iter().map(|s| s.seconds).fold(f64::INFINITY, f64::min) } else { video.seconds };
         let mut targets = Vec::new();
-        while snap(next as f64 * every) < until {
-            targets.push(snap(next as f64 * every));
+        while let Some(t) = target(next).filter(|t| *t < until) {
+            targets.push(t);
             next += 1;
         }
         if !targets.is_empty() {
             let keep = wanted(&times, targets.into_iter()).into_iter().map(|k| (k, times[k])).collect();
-            jobs.push(Job { from, to, keep });
+            let in_order = video.samples[from..to].windows(2).all(|w| w[0].seconds < w[1].seconds);
+            jobs.push(Job { from, to, keep, in_order });
         }
     }
+    jobs
+}
+
+/// Decode the jobs, handing the pictures to `each` in order.
+fn run(video: &Opened, jobs: Vec<Job>, mut each: impl FnMut(VideoFrame) -> bool) -> Result<()> {
     // The groups are decoded side by side, a few ahead of the one being handed over (their pictures wait in memory until their turn);
     // each is handed over as soon as it and all before it are done, so pictures keep coming while the rest are being decoded.
     let ahead = rayon::current_num_threads().max(1) * 2;
@@ -227,7 +264,7 @@ pub fn frames(path: &Path, every: f64, mut each: impl FnMut(VideoFrame) -> bool)
     let mut outcome = Ok(());
     rayon::in_place_scope(|scope| {
         let launch = |k: usize| {
-            let (tx, video, job, stop) = (tx.clone(), &video, &jobs[k], &stop);
+            let (tx, job, stop) = (tx.clone(), &jobs[k], &stop);
             scope.spawn(move |_| {
                 let result = if stop.load(std::sync::atomic::Ordering::Relaxed) { Ok(Vec::new()) } else { decode_group(video, job) };
                 let _ = tx.send((k, result));
@@ -270,13 +307,14 @@ pub fn frames(path: &Path, every: f64, mut each: impl FnMut(VideoFrame) -> bool)
 /// The wanted pictures of one group.
 fn decode_group(video: &Opened, job: &Job) -> Result<Vec<VideoFrame>> {
     let mut file = File::open(&video.path).map_err(|e| format!("opening {}: {e}", video.path.display()))?;
-    let mut packets = Vec::with_capacity(job.to - job.from);
-    for s in &video.samples[job.from..job.to] {
+    let last = job.keep.last().map_or(0, |k| k.0);
+    let to = if job.in_order { (job.from + last + 1).min(job.to) } else { job.to };
+    let mut packets = Vec::with_capacity(to - job.from);
+    for s in &video.samples[job.from..to] {
         let mut bytes = vec![0u8; s.size as usize];
         file.seek(SeekFrom::Start(s.offset)).and_then(|_| file.read_exact(&mut bytes)).map_err(|e| format!("reading a picture: {e}"))?;
         packets.push(annex_b(&bytes, video.length_size)?);
     }
-    let last = job.keep.last().map_or(0, |k| k.0);
     let mut out = Vec::with_capacity(job.keep.len());
     let mut count = 0usize;
     let wanted = |n: usize| job.keep.iter().any(|k| k.0 == n);

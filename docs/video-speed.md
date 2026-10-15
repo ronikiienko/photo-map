@@ -13,6 +13,8 @@ The whole map of that one video (the Videos stage, the embedding and the finishi
 | Before | 28.5 s, 29.0 s |
 | Cutting in parallel, model on its own thread | 18.8 s, 18.9 s |
 | Plus sample times moved onto key frames | 5.7 s, 5.7 s |
+| Plus scene pictures made only for the chosen frames | 5.0 s, 5.2 s |
+| Plus one picture decoded per sample | 4.8 s, 4.6 s |
 
 That is about 5 times faster, roughly 87 embedded pictures per second end to end (a lower bound: the 5.7 s also holds the start,
 the scene grouping and the writing of the map). Decoding alone: 168 pictures/s on the screen recording (was 31), 74/s on the 1080p
@@ -63,9 +65,32 @@ phone clip (was 7). The card alone does about 270 pictures/s, so it was never th
   back at the old speed, make `snap` return its argument; a tighter limit than half the interval is in between.
 - Embedding, the photo path (`load_for`, `prepare`) and the JPEG quality (85) are untouched.
 
+## Scene pictures made only for the chosen frames (second round)
+
+Before, every sampled picture was resized to 1024 px and saved as a JPEG (about 24 ms of the ~33 ms of cutting work per picture),
+and only the 40 or so scene pictures per video were kept. Now the scenes are chosen first, from the vectors alone; then
+`video::pictures_at` decodes just the chosen pictures again (they are the same pictures: the exact times the vectors were made at,
+usually key frames, so about 2 decoded pictures each) and each gets the same resize and JPEG (quality 85) as before. The result is the
+same pictures by construction (same decoder, same frame, same resize function and quality); the files were not compared byte by byte.
+`frames()` was split into `plan` (which groups hold the wanted times) and `run` (decode them side by side) so both calls share them.
+`nearest_picture` and its test are gone (a scene's picture is found by its exact time now). If a chosen picture cannot be read again,
+the video is left out and the map says so, as for any other unreadable video.
+
+Timing on the same 16-minute video: 5.0 s and 5.2 s, from 5.7 s. Less than the cutting numbers suggest because decoding alone is
+about 3 s of it, and the model start, scene grouping and finishing do not change.
+
+## One picture decoded per sample (third round)
+
+OpenH264 holds back the last picture until the next arrives, so a sample on a key frame used to decode the key frame and the one
+after it. A group whose pictures show in the order they are coded (no B-frames; `Job::in_order`) now reads and feeds only the packets
+up to the last wanted one, then asks the decoder for what it still holds. Groups with reordering are read and decoded as before.
+
+Decoding alone on the 16-minute video: every 2 s 2.95 s -> 1.98 s, every 1 s 5.67 s -> 3.75 s. The whole map: 4.8 s and 4.6 s (from
+5.0 s and 5.2 s). The scenes of the end-to-end test (every 4 s, 40 scenes) are identical to the run before, title for title.
+
 ## Left to do
 
-- The 1024 px picture and its JPEG (about 20-25 ms of the ~45 ms per picture) are made for every sampled picture, but only the 40 or
-  so scene pictures per video are kept. Keeping the small pictures and writing JPEGs only for the chosen ones would about halve the
-  cutting work; scenes are chosen after all vectors are known, so the full pictures would have to be kept (or decoded again) until then.
+- The picture is resized twice on its way to the model (to the size the model needs, then squeezed into its square by `prepare`).
+  Going in one step from the full frame, as photos do from their scaled JPEG, saves about 5 ms per picture but changes the vectors
+  slightly (so it was not done without asking).
 - The decoder is OpenH264 (one thread per decoder); H.265 uses a pure-Rust decoder that was not measured.
