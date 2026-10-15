@@ -1438,8 +1438,17 @@ fn median_neighbour_distance(points: &[data::Point]) -> f32 {
         })
         .collect();
     nearest.sort_by(f32::total_cmp);
-    nearest.get(nearest.len() / 2).copied().filter(|d| *d > 0.0).unwrap_or(PHOTO_WORLD_DEFAULT)
+    // a map of one photo has no neighbour (the distance is the largest float), and one of a few has them very far apart: either way
+    // the square would cover the screen, so it is at most an eighth of the world
+    match points.len() {
+        0 => PHOTO_WORLD_DEFAULT,
+        1 => MAX_PHOTO_WORLD,
+        _ => nearest.get(nearest.len() / 2).copied().filter(|d| *d > 0.0).map_or(PHOTO_WORLD_DEFAULT, |d| d.min(MAX_PHOTO_WORLD)),
+    }
 }
+
+/// The biggest side of a photo's square, in world units (a map of one or two photos would otherwise draw them as big as the world).
+const MAX_PHOTO_WORLD: f32 = data::WORLD / 8.0;
 
 const PHOTO_TYPES: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "bmp"];
 
@@ -1475,4 +1484,27 @@ fn main() {
     }
     // SAFETY: `_exit` only ends the process.
     unsafe { libc::_exit(0) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(x: f32, y: f32) -> data::Point {
+        data::Point { x, y }
+    }
+
+    /// A map of one photo (a single video that made one scene, say) is drawn at a sensible size, not as big as the universe.
+    #[test]
+    fn a_photo_on_its_own_is_not_drawn_enormous() {
+        assert_eq!(median_neighbour_distance(&[at(5000.0, 5000.0)]), MAX_PHOTO_WORLD);
+        assert_eq!(median_neighbour_distance(&[]), PHOTO_WORLD_DEFAULT);
+    }
+
+    #[test]
+    fn photos_far_apart_are_capped_and_close_ones_are_not() {
+        assert_eq!(median_neighbour_distance(&[at(1000.0, 5000.0), at(9000.0, 5000.0)]), MAX_PHOTO_WORLD);
+        let close: Vec<_> = (0..10).map(|i| at(5000.0 + i as f32 * 30.0, 5000.0)).collect();
+        assert_eq!(median_neighbour_distance(&close), 30.0);
+    }
 }

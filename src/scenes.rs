@@ -173,7 +173,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
 
-        let id = crate::models::SIGLIP_BASE_256;
+        let id = match env("PHOTO_MAP_MODEL").as_deref() {
+            Some("gemma") => crate::models::GEMMA,
+            Some("s512") => crate::models::SIGLIP_BASE_512,
+            _ => crate::models::SIGLIP_BASE_256,
+        };
         let hub = crate::models::test_hub_with(id);
         assert_eq!(hub.wait_for(id, &|| false), Ok(true));
         let seconds = crate::video::info(&path).unwrap().seconds;
@@ -187,6 +191,25 @@ mod tests {
         })
         .unwrap();
         eprintln!("{} frames embedded in {:.1} s", vectors.len(), started.elapsed().as_secs_f32());
+        if let Some(name) = env("PHOTO_MAP_DUMP") {
+            // times then vectors (f32), to look at the numbers elsewhere
+            let bytes: Vec<u8> = vectors.iter().flat_map(|(t, v)| std::iter::once(*t as f32).chain(v.iter().copied()).flat_map(f32::to_le_bytes).collect::<Vec<u8>>()).collect();
+            std::fs::write(out.parent().unwrap().join(format!("vectors_{name}.f32")), bytes).unwrap();
+        }
+        let mut sims: Vec<f32> = vectors.windows(2).map(|w| dot(&w[0].1, &w[1].1)).collect();
+        sims.sort_by(f32::total_cmp);
+        let q = |f: f32| sims[((sims.len() - 1) as f32 * f) as usize];
+        eprintln!("cosine between neighbouring frames: min {:.3}, 5% {:.3}, 25% {:.3}, median {:.3}, 75% {:.3}", sims[0], q(0.05), q(0.25), q(0.5), q(0.75));
+        for t in [0.8f32, 0.85, 0.9, 0.93, 0.95, 0.97] {
+            eprintln!("  threshold {t}: {} scenes", split(&vectors, seconds, &Settings { threshold: t, ..Settings::default() }).len());
+        }
+        let mut sims: Vec<f32> = vectors.windows(2).map(|w| dot(&w[0].1, &w[1].1)).collect();
+        sims.sort_by(f32::total_cmp);
+        let q = |f: f32| sims[((sims.len() - 1) as f32 * f) as usize];
+        eprintln!("cosine between neighbouring frames: min {:.3}, 5% {:.3}, 25% {:.3}, median {:.3}, 75% {:.3}", sims[0], q(0.05), q(0.25), q(0.5), q(0.75));
+        for t in [0.8f32, 0.85, 0.9, 0.93, 0.95, 0.97] {
+            eprintln!("  threshold {t}: {} scenes", split(&vectors, seconds, &Settings { threshold: t, ..Settings::default() }).len());
+        }
         let scenes = split(&vectors, seconds, &settings);
         eprintln!("{} scenes in {seconds:.0} s", scenes.len());
         for (n, s) in scenes.iter().enumerate() {
