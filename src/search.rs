@@ -1,7 +1,11 @@
 //! Search without Python: the text model (models.rs) runs on a thread of its own, and a map's photo vectors are compared with the
-//! query's vector here. A map's vectors are two files in its bundle: embeddings.bin (the photos' images, float16, as many numbers
-//! each as the map's model makes) and captions.bin (the captions', same layout; the photos without a caption have zeros). A map is
-//! searched with the model it was made with.
+//! query's vector here. A map's vectors are embeddings.bin in its bundle (the photos' pictures, float16, as many numbers each as the
+//! map's model makes). A map is searched with the model it was made with.
+//!
+//! Only the pictures are searched, never the captions (captions.bin, which older maps have, is not read). Measured on Wikivoyage
+//! (4,139 photos with their real captions): with SigLIP, words are much closer to any caption than to any picture (a typical
+//! caption 0.70 like "church", the best picture 0.15), so a caption decided every match, and SigLIP judges text against text
+//! poorly ("seal": Carp, shore, Woodpecker). With Gemma both were alike and captions helped only with names a picture can't show.
 
 use crate::models::{self, Hub, Model};
 use half::f16;
@@ -119,9 +123,6 @@ fn query_vector(model: &mut Model, id: &str, query: &Query) -> Result<(Vec<f32>,
 /// A map's vectors, memory-mapped.
 pub struct Vectors {
     images: Mmap,
-    captions: Option<Mmap>,
-    /// Which photos have a caption vector (a row of zeros is none).
-    n: usize,
     /// How many numbers each vector has.
     dim: usize,
 }
@@ -134,35 +135,13 @@ impl Vectors {
             let map = unsafe { Mmap::map(&file) }.ok()?;
             (map.len() == n * dim * 2).then_some(map)
         };
-        Some(Self { images: map("embeddings.bin")?, captions: map("captions.bin"), n, dim })
+        Some(Self { images: map("embeddings.bin")?, dim })
     }
 
-    pub fn has_captions(&self) -> bool {
-        self.captions.is_some()
-    }
-
-    /// The query's cosine with every photo's image, then with every photo's caption, as the viewer keeps them (u16: 0..1 as 0..65535;
-    /// 0 for a photo with no caption). The query is a unit vector, so is each photo's.
-    pub fn cosines(&self, query: &[f32]) -> Vec<u16> {
-        let quantise = |c: f32| (c.clamp(0.0, 1.0) * 65535.0).round() as u16;
-        let mut out: Vec<u16> = self.image_cosines(query).into_iter().map(quantise).collect();
-        match &self.captions {
-            Some(captions) => {
-                let has = |i: usize| captions[i * self.dim * 2..(i + 1) * self.dim * 2].iter().any(|&b| b != 0);
-                out.extend(self.dots(captions, query).into_iter().enumerate().map(|(i, c)| if has(i) { quantise(c) } else { 0 }));
-            }
-            None => out.extend(std::iter::repeat_n(0, self.n)),
-        }
-        out
-    }
-
-    /// The query's cosine with every photo's image, as it is (negative ones too).
-    pub fn image_cosines(&self, query: &[f32]) -> Vec<f32> {
-        self.dots(&self.images, query)
-    }
-
-    fn dots(&self, data: &Mmap, query: &[f32]) -> Vec<f32> {
-        data.par_chunks_exact(self.dim * 2)
+    /// The query's cosine with every photo's picture (negative ones too). The query is a unit vector, so is each photo's.
+    pub fn cosines(&self, query: &[f32]) -> Vec<f32> {
+        self.images
+            .par_chunks_exact(self.dim * 2)
             .map(|row| row.chunks_exact(2).zip(query).map(|(b, q)| f16::from_le_bytes([b[0], b[1]]).to_f32() * q).sum::<f32>())
             .collect()
     }
@@ -172,8 +151,8 @@ impl Vectors {
 mod tests {
     use super::*;
 
-    /// A real map and Python's answer for the same words (/tmp/wv_ref.*, made by hand; the test is skipped without them): the
-    /// cosines agree to within the noise of fp16 vs bf16, and the best photos are the same.
+    /// A real map and Python's answer for the same words (/tmp/wv_ref.*, made by hand; the test is skipped without them; its
+    /// u16 file has the n picture cosines as 0..1 in 0..65535, then the captions', not used): the picture cosines agree to within the noise of fp16 vs bf16, and the best photos are the same.
     #[test]
     fn wikivoyage_matches_python() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -190,18 +169,19 @@ mod tests {
         let vector = model.embed_query(&query).unwrap();
         let embedded = started.elapsed();
         let started = std::time::Instant::now();
-        let mine = vectors.cosines(&vector);
+        let mine: Vec<u16> = vectors.cosines(&vector).into_iter().map(|c| (c.clamp(0.0, 1.0) * 65535.0).round() as u16).collect();
+        let python = &python[..n];
         eprintln!("{query:?}: query {embedded:?}, {n} photos compared in {:?}", started.elapsed());
         assert_eq!(mine.len(), python.len());
-        let worst = mine.iter().zip(&python).map(|(&a, &b)| (a as i32 - b as i32).abs()).max().unwrap();
+        let worst = mine.iter().zip(python).map(|(&a, &b)| (a as i32 - b as i32).abs()).max().unwrap();
         eprintln!("largest difference {:.4} in cosine", worst as f32 / 65535.0);
         let top = |v: &[u16]| {
             let mut idx: Vec<usize> = (0..n).collect();
-            idx.sort_by_key(|&i| std::cmp::Reverse(v[i].max(v[n + i])));
+            idx.sort_by_key(|&i| std::cmp::Reverse(v[i]));
             idx.truncate(30);
             idx
         };
-        let (a, b) = (top(&mine), top(&python));
+        let (a, b) = (top(&mine), top(python));
         let shared = a.iter().filter(|i| b.contains(i)).count();
         eprintln!("{shared} of the best 30 photos are the same");
         assert!(worst < 1500, "cosines differ by up to {}", worst as f32 / 65535.0);

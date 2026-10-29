@@ -39,7 +39,7 @@ impl Sizes {
             Part { name: "Photos", bytes: self.photos, about: "The pictures themselves, at full size, so you can zoom in to see them sharp. Photos on the same disk as the map are linked instead of copied, and the map points at photos on another disk where they are: see below." },
             Part { name: "Small pictures", bytes: self.pictures, about: "Tiny versions of every photo (1 to 32 pixels wide), compressed and kept ready. They are what you see when the map is zoomed out, and they are why the whole map is always visible at once." },
             Part { name: "Photo vectors", bytes: self.vectors, about: "For each photo, 768 numbers that describe what it shows, made by the AI model. Photos with similar numbers look alike: this is what the layout and the search are built on." },
-            Part { name: "Caption vectors", bytes: self.captions, about: "The same 768 numbers for each photo's caption (the text), so a search can match the words as well as the picture." },
+            Part { name: "Caption vectors", bytes: self.captions, about: "The same numbers for each photo's caption, made by older versions. Not used any more: search looks at the pictures only, so this file can be deleted." },
             Part { name: "Layout and names", bytes: self.layout, about: "Where each photo sits on the map, the named regions you see when zooming, and each photo's file name and size." },
             Part { name: "Other", bytes: self.other, about: "The cover picture shown on this page, and leftovers." },
         ];

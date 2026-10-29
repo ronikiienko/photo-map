@@ -15,8 +15,6 @@ use tokenizers::Tokenizer;
 
 /// What the model sees in front of a search query (the model's own prompt for queries).
 pub const QUERY_PROMPT: &str = "task: search result | query: ";
-/// The model's default for a text that is searched (a caption), when it has no title.
-pub const DOCUMENT_PROMPT: &str = "title: none | text: ";
 pub struct Gemma {
     // the environment must outlive the sessions
     env: Environment,
@@ -274,12 +272,6 @@ impl Gemma {
     /// A search query's vector (768 numbers, length 1).
     pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
         let ids = self.tokens(&format!("{QUERY_PROMPT}{text}"))?;
-        self.run(ids, Vec::new())
-    }
-
-    /// A caption's vector (768 numbers, length 1), as the maps' captions were embedded.
-    pub fn embed_document(&mut self, text: &str) -> Result<Vec<f32>> {
-        let ids = self.tokens(&format!("{DOCUMENT_PROMPT}{text}"))?;
         self.run(ids, Vec::new())
     }
 

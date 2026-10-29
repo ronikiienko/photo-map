@@ -13,7 +13,7 @@ use crate::models::{self, Hub, Prepared, Spec};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -88,9 +88,6 @@ pub struct Job {
     /// Set by the scan.
     #[serde(default)]
     pub photos: usize,
-    /// Every photo's file name is its caption (shown above it, and searched along with the picture).
-    #[serde(default)]
-    pub names_as_captions: bool,
     /// Use every Nth photo (1: all): a smaller map made quicker, picked evenly through the sorted list.
     #[serde(default = "one")]
     pub every: usize,
@@ -174,7 +171,7 @@ pub fn clean_name(name: &str) -> String {
 }
 
 /// Start a new build: its folder with job.json. Err with what is wrong (name taken, folder missing).
-pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: bool, every: usize, model: &str, copy_photos: bool) -> Result<PathBuf, String> {
+pub fn create(maps: &Path, name: &str, sources: &[PathBuf], every: usize, model: &str, copy_photos: bool) -> Result<PathBuf, String> {
     if models::spec(model).is_none() {
         return Err(format!("unknown model {model}"));
     }
@@ -193,7 +190,7 @@ pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: b
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, sources, created, stage: Stage::Scan, photos: 0, names_as_captions, every: every.max(1), model: model.to_string(), copy_photos }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, sources, created, stage: Stage::Scan, photos: 0, every: every.max(1), model: model.to_string(), copy_photos }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -617,31 +614,22 @@ fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         Err(Some(e)) => return Err(e),
         Ok(()) => {}
     }
-    let names = ctx.job.names_as_captions;
     let photos: Vec<serde_json::Value> = found
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let caption = if names { name_as_caption(&f.src) } else { String::new() };
             serde_json::json!({
                 "file": original_name(i, &f.src),
                 "source": f.src.to_string_lossy(),
                 "width": f.width,
                 "height": f.height,
                 "title": f.src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-                "caption": caption,
                 "meta": {},
             })
         })
         .collect();
     write_atomic(&ctx.dir.join("photos.json"), &serde_json::to_vec(&photos).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     Ok(Flow::Done)
-}
-
-/// A file name read as words: no folders or extension, separators as spaces ("red_fox-02.jpg" -> "red fox 02").
-fn name_as_caption(path: &Path) -> String {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    stem.split(|c: char| c == '_' || c == '-' || c == '.' || c.is_whitespace()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 fn shard_path(dir: &Path, k: usize) -> PathBuf {
@@ -766,46 +754,6 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         all.extend(fs::read(shard_path(&ctx.dir, k)).map_err(|e| e.to_string())?);
     }
     write_atomic(&ctx.dir.join("embeddings.bin"), &all).map_err(|e| e.to_string())?;
-    if ctx.job.names_as_captions {
-        return embed_captions(ctx);
-    }
-    Ok(Flow::Done)
-}
-
-/// captions.bin: the vector of every photo's caption (zeros for a photo with none). Written in pieces as it goes, so a pause loses little.
-fn embed_captions(ctx: &mut Ctx) -> Result<Flow, String> {
-    let n = ctx.job.photos;
-    let target = ctx.dir.join("captions.bin");
-    let dim = ctx.dim();
-    if fs::metadata(&target).is_ok_and(|m| m.len() as usize == n * dim * 2) {
-        return Ok(Flow::Done);
-    }
-    let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let part = ctx.dir.join("captions.part");
-    let row = dim * 2;
-    // go on from the rows already written
-    let have = (fs::metadata(&part).map_or(0, |m| m.len() as usize) / row).min(n);
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(&part).map_err(|e| e.to_string())?;
-    file.set_len((have * row) as u64).map_err(|e| e.to_string())?;
-    ctx.progress(have, n, "reading the captions");
-    for chunk_start in (have..n).step_by(64) {
-        if ctx.paused() {
-            return Ok(Flow::Paused);
-        }
-        let mut bytes = Vec::with_capacity(64 * row);
-        for photo in &photos[chunk_start..(chunk_start + 64).min(n)] {
-            let text = photo["caption"].as_str().unwrap_or("");
-            let vector = if text.is_empty() { None } else { ctx.hub.with(&ctx.job.model, |m| m.embed_document(text).ok())? };
-            match vector {
-                Some(v) => bytes.extend(v.iter().flat_map(|&x| half::f16::from_f32(x).to_le_bytes())),
-                None => bytes.extend(std::iter::repeat_n(0u8, row)),
-            }
-        }
-        file.write_all(&bytes).map_err(|e| e.to_string())?;
-        ctx.set_done((chunk_start + 64).min(n));
-    }
-    drop(file);
-    fs::rename(&part, &target).map_err(|e| e.to_string())?;
     Ok(Flow::Done)
 }
 
@@ -1005,7 +953,7 @@ mod tests {
         }
         let model = models::test_hub();
         let build = |name: &str| {
-            let dir = create(&maps, name, &[source.clone()], false, 1, models::DEFAULT, false).unwrap();
+            let dir = create(&maps, name, &[source.clone()], 1, models::DEFAULT, false).unwrap();
             let run = Run::start(dir, root.clone(), model.clone(), || {}).unwrap();
             while run.running() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1058,8 +1006,8 @@ mod tests {
         fs::write(source.join("notes.txt"), "not a photo").unwrap();
 
         let model = models::test_hub();
-        let dir = create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT, false).unwrap();
-        assert!(create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT, false).is_err(), "a second map with the same name");
+        let dir = create(&maps, "test map", &[source.clone()], 1, models::DEFAULT, false).unwrap();
+        assert!(create(&maps, "test map", &[source.clone()], 1, models::DEFAULT, false).is_err(), "a second map with the same name");
         // stop and go on a few times at arbitrary moments
         for pause_after_ms in [0u64, 150, 900, 2500] {
             let run = Run::start(dir.clone(), root.clone(), model.clone(), || {}).unwrap();
@@ -1085,8 +1033,6 @@ mod tests {
         assert_eq!(fs::metadata(done.join("embeddings.bin")).unwrap().len() as usize, count * DIM * 2);
         let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(done.join("photos.json")).unwrap()).unwrap();
         assert_eq!(photos.len(), count);
-        assert!(photos.iter().all(|p| p["caption"] == p["title"]), "every photo's caption is its file name");
-        assert_eq!(fs::metadata(done.join("captions.bin")).unwrap().len() as usize, count * DIM * 2);
         assert!(done.join(photos[count - 1]["file"].as_str().unwrap()).exists());
         // the vectors are unit length and not all alike
         let raw = fs::read(done.join("embeddings.bin")).unwrap();
@@ -1129,7 +1075,7 @@ mod tests {
         }
         let hub = models::test_hub();
         let build = |name: &str, model: &str| {
-            let dir = create(&maps, name, &[source.clone()], false, 1, model, false).unwrap();
+            let dir = create(&maps, name, &[source.clone()], 1, model, false).unwrap();
             let run = Run::start(dir, root.clone(), hub.clone(), || {}).unwrap();
             while run.running() {
                 std::thread::sleep(std::time::Duration::from_millis(50));

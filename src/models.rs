@@ -189,14 +189,6 @@ impl Model {
         }
     }
 
-    /// A caption, as the text that is searched.
-    pub fn embed_document(&mut self, text: &str) -> embed::Result<Vec<f32>> {
-        match self {
-            Model::Gemma(m) => m.embed_document(text),
-            Model::Siglip(m) => m.embed_text(text),
-        }
-    }
-
     pub fn embed_image(&mut self, img: &RgbaImage) -> embed::Result<Vec<f32>> {
         match self {
             Model::Gemma(m) => m.embed_image(img),

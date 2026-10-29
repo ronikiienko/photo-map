@@ -5,7 +5,7 @@
 //!     originals/      the images; photo i = position i in photos.json
 //!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
 //!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
-//!     embeddings.bin  per photo: float16 vector (not used by the viewer)
+//!     embeddings.bin  per photo: float16 vector of the picture (search, Axes and Groups)
 //!     pages_bc7.bin   the always-loaded levels, made while the map is built (bake.rs)
 
 use memmap2::Mmap;
@@ -101,7 +101,7 @@ pub struct Photo {
     pub width: u32,
     pub height: u32,
     pub title: String,
-    /// Shown above the photo when zoomed in, and searched along with the picture (captions.bin); empty if the photo has none.
+    /// Shown above the photo when zoomed in (never searched: search.rs); empty if the photo has none.
     #[serde(default)]
     pub caption: String,
     /// Whatever the image file said about itself: description, date taken, camera, location...

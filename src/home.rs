@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 pub enum Action {
     Open(PathBuf),
-    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String, copy_photos: bool },
+    Create { name: String, sources: Vec<PathBuf>, every: usize, model: String, copy_photos: bool },
     Pause(PathBuf),
     SetBackend(crate::backends::Backend),
     GetModel(String),
@@ -79,7 +79,6 @@ struct NewMap {
     copy_photos: bool,
     /// Use every Nth photo.
     every: usize,
-    names_as_captions: bool,
     /// The id of the model that will make the photos' vectors (models.rs).
     model: String,
 }
@@ -124,7 +123,7 @@ impl Home {
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, other_disk: false, copy_photos: false, every: 1, names_as_captions: false, model: crate::models::DEFAULT.to_string() });
+        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, other_disk: false, copy_photos: false, every: 1, model: crate::models::DEFAULT.to_string() });
     }
 
     pub fn set_drag_over(&mut self, over: bool) {
@@ -752,14 +751,12 @@ impl Home {
                 ui.label(theme::muted(p));
             }
             ui.add_space(8.0);
-            ui.checkbox(&mut nm.names_as_captions, "Use file names as captions").on_hover_text("Each photo's file name (without the extension) is shown above it when you zoom in, and search looks at it as well as at the picture. Only worth it if the names describe the photos.");
-            ui.add_space(8.0);
             ui.label(theme::muted("It can take a while for many photos. You can pause, close the app and carry on later."));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
-                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone(), copy_photos: nm.copy_photos });
+                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), every: nm.every, model: nm.model.clone(), copy_photos: nm.copy_photos });
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;

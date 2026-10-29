@@ -84,27 +84,6 @@ enum Page {
     Viewer,
 }
 
-/// Which of a photo's two cosines with the search count: its image's, its caption's, or the better of them.
-#[derive(Clone, Copy, PartialEq, Default)]
-enum SearchOn {
-    #[default]
-    Both,
-    Images,
-    Captions,
-}
-
-/// Photo `i`'s similarity to the last search (`sims`: the n image cosines, then the n caption cosines, 0 = no caption), or None
-/// if it has no score on that side (captions only, and no caption).
-fn similarity(sims: &[u16], n: usize, i: usize, on: SearchOn) -> Option<f32> {
-    let (a, b) = (sims[i] as f32 / 65535.0, sims[n + i] as f32 / 65535.0);
-    let captioned = sims[n + i] > 0;
-    match on {
-        SearchOn::Images => Some(a),
-        SearchOn::Captions => captioned.then_some(b),
-        SearchOn::Both => Some(if captioned { a.max(b) } else { a }),
-    }
-}
-
 struct Ui {
     ctx: egui::Context,
     state: egui_winit::State,
@@ -121,8 +100,8 @@ struct OpenMap {
     flags_dirty: bool,
     /// A photo's side in world units (see PHOTO_WORLD_DEFAULT).
     photo_world: f32,
-    /// The last search's cosines: the image ones, then the caption ones (0 = no caption), as u16.
-    sims: Vec<u16>,
+    /// The last search's cosine with every photo's picture (empty: no search).
+    sims: Vec<f32>,
     /// The photos that match the search, best first, and which of them the last next/previous step went to.
     order: Vec<usize>,
     at: Option<usize>,
@@ -222,8 +201,6 @@ struct Viewer {
     layout_vectors: Vec<Option<Vec<f32>>>,
     /// How many photos a search should light up (the slider): the closest this many match.
     wanted: f32,
-    /// What the search looks at: the photos' images, their captions, or both.
-    on: SearchOn,
     /// What the shown search was for (words and/or a photo's name).
     shown: String,
     /// The photo in the box, as a small picture.
@@ -301,7 +278,6 @@ impl Viewer {
             layout_asked: Vec::new(),
             layout_vectors: Vec::new(),
             wanted: 100.0,
-            on: SearchOn::default(),
             shown: String::new(),
             photo_tex: None,
             last_frame: Instant::now(),
@@ -350,9 +326,6 @@ impl Viewer {
         self.photo_tex = None;
         self.shown.clear();
         let vectors = search::Vectors::open(&path, n, data.manifest.dim());
-        if !vectors.as_ref().is_some_and(|v| v.has_captions()) {
-            self.on = SearchOn::Both; // the choice is hidden for a map without captions
-        }
         let in_process = vectors.is_some();
         self.asked = None;
         self.view_choice = View::Map; // a map opens as itself; the words are kept for the next one
@@ -492,7 +465,7 @@ impl Viewer {
         use home::Action;
         match action {
             Action::Open(path) => self.open(path),
-            Action::Create { name, sources, names_as_captions, every, model, copy_photos } => match build::create(self.library.dir(), &name, &sources, names_as_captions, every, &model, copy_photos) {
+            Action::Create { name, sources, every, model, copy_photos } => match build::create(self.library.dir(), &name, &sources, every, &model, copy_photos) {
                 Ok(dir) => {
                     self.library.refresh();
                     self.queue.push(dir);
@@ -706,7 +679,7 @@ impl Viewer {
         let Some(m) = &mut self.map else { return };
         let Some(vectors) = &m.vectors else { return };
         let words = std::mem::take(&mut self.layout_vectors);
-        let Some(cos) = words.iter().map(|v| v.as_ref().map(|v| vectors.image_cosines(v))).collect::<Option<Vec<_>>>() else { return };
+        let Some(cos) = words.iter().map(|v| v.as_ref().map(|v| vectors.cosines(v))).collect::<Option<Vec<_>>>() else { return };
         if self.layout_for == View::Axes {
             m.axes_cos = Some(cos.try_into().unwrap());
             m.islands.clear();
@@ -773,24 +746,23 @@ impl Viewer {
         }
     }
 
-    /// Turn the last search's cosines into the photos' match bytes (0 = no match, 1..=255 from the cutoff up): a photo's
-    /// score is the better of its image and caption cosines, and the closest `wanted` photos match. The box the matches span.
+    /// Turn the last search's cosines into the photos' match bytes (0 = no match, 1..=255 from the cutoff up): the closest
+    /// `wanted` photos match. The box the matches and their copies span.
     fn apply_search(&mut self) -> Option<(Vec2, Vec2)> {
         let m = self.map.as_mut()?;
         let n = m.flags.len();
-        if n == 0 || m.sims.len() != 2 * n {
+        if n == 0 || m.sims.len() != n {
             return None;
         }
-        // a photo's similarity (see SearchOn); no score (-1): it can't match
-        let score: Vec<f32> = (0..n).map(|i| similarity(&m.sims, n, i, self.on).unwrap_or(-1.0)).collect();
+        let score = &m.sims;
         // the closest `wanted` photos match: the cutoff is the similarity of the last of them (ties may add a few)
         let k = (self.wanted.round() as usize).clamp(1, n);
         let mut sorted = score.clone();
         let (_, &mut cut, _) = sorted.select_nth_unstable_by(n - k, |a, b| a.total_cmp(b));
-        let best = score.iter().copied().fold(0.0, f32::max);
+        let best = score.iter().copied().fold(f32::MIN, f32::max);
         let span = (best - cut).max(1e-4); // red at the cutoff, yellow at the best photo
         for i in 0..n {
-            m.flags[i] = if score[i] >= cut && score[i] >= 0.0 { 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
+            m.flags[i] = if score[i] >= cut { 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
         }
         m.order = (0..n).filter(|&i| m.flags[i] > 0).collect();
         m.order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
@@ -1360,7 +1332,7 @@ impl Viewer {
             let photo = &m.data.photos[i];
             let text = (if photo.caption.trim().is_empty() { &photo.title } else { &photo.caption }).trim().to_string();
             // while a search is showing: the photo's similarity to it first, in the colour of its match (grey if it is no match)
-            let score = (m.sims.len() == 2 * m.flags.len()).then(|| similarity(&m.sims, m.flags.len(), i, self.on)).flatten().map(|sim| (sim, m.flags[i]));
+            let score = m.sims.get(i).map(|&sim| (sim, m.flags[i]));
             if text.is_empty() && score.is_none() {
                 continue;
             }
@@ -1459,27 +1431,6 @@ impl Viewer {
                         egui::containers::menu::MenuButton::new("Options").config(stay_open).ui(ui, |ui| {
                             ui.set_width(280.0);
                             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                let captioned = self.map.as_ref().and_then(|m| m.vectors.as_ref()).is_some_and(|v| v.has_captions());
-                                ui.label(theme::muted("SEARCH IN"));
-                                if captioned {
-                                    let options = [
-                                        (SearchOn::Both, "Both", "a photo's similarity is the better of its image's and its caption's"),
-                                        (SearchOn::Images, "Images", "only what the pictures look like"),
-                                        (SearchOn::Captions, "Captions", "only the captions (photos without one don't match)"),
-                                    ];
-                                    if theme::segmented(ui, &mut self.on, &options) {
-                                        actions.reblend = true;
-                                    }
-                                    ui.label(theme::muted(match self.on {
-                                        SearchOn::Both => "What a photo shows or what its caption says, whichever fits better.",
-                                        SearchOn::Images => "Only what the pictures show.",
-                                        SearchOn::Captions => "Only the written captions. Photos without one never match.",
-                                    }));
-                                } else {
-                                    ui.label("Pictures");
-                                    ui.label(theme::muted("This map has no captions, so your words are compared with what the pictures show."));
-                                }
-                                ui.add_space(10.0);
                                 ui.label(theme::muted("BEST MATCHES TO MARK"));
                                 let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
                                 if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
@@ -1694,8 +1645,7 @@ impl Viewer {
 
         if let (Some(id), Some(c), Some(m)) = (self.hovered, self.cursor, &self.map) {
             let ppp = ctx.pixels_per_point();
-            let n = m.flags.len();
-            let score = (m.sims.len() == 2 * n).then(|| similarity(&m.sims, n, id, self.on)).flatten();
+            let score = m.sims.get(id).copied();
             egui::Area::new("tip".into()).fixed_pos([c.x / ppp + 14.0, c.y / ppp + 14.0]).interactable(false).show(&ctx, |ui| {
                 theme::card().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                     ui.set_max_width(320.0);
