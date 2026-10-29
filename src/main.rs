@@ -1393,12 +1393,26 @@ struct App {
     restart: bool,
 }
 
+/// The window's icon (assets/icon.png, drawn by tools/make_icon.py). Wayland ignores it: there the .desktop file gives the icon.
+fn icon() -> Option<winit::window::Icon> {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.viewer.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("photo map").with_inner_size(winit::dpi::LogicalSize::new(1200.0, 780.0));
+        let attrs = Window::default_attributes().with_title("photo map").with_inner_size(winit::dpi::LogicalSize::new(1200.0, 780.0)).with_window_icon(icon());
+        // the app id: on Wayland the taskbar finds the icon through the .desktop file of this name (assets/photo-map.desktop)
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::{wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11};
+            let attrs = WindowAttributesExtWayland::with_name(attrs, "photo-map", "photo-map");
+            WindowAttributesExtX11::with_name(attrs, "photo-map", "photo-map")
+        };
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         window.request_redraw(); // a window that isn't maximized gets no resize event to start the first frame
         let library = Library::new(self.maps.clone());

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Photo map
+Comment=See your photos laid out by what they show
+Exec=photo-map
+Icon=photo-map
+StartupWMClass=photo-map
+Categories=Graphics;Viewer;
