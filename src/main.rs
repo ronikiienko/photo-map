@@ -592,14 +592,14 @@ impl Viewer {
         let (_, &mut cut, _) = sorted.select_nth_unstable_by(n - k, |a, b| a.total_cmp(b));
         let best = score.iter().copied().fold(0.0, f32::max);
         let span = (best - cut).max(1e-4); // red at the cutoff, yellow at the best photo
-        let mut hits = 0;
         for i in 0..n {
-            m.flags[i] = if score[i] >= cut && score[i] >= 0.0 { hits += 1; 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
+            m.flags[i] = if score[i] >= cut && score[i] >= 0.0 { 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
         }
         m.order = (0..n).filter(|&i| m.flags[i] > 0).collect();
         m.order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
         m.at = None;
-        self.status = format!("{}: {hits} photos, similarity {cut:.2} to {best:.2}", self.shown);
+        // how many is already in "6 of 100" beside it
+        self.status = format!("{}: similarity {cut:.2} to {best:.2}", self.shown);
         m.flags_dirty = true;
         let pts = m.flags.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, _)| Vec2::new(m.data.points[i].x, m.data.points[i].y));
         Some(pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p))))
@@ -1265,7 +1265,10 @@ impl Viewer {
                                 actions.step = 1;
                             }
                             ui.label(at.map_or(format!("{found} matches"), |k| format!("{} of {found}", k + 1)));
-                            ui.toggle_value(&mut self.gallery.open, "Gallery").on_hover_text("all the matches together (G)");
+                            // a button like Prev and Next (a toggle has no frame while off), lit while the gallery is open
+                            if ui.add(egui::Button::new("Gallery").selected(self.gallery.open)).on_hover_text("all the matches together (G)").clicked() {
+                                self.gallery.open = !self.gallery.open;
+                            }
                         }
                         if !self.status.is_empty() {
                             ui.label(theme::muted(&self.status));
