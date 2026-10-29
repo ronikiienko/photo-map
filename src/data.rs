@@ -174,6 +174,12 @@ impl MapData {
         self.photos.len()
     }
 
+    /// Put the photos somewhere else (another view of the same map): the grid follows.
+    pub fn set_points(&mut self, points: Vec<Point>) {
+        self.grid = Grid::new(&points);
+        self.points = points;
+    }
+
     pub fn path(&self, id: usize) -> PathBuf {
         self.bundle.join(&self.photos[id].file)
     }

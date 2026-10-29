@@ -144,23 +144,27 @@ impl Vectors {
     /// The query's cosine with every photo's image, then with every photo's caption, as the viewer keeps them (u16: 0..1 as 0..65535;
     /// 0 for a photo with no caption). The query is a unit vector, so is each photo's.
     pub fn cosines(&self, query: &[f32]) -> Vec<u16> {
-        let dots = |data: &Mmap| -> Vec<f32> {
-            data.par_chunks_exact(self.dim * 2)
-                .map(|row| {
-                    row.chunks_exact(2).zip(query).map(|(b, q)| f16::from_le_bytes([b[0], b[1]]).to_f32() * q).sum::<f32>()
-                })
-                .collect()
-        };
         let quantise = |c: f32| (c.clamp(0.0, 1.0) * 65535.0).round() as u16;
-        let mut out: Vec<u16> = dots(&self.images).into_iter().map(quantise).collect();
+        let mut out: Vec<u16> = self.image_cosines(query).into_iter().map(quantise).collect();
         match &self.captions {
             Some(captions) => {
                 let has = |i: usize| captions[i * self.dim * 2..(i + 1) * self.dim * 2].iter().any(|&b| b != 0);
-                out.extend(dots(captions).into_iter().enumerate().map(|(i, c)| if has(i) { quantise(c) } else { 0 }));
+                out.extend(self.dots(captions, query).into_iter().enumerate().map(|(i, c)| if has(i) { quantise(c) } else { 0 }));
             }
             None => out.extend(std::iter::repeat_n(0, self.n)),
         }
         out
+    }
+
+    /// The query's cosine with every photo's image, as it is (negative ones too).
+    pub fn image_cosines(&self, query: &[f32]) -> Vec<f32> {
+        self.dots(&self.images, query)
+    }
+
+    fn dots(&self, data: &Mmap, query: &[f32]) -> Vec<f32> {
+        data.par_chunks_exact(self.dim * 2)
+            .map(|row| row.chunks_exact(2).zip(query).map(|(b, q)| f16::from_le_bytes([b[0], b[1]]).to_f32() * q).sum::<f32>())
+            .collect()
     }
 }
 

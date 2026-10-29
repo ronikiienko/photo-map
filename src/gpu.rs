@@ -73,7 +73,9 @@ pub struct CameraUniform {
     pub viewport: [f32; 2],
     pub scale: f32,
     pub size_px: f32,
-    pub _pad: [u32; 2],
+    /// How far the photos have slid from their old places (`from`) to their new ones: 0 ... 1, 1 when nothing moves.
+    pub slide: f32,
+    pub _pad: u32,
 }
 
 pub struct MapRenderer {
@@ -81,6 +83,10 @@ pub struct MapRenderer {
     bind_group: wgpu::BindGroup,
     camera: wgpu::Buffer,
     flags: wgpu::Buffer,
+    /// Per photo: x, y and shape (where it is going, while the photos slide to another view).
+    points: wgpu::Buffer,
+    /// Per photo: x, y where it was before the view changed.
+    from: wgpu::Buffer,
     n: u32,
 }
 
@@ -88,16 +94,15 @@ impl MapRenderer {
     pub fn new(gpu: &Gpu, data: &MapData, streamer: &Streamer) -> Self {
         let device = &gpu.device;
         let n = data.n();
-        let points: Vec<[f32; 4]> = (0..n)
-            .map(|i| {
-                let (p, shape) = (data.points[i], data.shape(i));
-                [p.x, p.y, shape.x, shape.y]
-            })
-            .collect();
         let points = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("points"),
-            contents: bytemuck::cast_slice(&points),
-            usage: wgpu::BufferUsages::STORAGE,
+            contents: bytemuck::cast_slice(&points_with_shapes(data)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let from = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("from"),
+            contents: bytemuck::cast_slice(&data.points),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let flags = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("flags"),
@@ -148,6 +153,7 @@ impl MapRenderer {
                 entry(4, wgpu::ShaderStages::FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
                 entry(5, wgpu::ShaderStages::FRAGMENT, storage),
                 entry(6, wgpu::ShaderStages::FRAGMENT, storage),
+                entry(7, wgpu::ShaderStages::VERTEX, storage),
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -161,6 +167,7 @@ impl MapRenderer {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
                 wgpu::BindGroupEntry { binding: 5, resource: streamer.table.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: streamer.first_pages.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: from.as_entire_binding() },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -193,7 +200,13 @@ impl MapRenderer {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, bind_group, camera, flags, n: n as u32 }
+        Self { pipeline, bind_group, camera, flags, points, from, n: n as u32 }
+    }
+
+    /// The photos move from `from` to where `data` has them now (they slide there as `CameraUniform::slide` goes from 0 to 1).
+    pub fn move_points(&self, queue: &wgpu::Queue, data: &MapData, from: &[crate::data::Point]) {
+        queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&points_with_shapes(data)));
+        queue.write_buffer(&self.from, 0, bytemuck::cast_slice(from));
     }
 
     /// The whole flags table (per photo: how red the search makes it, 0..255), re-sent when anything in it changed.
@@ -220,6 +233,16 @@ impl MapRenderer {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..6, 0..self.n);
     }
+}
+
+/// Per photo: x, y, and its shape (1, 0.67 for a 3:2 photo).
+fn points_with_shapes(data: &MapData) -> Vec<[f32; 4]> {
+    (0..data.n())
+        .map(|i| {
+            let (p, shape) = (data.points[i], data.shape(i));
+            [p.x, p.y, shape.x, shape.y]
+        })
+        .collect()
 }
 
 /// The viewer's background (photo.rs fills transparent pixels with the same colour).

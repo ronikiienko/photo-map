@@ -9,8 +9,8 @@ struct Camera {
     viewport: vec2f,   // screen size in pixels
     scale: f32,        // pixels per world unit
     size_px: f32,      // a photo's longer side on screen
-    _pad0: u32,
-    _pad1: u32,
+    slide: f32,        // 0 ... 1: how far the photos have moved from `from_xy` to `points` (1 once the view has settled)
+    _pad: u32,
 }
 
 const PAGE: f32 = 4096.0;
@@ -31,6 +31,7 @@ const AA: f32 = 1.0;  // px the quad reaches past the photo's edge, for the part
 @group(0) @binding(4) var pages_sampler: sampler;
 @group(0) @binding(5) var<storage, read> table: array<u32>;
 @group(0) @binding(6) var<storage, read> first_page: array<u32>;
+@group(0) @binding(7) var<storage, read> from_xy: array<vec2f>;  // x, y before the view changed
 
 struct VsOut {
     @builtin(position) pos: vec4f,
@@ -49,7 +50,8 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) id: u32) -> V
     let grow = 1.0 + select(0.0, GROW - 1.0, flags[id] != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
     let size = max(cam.size_px * p.zw, vec2f(1.0)) * grow;  // longer side = size_px, the other follows the shape; never under 1 px
     let local = (corner - 0.5) * (size + 2.0 * AA);
-    let px = (p.xy - cam.center) * cam.scale + cam.viewport * 0.5 + local;
+    let at = mix(from_xy[id], p.xy, cam.slide);
+    let px = (at - cam.center) * cam.scale + cam.viewport * 0.5 + local;
     var out: VsOut;
     out.pos = vec4f(px.x / cam.viewport.x * 2.0 - 1.0, 1.0 - px.y / cam.viewport.y * 2.0, 0.0, 1.0);
     out.local = local;
