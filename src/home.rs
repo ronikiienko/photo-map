@@ -1042,6 +1042,7 @@ fn step(ui: &mut Ui, step: Stage, current: Stage, last: bool) {
         Stage::Scan => "Find",
         Stage::Embed => "Understand",
         Stage::Layout => "Lay out",
+        Stage::Tree => "Link",
         Stage::Regions => "Regions",
         Stage::Names => "Names",
         Stage::Bake => "Prepare",

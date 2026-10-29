@@ -1,6 +1,7 @@
 //! Laying out a map: where each photo goes so that similar photos are close. PCA to 50 dimensions, each photo's 10 nearest
-//! neighbours (exact, by cosine), then UMAP down to 2 (umap-rs), scaled to 0 ... WORLD on both axes - what src/photomap.py did.
+//! neighbours (by cosine, among the photos of its nearest cells: crate::cells), then UMAP down to 2 (umap-rs), scaled to 0 ... WORLD on both axes - what src/photomap.py did.
 
+use crate::cells::Cells;
 use crate::data::WORLD;
 use ndarray::{Array2, Axis};
 use rayon::prelude::*;
@@ -8,6 +9,8 @@ use umap_rs::{GraphParams, LearnedManifold, Umap, UmapConfig};
 
 const COMPONENTS: usize = 50;
 const NEIGHBOURS: usize = 11; // a photo itself and its 10 nearest
+/// How many of its nearest cells each photo is compared with.
+const PROBE: usize = 32;
 const MIN_DIST: f32 = 0.05;
 
 /// A small deterministic random generator (xorshift): the layout is the same every time for the same photos.
@@ -39,6 +42,43 @@ pub fn layout(vectors: Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Syn
         // too few photos for a manifold: along a line
         return Ok(Some((0..n).flat_map(|i| [WORLD * (i as f32 + 0.5) / n as f32, WORLD / 2.0]).collect()));
     }
+    let Some((pcs, init)) = principal(vectors, progress, paused) else { return Ok(None) };
+
+    // 3. each photo's nearest neighbours by cosine
+    let k = NEIGHBOURS.min(n - 1).max(2);
+    let Some((indices, dists)) = neighbours(&pcs, k, progress, paused) else { return Ok(None) };
+
+    // 4. UMAP
+    progress("arranging the photos", 0, 1);
+    let epochs = if n > 10_000 { 200 } else { 500 };
+    let mut config = UmapConfig::default();
+    config.graph = GraphParams { n_neighbors: k, ..Default::default() };
+    config.manifold.min_dist = MIN_DIST;
+    let umap = Umap::new(config);
+    let manifold = umap.learn_manifold(pcs.view(), indices.view(), dists.view());
+    let mut start = init;
+    for (i, v) in start.iter_mut().enumerate() {
+        *v += 1e-4 * Rng(i as u64 + 1).next();
+    }
+    let Some(embedding) = optimise(&manifold, start, epochs, progress, paused) else { return Ok(None) };
+    let xy = embedding.view();
+
+    // 5. scaled to 0 ... WORLD on both axes
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for row in xy.axis_iter(Axis(0)) {
+        for a in 0..2 {
+            lo[a] = lo[a].min(row[a]);
+            hi[a] = hi[a].max(row[a]);
+        }
+    }
+    let scaled = xy.axis_iter(Axis(0)).flat_map(|r| (0..2).map(move |a| (r[a] - lo[a]) / (hi[a] - lo[a]).max(1e-9) * WORLD).collect::<Vec<_>>());
+    Ok(Some(scaled.collect()))
+}
+
+/// Steps 1 and 2 of `layout`: the photos in their COMPONENTS main directions (unit length), and the first two of them (not
+/// scaled to unit length: where the arranging starts). None if `paused()` said so.
+fn principal(vectors: Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Option<(Array2<f32>, Array2<f32>)> {
+    let n = vectors.nrows();
     let dim = vectors.ncols();
 
     // 1. centre (a photo it couldn't read counts as the average), unit length
@@ -70,7 +110,7 @@ pub fn layout(vectors: Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Syn
     let mut q = Array2::from_shape_fn((dim, p), |_| rng.next());
     for round in 0..40 {
         if paused() {
-            return Ok(None);
+            return None;
         }
         progress("finding the main directions of the photos", round, 40);
         q = cov.dot(&q);
@@ -90,36 +130,7 @@ pub fn layout(vectors: Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Syn
     let init = pcs.slice(ndarray::s![.., ..2]).to_owned();
     normalise_rows(&mut pcs);
     drop(x);
-
-    // 3. each photo's nearest neighbours by cosine
-    let k = NEIGHBOURS.min(n - 1).max(2);
-    let Some((indices, dists)) = neighbours(&pcs, k, progress, paused) else { return Ok(None) };
-
-    // 4. UMAP
-    progress("arranging the photos", 0, 1);
-    let epochs = if n > 10_000 { 200 } else { 500 };
-    let mut config = UmapConfig::default();
-    config.graph = GraphParams { n_neighbors: k, ..Default::default() };
-    config.manifold.min_dist = MIN_DIST;
-    let umap = Umap::new(config);
-    let manifold = umap.learn_manifold(pcs.view(), indices.view(), dists.view());
-    let mut start = init;
-    for (i, v) in start.iter_mut().enumerate() {
-        *v += 1e-4 * Rng(i as u64 + 1).next();
-    }
-    let Some(embedding) = optimise(&manifold, start, epochs, progress, paused) else { return Ok(None) };
-    let xy = embedding.view();
-
-    // 5. scaled to 0 ... WORLD on both axes
-    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
-    for row in xy.axis_iter(Axis(0)) {
-        for a in 0..2 {
-            lo[a] = lo[a].min(row[a]);
-            hi[a] = hi[a].max(row[a]);
-        }
-    }
-    let scaled = xy.axis_iter(Axis(0)).flat_map(|r| (0..2).map(move |a| (r[a] - lo[a]) / (hi[a] - lo[a]).max(1e-9) * WORLD).collect::<Vec<_>>());
-    Ok(Some(scaled.collect()))
+    Some((pcs, init))
 }
 
 /// UMAP's layout step: the photos move in 2D, pulled towards the photos they are linked to and pushed away from random others,
@@ -205,56 +216,27 @@ fn optimise(
     Some(emb)
 }
 
-/// Each photo's `k` nearest photos by cosine (itself first, distance 0): the indices and the Euclidean distances (the vectors are unit length).
-/// None if `paused()` said so.
+/// Each photo's `k` nearest photos by cosine (itself first, distance 0), among the photos of its PROBE nearest cells
+/// (crate::cells): the indices and the Euclidean distances (the vectors are unit length). None if `paused()` said so.
 fn neighbours(pcs: &Array2<f32>, k: usize, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Option<(Array2<u32>, Array2<f32>)> {
     let n = pcs.nrows();
+    let cells = Cells::new(pcs, progress, paused)?;
+    // each photo on its own: its nearest outside itself
+    let alone: Vec<u32> = (0..n as u32).collect();
+    let all: Vec<usize> = (0..n).collect();
+    let lists = cells.nearest_outside(pcs, PROBE, k - 1, &all, &alone, "finding each photo's neighbours", progress, paused)?;
     let mut indices = Array2::<u32>::zeros((n, k));
     let mut dists = Array2::<f32>::zeros((n, k));
-    let block = 256;
-    let blocks = n.div_ceil(block);
-    let done = std::sync::atomic::AtomicUsize::new(0);
-    let stopped = std::sync::atomic::AtomicBool::new(false);
-    let pcs_t = pcs.t().to_owned();
-    indices
-        .axis_chunks_iter_mut(Axis(0), block)
-        .zip(dists.axis_chunks_iter_mut(Axis(0), block))
-        .enumerate()
-        .par_bridge()
-        .for_each(|(b, (mut idx, mut dist))| {
-            if stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-            if paused() {
-                stopped.store(true, std::sync::atomic::Ordering::Relaxed);
-                return;
-            }
-            let rows = pcs.slice(ndarray::s![b * block..(b * block + block).min(n), ..]);
-            let sims = rows.dot(&pcs_t);
-            let mut order: Vec<u32> = Vec::with_capacity(n);
-            for (r, sim) in sims.axis_iter(Axis(0)).enumerate() {
-                let me = (b * block + r) as u32;
-                order.clear();
-                order.extend(0..n as u32);
-                let by_sim = |a: &u32, c: &u32| sim[*c as usize].total_cmp(&sim[*a as usize]);
-                order.select_nth_unstable_by(k - 1, by_sim);
-                let mut top = order[..k].to_vec();
-                top.sort_by(by_sim);
-                // the photo itself comes first (a duplicate of it could tie)
-                if let Some(at) = top.iter().position(|&t| t == me) {
-                    top.swap(0, at);
-                } else {
-                    top[0] = me;
-                }
-                for (j, &t) in top.iter().enumerate() {
-                    idx[(r, j)] = t;
-                    dist[(r, j)] = if t == me { 0.0 } else { (2.0 - 2.0 * sim[t as usize]).max(0.0).sqrt() };
-                }
-            }
-            let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            progress("finding each photo's neighbours", d, blocks);
-        });
-    (!stopped.load(std::sync::atomic::Ordering::Relaxed)).then_some((indices, dists))
+    for (i, list) in lists.iter().enumerate() {
+        indices[(i, 0)] = i as u32;
+        // fewer found than asked for (its cells hold too few photos): the farthest found again
+        for j in 1..k {
+            let (d, o) = list.get(j - 1).or(list.last()).copied().unwrap_or((0.0, i as u32));
+            indices[(i, j)] = o;
+            dists[(i, j)] = (2.0 * d).max(0.0).sqrt();
+        }
+    }
+    Some((indices, dists))
 }
 
 #[cfg(test)]
@@ -313,15 +295,16 @@ mod tests {
 mod compare {
     use super::*;
 
-    /// (Run by hand: cargo test --release layout_of_a_real_map -- --ignored --nocapture.) The Rust layout of a finished map's photos
-    /// against the layout Python made: time, and how many of a photo's 10 most similar photos land among its 10 nearest on the map.
+    /// (Run by hand: [MAP=maps/<name>.photomap] cargo test --release layout_of_a_real_map -- --ignored --nocapture.) The Rust
+    /// layout of a finished map's photos against its layout: time, how many of the true 10 nearest the neighbours have, and how
+    /// many of a photo's 10 most similar photos land among its 10 nearest on the map.
     #[test]
     #[ignore]
     fn layout_of_a_real_map() {
-        let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("maps/flickr30k.photomap");
-        let n = 31_014;
+        let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(std::env::var("MAP").unwrap_or("maps/flickr30k.photomap".into()));
         let raw = std::fs::read(bundle.join("embeddings.bin")).unwrap();
         let v: Vec<f32> = raw.chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();
+        let n = v.len() / 768;
         let vectors = Array2::from_shape_vec((n, 768), v).unwrap();
         let started = std::time::Instant::now();
         let last = std::sync::Mutex::new(String::new());
@@ -340,6 +323,22 @@ mod compare {
         .unwrap()
         .unwrap();
         eprintln!("layout took {:.1}s", started.elapsed().as_secs_f32());
+        // the neighbours found against the true ones (comparing with all), for photos spread through the map
+        let (pcs, _) = principal(vectors.clone(), &|_, _, _| {}, &|| false).unwrap();
+        let found = std::time::Instant::now();
+        let (idx, _) = neighbours(&pcs, NEIGHBOURS, &|_, _, _| {}, &|| false).unwrap();
+        let took = found.elapsed().as_secs_f32();
+        let sample: Vec<usize> = (0..n).step_by(n / 2000).collect();
+        let hits: usize = sample
+            .par_iter()
+            .map(|&i| {
+                let sims = pcs.dot(&pcs.row(i));
+                let mut by_sim: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+                by_sim.sort_by(|&a, &b| sims[b].total_cmp(&sims[a]));
+                by_sim[..NEIGHBOURS - 1].iter().filter(|&&j| idx.row(i).iter().skip(1).any(|&f| f as usize == j)).count()
+            })
+            .sum();
+        eprintln!("neighbours in {took:.1}s: {:.3} of the true 10 nearest found", hits as f32 / (sample.len() * (NEIGHBOURS - 1)) as f32);
         let python: Vec<f32> = std::fs::read(bundle.join("layout.bin")).unwrap().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
         let precision = |pos: &[f32]| {
             let sample: Vec<usize> = (0..n).step_by(n / 600).collect();
@@ -357,6 +356,6 @@ mod compare {
                 .sum();
             hits as f32 / (sample.len() * 10) as f32
         };
-        eprintln!("10 most similar photos among the 10 nearest on the map: rust {:.3}, python {:.3}", precision(&xy), precision(&python));
+        eprintln!("10 most similar photos among the 10 nearest on the map: new {:.3}, the map's {:.3}", precision(&xy), precision(&python));
     }
 }

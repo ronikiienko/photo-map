@@ -9,6 +9,7 @@ mod backends;
 mod bc7;
 mod build;
 mod camera;
+mod cells;
 mod data;
 mod embed;
 mod gpu;
@@ -34,6 +35,7 @@ mod siglip;
 mod storage;
 mod stream;
 mod theme;
+mod tree;
 
 use camera::{Camera, Keys};
 use data::{MapData, Progress, WORLD};
@@ -108,6 +110,10 @@ struct OpenMap {
     /// Where each match's copy sits beside the world (in the order of `order`), and a copy's side (world units).
     copies: Vec<data::Point>,
     copy_side: f32,
+    /// The block beside the world shows a path between these two photos instead of a search's matches.
+    trail: Option<(usize, usize)>,
+    /// The tree paths follow (tree.rs), if the map has one.
+    tree: Option<Vec<u32>>,
     /// The photos' vectors, if the map has them.
     vectors: Option<search::Vectors>,
     /// Which view the photos are in, and the map's own layout to go back to (its places and photo size).
@@ -129,6 +135,20 @@ impl OpenMap {
     fn slide(&self) -> f32 {
         let t = self.moved.map_or(1.0, |at| (at.elapsed().as_secs_f32() / SLIDE_SECONDS).min(1.0));
         t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Put copies of these photos beside the world, in this order (the search's matches, or a path).
+    fn show_beside(&mut self, queue: &wgpu::Queue, photos: Vec<usize>) {
+        self.order = photos;
+        self.at = None;
+        (self.copies, self.copy_side) = beside::place(self.order.len());
+        self.renderer.set_copies(queue, &self.order, &self.copies);
+    }
+
+    /// The box the photos beside the world and their copies span.
+    fn beside_box(&self) -> (Vec2, Vec2) {
+        let pts = self.order.iter().map(|&i| self.data.points[i]).chain(self.copies.iter().copied()).map(|p| Vec2::new(p.x, p.y));
+        pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p)))
     }
 
     /// Put the photos at new places, sliding there from wherever they are drawn now (even halfway through another slide).
@@ -177,6 +197,10 @@ struct Viewer {
     hovered: Option<usize>,
     /// The match whose copy beside the world is under the mouse (its position among the matches; `hovered` is its photo).
     hovered_copy: Option<usize>,
+    /// The right-click menu: for which photo, and where (points).
+    menu: Option<(usize, egui::Pos2)>,
+    /// "Path from here" was chosen on this photo: the path's end is picked next.
+    path_from: Option<usize>,
     /// The region names drawn last frame, where on screen (points) and which (level, number in the level): a click on one zooms to its region.
     label_rects: Vec<(egui::Rect, usize, usize)>,
     search: String,
@@ -263,6 +287,8 @@ impl Viewer {
             cursor: None,
             hovered: None,
             hovered_copy: None,
+            menu: None,
+            path_from: None,
             label_rects: Vec::new(),
             search: String::new(),
             engine,
@@ -326,6 +352,7 @@ impl Viewer {
         self.photo_tex = None;
         self.shown.clear();
         let vectors = search::Vectors::open(&path, n, data.manifest.dim());
+        let tree = tree::read(&path, n);
         let in_process = vectors.is_some();
         self.asked = None;
         self.view_choice = View::Map; // a map opens as itself; the words are kept for the next one
@@ -345,6 +372,8 @@ impl Viewer {
             at: None,
             copies: Vec::new(),
             copy_side: 0.0,
+            trail: None,
+            tree,
             vectors,
             view: View::Map,
             map_points,
@@ -599,10 +628,8 @@ impl Viewer {
             m.flags.fill(0);
             m.flags_dirty = true;
             m.sims.clear();
-            m.order.clear();
-            m.at = None;
-            m.copies.clear();
-            m.renderer.set_copies(&self.gpu.queue, &[], &[]);
+            m.trail = None;
+            m.show_beside(&self.gpu.queue, Vec::new());
             self.shown.clear();
             self.status.clear();
         } else if m.vectors.is_none() {
@@ -764,17 +791,47 @@ impl Viewer {
         for i in 0..n {
             m.flags[i] = if score[i] >= cut { 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
         }
-        m.order = (0..n).filter(|&i| m.flags[i] > 0).collect();
-        m.order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
-        m.at = None;
-        (m.copies, m.copy_side) = beside::place(m.order.len());
-        m.renderer.set_copies(&self.gpu.queue, &m.order, &m.copies);
+        let mut order: Vec<usize> = (0..n).filter(|&i| m.flags[i] > 0).collect();
+        order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
+        m.trail = None;
+        m.show_beside(&self.gpu.queue, order);
         // how many is already in "6 of 100" beside it
         self.status = format!("{}: similarity {cut:.2} to {best:.2}", self.shown);
         m.flags_dirty = true;
-        // the matches and their copies beside the world
-        let pts = m.order.iter().map(|&i| m.data.points[i]).chain(m.copies.iter().copied()).map(|p| Vec2::new(p.x, p.y));
-        Some(pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p))))
+        Some(m.beside_box())
+    }
+
+    /// The path from photo `a` to `b` along the map's tree (tree.rs) beside the world, in place of a search: its photos are
+    /// marked on the map.
+    fn show_path(&mut self, a: usize, b: usize) {
+        self.path_from = None;
+        let Some(m) = &mut self.map else { return };
+        let Some(tree) = &m.tree else {
+            self.status = "this map was made before paths: make it again to find paths in it".into();
+            return;
+        };
+        let path = tree::route(tree, a, b);
+        // the search's words and matches go
+        self.search.clear();
+        self.photo = None;
+        self.photo_tex = None;
+        self.shown.clear();
+        self.asked = None;
+        m.sims.clear();
+        m.flags.fill(0);
+        for &i in &path {
+            m.flags[i] = 255;
+        }
+        m.flags_dirty = true;
+        // its biggest change from photo to photo: the least of all the ways between the two
+        let worst = m.vectors.as_ref().map(|v| path.windows(2).map(|w| v.row(w[0]).iter().zip(v.row(w[1])).map(|(x, y)| x * y).sum::<f32>()).fold(1.0f32, f32::min));
+        self.status = match worst {
+            Some(w) => format!("a path of {} steps; the least alike neighbours on it: similarity {w:.2}", path.len() - 1),
+            None => format!("a path of {} steps", path.len() - 1),
+        };
+        m.trail = Some((a, b));
+        m.show_beside(&self.gpu.queue, path);
+        self.camera.fly_to(self.camera.fit(m.beside_box().0, m.beside_box().1));
     }
 
     /// F over a photo: the same as dropping that photo's file on the window (it goes in the search box and is searched).
@@ -824,7 +881,12 @@ impl Viewer {
             return;
         }
         if let (true, Key::Named(NamedKey::Escape)) = (down, key) {
-            if self.help_open {
+            if self.menu.is_some() {
+                self.menu = None;
+            } else if self.path_from.is_some() {
+                self.path_from = None;
+                self.status.clear();
+            } else if self.help_open {
                 self.help_open = false;
             } else {
                 self.go_to_maps();
@@ -885,8 +947,15 @@ impl Viewer {
                 self.cursor = Some(pos);
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } if !over_ui && self.page == Page::Viewer => {
+                let ppp = self.window.scale_factor() as f32;
+                self.menu = self.hovered.zip(self.cursor).map(|(i, c)| (i, egui::pos2(c.x / ppp, c.y / ppp)));
+            }
             WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
-                ElementState::Pressed if !over_ui && self.page == Page::Viewer => self.camera.press(),
+                ElementState::Pressed if !over_ui && self.page == Page::Viewer => {
+                    self.menu = None;
+                    self.camera.press();
+                }
                 ElementState::Released if self.camera.dragging() => {
                     let click = self.camera.drag_distance() < 4.0;
                     self.camera.release();
@@ -1081,6 +1150,16 @@ impl Viewer {
             self.search.clear();
             self.ask(); // nothing to search for: the matches go
         }
+        if let Some(i) = actions.path_from {
+            self.path_from = Some(i);
+            self.status = "now right-click the photo the path goes to (Esc: cancel)".into();
+        }
+        if let (Some(a), Some(b)) = (self.path_from, actions.path_to) {
+            self.show_path(a, b);
+        }
+        if let Some(i) = actions.like {
+            self.ask_like(i);
+        }
         if actions.ask {
             self.ask();
         }
@@ -1270,21 +1349,17 @@ impl Viewer {
         }
     }
 
-    /// Over the matches' copies beside the world: what they are, above them; the copy under the mouse outlines its photo on
-    /// the map and a match under the mouse outlines its copy; the current match's copy (Next, Prev) is outlined too.
+    /// Over the matches' copies beside the world (or a path's photos): what they are, above them; the copy under the mouse
+    /// outlines its photo on the map and a match under the mouse outlines its copy; the current match's copy (Next, Prev) is
+    /// outlined too. A path is a line from photo to photo on the map; a path's chosen start is outlined until its end is.
     fn draw_beside(&self, ctx: &egui::Context) {
         let Some(m) = &self.map else { return };
-        let Some(first) = m.copies.first() else { return };
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "beside".into()));
         let ppp = ctx.pixels_per_point();
         let to_screen = |p: data::Point| {
             let s = self.camera.to_screen(Vec2::new(p.x, p.y)) / ppp;
             egui::pos2(s.x, s.y)
         };
-        let top = self.camera.to_screen(Vec2::new(beside::LEFT, first.y - m.copy_side / 2.0)) / ppp;
-        let heading = format!("{} matches, best first", m.order.len());
-        let galley = painter.layout_no_wrap(heading, egui::FontId::proportional(16.0), theme::MUTED);
-        painter.galley(egui::pos2(top.x, top.y - galley.size().y - 6.0), galley, theme::MUTED);
         // a photo's outline: `side` its longer side on screen (points), never smaller than a few points so it can be found
         let outline = |i: usize, at: egui::Pos2, side: f32, width: f32| {
             let shape = m.data.shape(i);
@@ -1292,6 +1367,21 @@ impl Viewer {
             painter.rect_stroke(egui::Rect::from_center_size(at, size), 3.0, egui::Stroke::new(width, egui::Color32::WHITE), egui::StrokeKind::Outside);
         };
         let (photo_side, copy_side) = (self.size_px() / ppp, m.copy_side * self.camera.scale / ppp);
+        if let Some(i) = self.path_from {
+            outline(i, to_screen(m.data.points[i]), photo_side, 3.0);
+        }
+        let Some(first) = m.copies.first() else { return };
+        if m.trail.is_some() {
+            let line: Vec<egui::Pos2> = m.order.iter().map(|&i| to_screen(m.data.points[i])).collect();
+            painter.add(egui::Shape::line(line, egui::Stroke::new(2.0, egui::Color32::from_white_alpha(170))));
+        }
+        let top = self.camera.to_screen(Vec2::new(beside::LEFT, first.y - m.copy_side / 2.0)) / ppp;
+        let heading = match m.trail {
+            Some(_) => format!("A path of {} photos, from the first to the last", m.order.len()),
+            None => format!("{} matches, best first", m.order.len()),
+        };
+        let galley = painter.layout_no_wrap(heading, egui::FontId::proportional(16.0), theme::MUTED);
+        painter.galley(egui::pos2(top.x, top.y - galley.size().y - 6.0), galley, theme::MUTED);
         if let Some(k) = m.at {
             outline(m.order[k], to_screen(m.copies[k]), copy_side, 2.0);
         }
@@ -1562,7 +1652,7 @@ impl Viewer {
                     });
                 });
                 // row 2, once there is something to say: the photo searched with, the matches and how to go through them, the status
-                let (found, at) = self.map.as_ref().map_or((0, None), |m| (m.order.len(), m.at));
+                let (found, at, on_path) = self.map.as_ref().map_or((0, None, false), |m| (m.order.len(), m.at, m.trail.is_some()));
                 if found > 0 || !self.status.is_empty() {
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
@@ -1573,7 +1663,7 @@ impl Viewer {
                             if ui.button("Next").on_hover_text("the next match, best first (N or ])").clicked() {
                                 actions.step = 1;
                             }
-                            ui.label(at.map_or(format!("{found} matches"), |k| format!("{} of {found}", k + 1)));
+                            ui.label(at.map_or(format!("{found} {}", if on_path { "photos" } else { "matches" }), |k| format!("{} of {found}", k + 1)));
                         }
                         if !self.status.is_empty() {
                             ui.label(theme::muted(&self.status));
@@ -1610,6 +1700,7 @@ impl Viewer {
                                 (&["scroll", "Q", "E"][..], "zoom"),
                                 (&["drag", "W", "A", "S", "D"][..], "move"),
                                 (&["F"][..], "photos like the one under the mouse"),
+                                (&["right-click"][..], "a path of similar photos from one photo to another"),
                                 (&["N", "P"][..], "next / previous match"),
                                 (&["F11", "Alt", "Enter"][..], "fullscreen"),
                                 (&["Esc"][..], "back to your maps"),
@@ -1643,7 +1734,35 @@ impl Viewer {
             });
         }
 
-        if let (Some(id), Some(c), Some(m)) = (self.hovered, self.cursor, &self.map) {
+        if let (Some((photo, at)), Some(m)) = (self.menu, &self.map) {
+            egui::Area::new("photo menu".into()).fixed_pos(at + egui::vec2(4.0, 4.0)).order(egui::Order::Foreground).show(&ctx, |ui| {
+                theme::card().inner_margin(egui::Margin::symmetric(8, 8)).show(ui, |ui| {
+                    ui.set_max_width(260.0);
+                    ui.label(&m.data.photos[photo].title);
+                    ui.add_space(2.0);
+                    match self.path_from {
+                        Some(from) if from != photo => {
+                            if theme::button(ui, egui::Button::new("Path to here")).on_hover_text("a chain of photos from the start you picked to this one, each like the one before it").clicked() {
+                                actions.path_to = Some(photo);
+                            }
+                        }
+                        _ => {
+                            if theme::button(ui, egui::Button::new("Path from here")).on_hover_text("then right-click the photo it goes to").clicked() {
+                                actions.path_from = Some(photo);
+                            }
+                        }
+                    }
+                    if theme::button(ui, egui::Button::new("Photos like this")).on_hover_text("search with this photo (F)").clicked() {
+                        actions.like = Some(photo);
+                    }
+                });
+            });
+        }
+        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() {
+            self.menu = None;
+        }
+
+        if let (Some(id), Some(c), Some(m), None) = (self.hovered, self.cursor, &self.map, self.menu) {
             let ppp = ctx.pixels_per_point();
             let score = m.sims.get(id).copied();
             egui::Area::new("tip".into()).fixed_pos([c.x / ppp + 14.0, c.y / ppp + 14.0]).interactable(false).show(&ctx, |ui| {
@@ -1660,6 +1779,11 @@ impl Viewer {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         theme::key(ui, "F");
                         ui.label(theme::muted("photos like this"));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        theme::key(ui, "right-click");
+                        ui.label(theme::muted(if self.path_from.is_some() { "end the path here" } else { "a path from here" }));
                     });
                 });
             });
@@ -1680,6 +1804,10 @@ struct UiActions {
     clear_photo: bool,
     /// The cross after the search box: no words, no matches.
     clear_search: bool,
+    /// The right-click menu: a path from or to this photo, photos like it.
+    path_from: Option<usize>,
+    path_to: Option<usize>,
+    like: Option<usize>,
     /// The back arrow.
     back: bool,
     /// What the Maps page asked for.

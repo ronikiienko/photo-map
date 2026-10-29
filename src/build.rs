@@ -35,6 +35,7 @@ pub enum Stage {
     #[serde(alias = "load")] // a job saved while loading the model was a step of its own
     Embed,
     Layout,
+    Tree,
     Regions,
     Names,
     Bake,
@@ -42,7 +43,7 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 7] = [Stage::Scan, Stage::Embed, Stage::Layout, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
+    pub const ALL: [Stage; 8] = [Stage::Scan, Stage::Embed, Stage::Layout, Stage::Tree, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
 
     /// What the stage is doing, for the list of steps.
     pub fn label(self) -> &'static str {
@@ -50,6 +51,7 @@ impl Stage {
             Stage::Scan => "Finding photos",
             Stage::Embed => "Understanding photos",
             Stage::Layout => "Laying out the map",
+            Stage::Tree => "Linking similar photos",
             Stage::Regions => "Finding regions",
             Stage::Names => "Naming regions",
             Stage::Bake => "Preparing pictures for viewing",
@@ -63,6 +65,7 @@ impl Stage {
             Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and links each one into the map: on the same disk a hard link (the same data, no second copy), on another disk a link to where the photo is. Nothing is changed in your folders, and no space is taken.",
             Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. This is the slow part, because every photo goes through the model on the graphics card.",
             Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP).",
+            Stage::Tree => "Joins all the photos into one tree by the shortest links between them (the most similar pairs). A path between two photos (right-click one on the map) follows this tree: of all the ways from one to the other, it is the one whose biggest change from photo to photo is the smallest. Each photo is compared with the photos in the parts of the map nearest to it, not with all of them.",
             Stage::Regions => "Groups the photos on the map into areas, from a few big ones down to small ones of about 10 photos. The groups are made from neighbours on the map, so each area is one connected piece. Zooming in shows the finer ones.",
             Stage::Names => "Gives each area a name. About 4,500 common phrases (\"a beach\", \"old buildings\"...) are run through the same model; the phrase whose vector is closest to the area's average vector is its name.",
             Stage::Bake => "Makes small copies of every photo at several sizes (from 32 px down to 1 px) and packs them into big pictures the graphics card can draw directly. This is what lets the viewer show thousands of photos at once, and it is done now so the map opens at once.",
@@ -421,6 +424,7 @@ fn run(mut ctx: Ctx) -> (Arc<Shared>, Result<(), String>) {
                 Stage::Scan => scan(&mut ctx)?,
                 Stage::Embed => embed_photos(&mut ctx)?,
                 Stage::Layout => lay_out(&mut ctx)?,
+                Stage::Tree => make_tree(&mut ctx)?,
                 Stage::Regions => find_regions(&mut ctx)?,
                 Stage::Names => name_regions(&mut ctx)?,
                 Stage::Bake => bake_pages(&mut ctx)?,
@@ -781,6 +785,16 @@ fn lay_out(ctx: &mut Ctx) -> Result<Flow, String> {
     let Some(xy) = xy else { return Ok(Flow::Paused) };
     let bytes: Vec<u8> = xy.iter().flat_map(|v| v.to_le_bytes()).collect();
     write_atomic(&ctx.dir.join("layout.bin"), &bytes).map_err(|e| e.to_string())?;
+    Ok(Flow::Done)
+}
+
+/// The tree that paths between photos follow (tree.rs).
+fn make_tree(ctx: &mut Ctx) -> Result<Flow, String> {
+    let n = ctx.job.photos;
+    ctx.progress(0, 0, "preparing the vectors");
+    let vectors = ndarray::Array2::from_shape_vec((n, ctx.dim()), read_vectors(&ctx.dir, n, ctx.dim())?).map_err(|e| e.to_string())?;
+    let Some(parent) = crate::tree::build(&vectors, &|what, done, total| ctx.progress(done, total, what), &|| ctx.paused()) else { return Ok(Flow::Paused) };
+    crate::tree::write(&ctx.dir, &parent).map_err(|e| e.to_string())?;
     Ok(Flow::Done)
 }
 

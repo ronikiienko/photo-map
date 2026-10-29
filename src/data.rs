@@ -6,6 +6,7 @@
 //!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
 //!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
 //!     embeddings.bin  per photo: float16 vector of the picture (search, Axes and Groups)
+//!     tree.bin        per photo: its parent in the tree that paths between photos follow (tree.rs)
 //!     pages_bc7.bin   the always-loaded levels, made while the map is built (bake.rs)
 
 use memmap2::Mmap;

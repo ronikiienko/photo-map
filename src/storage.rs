@@ -80,7 +80,7 @@ pub fn measure(map: &Path) -> Sizes {
             "pages_bc7.bin" => sizes.pictures += bytes,
             "embeddings.bin" => sizes.vectors += bytes,
             "captions.bin" => sizes.captions += bytes,
-            "layout.bin" | "photos.json" | "manifest.json" => sizes.layout += bytes,
+            "layout.bin" | "tree.bin" | "photos.json" | "manifest.json" => sizes.layout += bytes,
             n if n.starts_with("regions") || n.starts_with("region_names") => sizes.layout += bytes,
             _ => sizes.other += bytes,
         }

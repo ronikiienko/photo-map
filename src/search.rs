@@ -145,6 +145,11 @@ impl Vectors {
             .map(|row| row.chunks_exact(2).zip(query).map(|(b, q)| f16::from_le_bytes([b[0], b[1]]).to_f32() * q).sum::<f32>())
             .collect()
     }
+
+    /// One photo's vector.
+    pub fn row(&self, i: usize) -> Vec<f32> {
+        self.images[i * self.dim * 2..(i + 1) * self.dim * 2].chunks_exact(2).map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32()).collect()
+    }
 }
 
 #[cfg(test)]
