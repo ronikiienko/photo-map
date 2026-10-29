@@ -10,7 +10,7 @@
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, RichText, Stroke, TextStyle, Ui, vec2};
 
 /// The page behind the cards when there is no map to show.
-pub const BACKGROUND: Color32 = Color32::from_rgb(21, 23, 28);
+pub const BACKGROUND: Color32 = Color32::from_rgb(12, 13, 16);
 pub const ACCENT: Color32 = Color32::from_rgb(124, 164, 255);
 pub const OK: Color32 = Color32::from_rgb(110, 205, 140);
 pub const TEXT: Color32 = Color32::from_rgb(232, 235, 242);

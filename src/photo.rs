@@ -4,7 +4,7 @@
 use image::{DynamicImage, ImageDecoder, ImageReader, RgbaImage};
 use std::path::Path;
 
-pub const BG: [u8; 3] = [21, 23, 28];
+pub const BG: [u8; 3] = [12, 13, 16];
 
 pub fn load(path: &Path) -> Option<RgbaImage> {
     let mut decoder = ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_decoder().ok()?;

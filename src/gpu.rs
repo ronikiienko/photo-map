@@ -223,7 +223,7 @@ impl MapRenderer {
 }
 
 /// The viewer's background (photo.rs fills transparent pixels with the same colour).
-const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.082, g: 0.09, b: 0.11, a: 1.0 };
+const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.047, g: 0.051, b: 0.063, a: 1.0 };
 
 /// Just the background, when no map is open.
 pub fn clear(encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
