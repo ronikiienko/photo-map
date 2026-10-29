@@ -10,7 +10,7 @@ struct Camera {
     scale: f32,        // pixels per world unit
     size_px: f32,      // a photo's longer side on screen
     slide: f32,        // 0 ... 1: how far the photos have moved from `from_xy` to `points` (1 once the view has settled)
-    _pad: u32,
+    copy_px: f32,      // a match's copy beside the world (beside.rs): its longer side on screen
 }
 
 const PAGE: f32 = 4096.0;
@@ -32,6 +32,7 @@ const AA: f32 = 1.0;  // px the quad reaches past the photo's edge, for the part
 @group(0) @binding(5) var<storage, read> table: array<u32>;
 @group(0) @binding(6) var<storage, read> first_page: array<u32>;
 @group(0) @binding(7) var<storage, read> from_xy: array<vec2f>;  // x, y before the view changed
+@group(0) @binding(8) var<storage, read> copies: array<vec4f>;   // the matches' copies: x, y, the photo's number (its bits), unused
 
 struct VsOut {
     @builtin(position) pos: vec4f,
@@ -40,25 +41,40 @@ struct VsOut {
     @location(2) @interpolate(flat) flags: u32,
     @location(3) @interpolate(flat) size: vec2f,  // on-screen width, height
     @location(4) @interpolate(flat) shape: vec2f,
+    @location(5) @interpolate(flat) px: f32,  // the photo's longer side on screen, before a match grows (picks the level)
 }
 
-@vertex
-fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) id: u32) -> VsOut {
+// One corner of photo `id`'s quad, centred on `at` (world), `px` its longer side on screen, drawn `grow` times bigger.
+fn quad(v: u32, id: u32, at: vec2f, px: f32, grow: f32) -> VsOut {
     var corners = array(vec2f(0., 0.), vec2f(1., 0.), vec2f(0., 1.), vec2f(0., 1.), vec2f(1., 0.), vec2f(1., 1.));
-    let corner = corners[v];
-    let p = points[id];
-    let grow = 1.0 + select(0.0, GROW - 1.0, flags[id] != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
-    let size = max(cam.size_px * p.zw, vec2f(1.0)) * grow;  // longer side = size_px, the other follows the shape; never under 1 px
-    let local = (corner - 0.5) * (size + 2.0 * AA);
-    let at = mix(from_xy[id], p.xy, cam.slide);
-    let px = (at - cam.center) * cam.scale + cam.viewport * 0.5 + local;
+    let shape = points[id].zw;
+    let size = max(px * shape, vec2f(1.0)) * grow;  // longer side = px, the other follows the shape; never under 1 px
+    let local = (corners[v] - 0.5) * (size + 2.0 * AA);
+    let screen = (at - cam.center) * cam.scale + cam.viewport * 0.5 + local;
     var out: VsOut;
-    out.pos = vec4f(px.x / cam.viewport.x * 2.0 - 1.0, 1.0 - px.y / cam.viewport.y * 2.0, 0.0, 1.0);
+    out.pos = vec4f(screen.x / cam.viewport.x * 2.0 - 1.0, 1.0 - screen.y / cam.viewport.y * 2.0, 0.0, 1.0);
     out.local = local;
     out.id = id;
     out.flags = flags[id];
     out.size = size;
-    out.shape = p.zw;
+    out.shape = shape;
+    out.px = px;
+    return out;
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) id: u32) -> VsOut {
+    let grow = 1.0 + select(0.0, GROW - 1.0, flags[id] != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
+    return quad(v, id, mix(from_xy[id], points[id].xy, cam.slide), cam.size_px, grow);
+}
+
+// A match's copy beside the world: its own size, never grown (they sit in a grid, side by side), and just its picture (no tint,
+// no outline: they are in order, best first, and the tip under the mouse says how close each is).
+@vertex
+fn vs_copy(@builtin(vertex_index) v: u32, @builtin(instance_index) k: u32) -> VsOut {
+    let c = copies[k];
+    var out = quad(v, bitcast<u32>(c.z), c.xy, cam.copy_px, 1.0);
+    out.flags = 0u;
     return out;
 }
 
@@ -86,14 +102,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 
     // ideal level: slot size = on-screen size; blend it with the next one up, within what is loaded
     let top = f32(table[in.id * ENTRY] - 1u);
-    let f = clamp(log2(max(cam.size_px, 1.0)), 0.0, top);
+    let f = clamp(log2(max(in.px, 1.0)), 0.0, top);
     let lo = floor(f);
     let hi = min(lo + 1.0, top);
     var c = sample_level(in.id, u32(lo), uv, in.shape);
     if hi > lo { c = mix(c, sample_level(in.id, u32(hi), uv, in.shape), f - lo); }
     if in.flags != 0u {  // a match: tinted from afar (red to yellow with the match), its picture up close
         let tint = mix(COLD, HOT, f32(in.flags - 1u) / 254.0);
-        c = mix(c, tint, 1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
+        c = mix(c, tint, 1.0 - smoothstep(TINT_FROM, TINT_UNTIL, in.px));
         c = mix(tint, c, smoothstep(OUTLINE - 1.0, OUTLINE, min(inside.x, inside.y)));  // the outline, inside the photo's edge
     }
     return vec4f(c * cover, cover);

@@ -3,6 +3,7 @@
 //!     photo-map [bundle]      default: the one opened last in maps/
 
 mod axes;
+mod beside;
 mod bake;
 mod backends;
 mod bc7;
@@ -10,7 +11,6 @@ mod build;
 mod camera;
 mod data;
 mod embed;
-mod gallery;
 mod gpu;
 mod groups;
 mod home;
@@ -38,7 +38,6 @@ mod theme;
 use camera::{Camera, Keys};
 use data::{MapData, Progress, WORLD};
 use glam::Vec2;
-use gallery::Gallery;
 use gpu::{CameraUniform, Gpu, MapRenderer};
 use library::Library;
 use std::path::PathBuf;
@@ -127,6 +126,9 @@ struct OpenMap {
     /// The photos that match the search, best first, and which of them the last next/previous step went to.
     order: Vec<usize>,
     at: Option<usize>,
+    /// Where each match's copy sits beside the world (in the order of `order`), and a copy's side (world units).
+    copies: Vec<data::Point>,
+    copy_side: f32,
     /// The photos' vectors, if the map has them.
     vectors: Option<search::Vectors>,
     /// Which view the photos are in, and the map's own layout to go back to (its places and photo size).
@@ -194,8 +196,8 @@ struct Viewer {
     dropped: Vec<PathBuf>,
     cursor: Option<Vec2>,
     hovered: Option<usize>,
-    /// The window with every match together.
-    gallery: Gallery,
+    /// The match whose copy beside the world is under the mouse (its position among the matches; `hovered` is its photo).
+    hovered_copy: Option<usize>,
     /// The region names drawn last frame, where on screen (points) and which (level, number in the level): a click on one zooms to its region.
     label_rects: Vec<(egui::Rect, usize, usize)>,
     search: String,
@@ -283,7 +285,7 @@ impl Viewer {
             dropped: Vec::new(),
             cursor: None,
             hovered: None,
-            gallery: Gallery::new(),
+            hovered_copy: None,
             label_rects: Vec::new(),
             search: String::new(),
             engine,
@@ -331,7 +333,6 @@ impl Viewer {
 
     /// The bundle has been read: let go of the old map, put the new one on the GPU and show all of it.
     fn opened(&mut self, path: PathBuf, data: MapData) {
-        self.gallery.clear();
         self.page = Page::Viewer;
         self.map = None; // free the old map's GPU memory first
         let started = Instant::now();
@@ -369,6 +370,8 @@ impl Viewer {
             sims: Vec::new(),
             order: Vec::new(),
             at: None,
+            copies: Vec::new(),
+            copy_side: 0.0,
             vectors,
             view: View::Map,
             map_points,
@@ -556,7 +559,6 @@ impl Viewer {
 
     fn go_to_maps(&mut self) {
         self.page = Page::Maps;
-        self.gallery.clear();
         self.map = None; // the Maps page needs none of it: give back its GPU memory
         self.library.refresh();
     }
@@ -581,6 +583,17 @@ impl Viewer {
             }
         });
         best
+    }
+
+    /// The match whose copy beside the world is under the mouse: its position among the matches.
+    fn pick_copy(&self, screen: Vec2) -> Option<usize> {
+        let m = self.map.as_ref()?;
+        // the whole cell, not just the picture (a wide photo leaves most of its square empty)
+        let half = (m.copy_side / beside::FILL * self.camera.scale * 0.5).max(4.0);
+        m.copies.iter().position(|p| {
+            let d = (self.camera.to_screen(Vec2::new(p.x, p.y)) - screen).abs();
+            d.x <= half && d.y <= half
+        })
     }
 
     /// Take a photo for the search: remember its path and a small picture of it to show in the bar. False if it can't be read.
@@ -615,6 +628,8 @@ impl Viewer {
             m.sims.clear();
             m.order.clear();
             m.at = None;
+            m.copies.clear();
+            m.renderer.set_copies(&self.gpu.queue, &[], &[]);
             self.shown.clear();
             self.status.clear();
         } else if m.vectors.is_none() {
@@ -780,10 +795,13 @@ impl Viewer {
         m.order = (0..n).filter(|&i| m.flags[i] > 0).collect();
         m.order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
         m.at = None;
+        (m.copies, m.copy_side) = beside::place(m.order.len());
+        m.renderer.set_copies(&self.gpu.queue, &m.order, &m.copies);
         // how many is already in "6 of 100" beside it
         self.status = format!("{}: similarity {cut:.2} to {best:.2}", self.shown);
         m.flags_dirty = true;
-        let pts = m.flags.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, _)| Vec2::new(m.data.points[i].x, m.data.points[i].y));
+        // the matches and their copies beside the world
+        let pts = m.order.iter().map(|&i| m.data.points[i]).chain(m.copies.iter().copied()).map(|p| Vec2::new(p.x, p.y));
         Some(pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p))))
     }
 
@@ -836,8 +854,6 @@ impl Viewer {
         if let (true, Key::Named(NamedKey::Escape)) = (down, key) {
             if self.help_open {
                 self.help_open = false;
-            } else if self.gallery.open {
-                self.gallery.open = false;
             } else {
                 self.go_to_maps();
             }
@@ -849,10 +865,6 @@ impl Viewer {
                 "p" | "P" | "[" => return self.step_match(-1),
                 "h" | "H" => {
                     self.help_open = !self.help_open;
-                    return;
-                }
-                "g" | "G" => {
-                    self.gallery.open = !self.gallery.open;
                     return;
                 }
                 _ => {}
@@ -1004,8 +1016,13 @@ impl Viewer {
             }
         }
         let over_ui = self.ui.ctx.is_pointer_over_egui();
-        self.hovered = match self.cursor {
-            Some(c) if self.page == Page::Viewer && !self.camera.dragging() && !over_ui => self.pick(c),
+        self.hovered_copy = match self.cursor {
+            Some(c) if self.page == Page::Viewer && !self.camera.dragging() && !over_ui => self.pick_copy(c),
+            _ => None,
+        };
+        self.hovered = match (self.cursor, self.hovered_copy, &self.map) {
+            (_, Some(k), Some(m)) => Some(m.order[k]),
+            (Some(c), _, _) if self.page == Page::Viewer && !self.camera.dragging() && !over_ui => self.pick(c),
             _ => None,
         };
 
@@ -1034,7 +1051,7 @@ impl Viewer {
             scale: self.camera.scale,
             size_px,
             slide: self.map.as_ref().map_or(1.0, OpenMap::slide),
-            _pad: 0,
+            copy_px: self.map.as_ref().map_or(0.0, |m| m.copy_side * self.camera.scale),
         };
         match &mut self.map {
             Some(m) if self.page == Page::Viewer => {
@@ -1042,7 +1059,8 @@ impl Viewer {
                     m.renderer.upload_flags(&self.gpu.queue, &m.flags);
                     m.flags_dirty = false;
                 }
-                m.streamer.update(&self.gpu.queue, &m.data, view_min, view_max, self.camera.center, size_px);
+                let copies = (&m.order[..], &m.copies[..], cam.copy_px);
+                m.streamer.update(&self.gpu.queue, &m.data, view_min, view_max, self.camera.center, size_px, copies);
                 m.renderer.draw(&self.gpu.queue, &mut encoder, &view, cam);
             }
             _ => gpu::clear(&mut encoder, &view),
@@ -1087,6 +1105,10 @@ impl Viewer {
             self.ask();
             self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box"))); // ready to type
         }
+        if actions.clear_search {
+            self.search.clear();
+            self.ask(); // nothing to search for: the matches go
+        }
         if actions.ask {
             self.ask();
         }
@@ -1098,9 +1120,6 @@ impl Viewer {
         }
         if actions.reblend {
             self.apply_search();
-        }
-        if let Some(k) = actions.goto {
-            self.go_to_match(k);
         }
         if actions.step != 0 {
             self.step_match(actions.step);
@@ -1265,13 +1284,53 @@ impl Viewer {
         self.camera.fly_to((Vec2::new(l.x, l.y), scale));
     }
 
-    /// A click on the map (a press that hardly moved): on a region name, it zooms to the region.
+    /// A click on the map (a press that hardly moved): on a match's copy beside the world, it flies to the photo; on a region
+    /// name, it zooms to the region.
     fn click_at(&mut self) {
         let Some(c) = self.cursor else { return };
+        if let Some(k) = self.pick_copy(c) {
+            return self.go_to_match(k);
+        }
         let ppp = self.window.scale_factor() as f32;
         let at = egui::pos2(c.x / ppp, c.y / ppp);
         if let Some(&(_, level, index)) = self.label_rects.iter().find(|(rect, _, _)| rect.contains(at)) {
             self.go_to_region(level, index);
+        }
+    }
+
+    /// Over the matches' copies beside the world: what they are, above them; the copy under the mouse outlines its photo on
+    /// the map and a match under the mouse outlines its copy; the current match's copy (Next, Prev) is outlined too.
+    fn draw_beside(&self, ctx: &egui::Context) {
+        let Some(m) = &self.map else { return };
+        let Some(first) = m.copies.first() else { return };
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "beside".into()));
+        let ppp = ctx.pixels_per_point();
+        let to_screen = |p: data::Point| {
+            let s = self.camera.to_screen(Vec2::new(p.x, p.y)) / ppp;
+            egui::pos2(s.x, s.y)
+        };
+        let top = self.camera.to_screen(Vec2::new(beside::LEFT, first.y - m.copy_side / 2.0)) / ppp;
+        let heading = format!("{} matches, best first", m.order.len());
+        let galley = painter.layout_no_wrap(heading, egui::FontId::proportional(16.0), theme::MUTED);
+        painter.galley(egui::pos2(top.x, top.y - galley.size().y - 6.0), galley, theme::MUTED);
+        // a photo's outline: `side` its longer side on screen (points), never smaller than a few points so it can be found
+        let outline = |i: usize, at: egui::Pos2, side: f32, width: f32| {
+            let shape = m.data.shape(i);
+            let size = (egui::vec2(shape.x, shape.y) * side).max(egui::vec2(8.0, 8.0)) + egui::vec2(6.0, 6.0);
+            painter.rect_stroke(egui::Rect::from_center_size(at, size), 3.0, egui::Stroke::new(width, egui::Color32::WHITE), egui::StrokeKind::Outside);
+        };
+        let (photo_side, copy_side) = (self.size_px() / ppp, m.copy_side * self.camera.scale / ppp);
+        if let Some(k) = m.at {
+            outline(m.order[k], to_screen(m.copies[k]), copy_side, 2.0);
+        }
+        match (self.hovered_copy, self.hovered) {
+            (Some(k), _) => outline(m.order[k], to_screen(m.data.points[m.order[k]]), photo_side, 2.0),
+            (None, Some(i)) => {
+                if let Some(k) = m.order.iter().position(|&o| o == i) {
+                    outline(i, to_screen(m.copies[k]), copy_side, 2.0);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1367,22 +1426,7 @@ impl Viewer {
             self.draw_labels(&ctx);
         }
         self.draw_photo_captions(&ctx);
-        if self.gallery.open {
-            if let Some(m) = &self.map {
-                let (on, n) = (self.on, m.flags.len());
-                actions.goto = self.gallery.show(
-                    &ctx,
-                    &m.order,
-                    m.at,
-                    &|i| m.path.join(&m.data.photos[i].file),
-                    &|i| (m.sims.len() == 2 * n).then(|| similarity(&m.sims, n, i, on)).flatten(),
-                    &|i| {
-                        let photo = &m.data.photos[i];
-                        (if photo.caption.trim().is_empty() { &photo.title } else { &photo.caption }).trim().to_string()
-                    },
-                );
-            }
-        }
+        self.draw_beside(&ctx);
 
         let width = (ctx.content_rect().width() - 24.0).clamp(320.0, 760.0);
         egui::Area::new("top".into()).anchor(egui::Align2::CENTER_TOP, [0.0, 12.0]).show(&ctx, |ui| {
@@ -1542,15 +1586,25 @@ impl Viewer {
                                         });
                                     });
                             } else {
+                                // a cross after the box while there is something to clear: the words and the matches
+                                let clearable = !self.search.is_empty() || self.map.as_ref().is_some_and(|m| !m.order.is_empty());
+                                // the cross, the gap before it and a gap after it (the status beside it would touch it)
+                                let cross = if clearable { 24.0 + ui.spacing().item_spacing.x + 8.0 } else { 0.0 };
                                 let edit = ui.add(
                                     egui::TextEdit::singleline(&mut self.search)
                                         .id(egui::Id::new("search-box"))
                                         .hint_text(hint)
                                         .margin(egui::Margin::symmetric(10, 6))
-                                        .desired_width(ui.available_width()),
+                                        .desired_width(ui.available_width() - cross),
                                 );
                                 if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                     actions.ask = true;
+                                }
+                                if clearable && ui.add_sized([24.0, edit.rect.height()], egui::Button::new("×")).on_hover_text("clear the search").clicked() {
+                                    actions.clear_search = true;
+                                }
+                                if clearable {
+                                    ui.add_space(8.0);
                                 }
                             }
                         });
@@ -1569,10 +1623,6 @@ impl Viewer {
                                 actions.step = 1;
                             }
                             ui.label(at.map_or(format!("{found} matches"), |k| format!("{} of {found}", k + 1)));
-                            // a button like Prev and Next (a toggle has no frame while off), lit while the gallery is open
-                            if ui.add(egui::Button::new("Gallery").selected(self.gallery.open)).on_hover_text("all the matches together (G)").clicked() {
-                                self.gallery.open = !self.gallery.open;
-                            }
                         }
                         if !self.status.is_empty() {
                             ui.label(theme::muted(&self.status));
@@ -1610,7 +1660,6 @@ impl Viewer {
                                 (&["drag", "W", "A", "S", "D"][..], "move"),
                                 (&["F"][..], "photos like the one under the mouse"),
                                 (&["N", "P"][..], "next / previous match"),
-                                (&["G"][..], "gallery of matches"),
                                 (&["F11", "Alt", "Enter"][..], "fullscreen"),
                                 (&["Esc"][..], "back to your maps"),
                                 (&["H"][..], "show / hide this help"),
@@ -1645,10 +1694,18 @@ impl Viewer {
 
         if let (Some(id), Some(c), Some(m)) = (self.hovered, self.cursor, &self.map) {
             let ppp = ctx.pixels_per_point();
+            let n = m.flags.len();
+            let score = (m.sims.len() == 2 * n).then(|| similarity(&m.sims, n, id, self.on)).flatten();
             egui::Area::new("tip".into()).fixed_pos([c.x / ppp + 14.0, c.y / ppp + 14.0]).interactable(false).show(&ctx, |ui| {
                 theme::card().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                     ui.set_max_width(320.0);
                     ui.label(&m.data.photos[id].title);
+                    if let Some(score) = score {
+                        ui.label(theme::muted(format!("similarity {score:.2}")));
+                    }
+                    if self.hovered_copy.is_some() {
+                        ui.label(theme::muted("click: go to it on the map"));
+                    }
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         theme::key(ui, "F");
@@ -1670,9 +1727,9 @@ struct UiActions {
     reblend: bool,
     /// A prev / next button was pressed: -1 / 1.
     step: i32,
-    /// A thumbnail in the gallery was clicked: its position among the matches.
-    goto: Option<usize>,
     clear_photo: bool,
+    /// The cross after the search box: no words, no matches.
+    clear_search: bool,
     /// The back arrow.
     back: bool,
     /// What the Maps page asked for.

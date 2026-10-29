@@ -75,11 +75,14 @@ pub struct CameraUniform {
     pub size_px: f32,
     /// How far the photos have slid from their old places (`from`) to their new ones: 0 ... 1, 1 when nothing moves.
     pub slide: f32,
-    pub _pad: u32,
+    /// A match's copy beside the world (beside.rs): its longer side on screen.
+    pub copy_px: f32,
 }
 
 pub struct MapRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// The same, drawing the matches' copies (map.wgsl's vs_copy).
+    copy_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     camera: wgpu::Buffer,
     flags: wgpu::Buffer,
@@ -87,6 +90,9 @@ pub struct MapRenderer {
     points: wgpu::Buffer,
     /// Per photo: x, y where it was before the view changed.
     from: wgpu::Buffer,
+    /// The matches' copies beside the world: x, y, the photo's number (its bits), unused; and how many there are now.
+    copies: wgpu::Buffer,
+    n_copies: u32,
     n: u32,
 }
 
@@ -103,6 +109,12 @@ impl MapRenderer {
             label: Some("from"),
             contents: bytemuck::cast_slice(&data.points),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let copies = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("copies"),
+            size: (n.max(1) * 16) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let flags = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("flags"),
@@ -154,6 +166,7 @@ impl MapRenderer {
                 entry(5, wgpu::ShaderStages::FRAGMENT, storage),
                 entry(6, wgpu::ShaderStages::FRAGMENT, storage),
                 entry(7, wgpu::ShaderStages::VERTEX, storage),
+                entry(8, wgpu::ShaderStages::VERTEX, storage),
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -168,6 +181,7 @@ impl MapRenderer {
                 wgpu::BindGroupEntry { binding: 5, resource: streamer.table.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: streamer.first_pages.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: from.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: copies.as_entire_binding() },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -175,12 +189,12 @@ impl MapRenderer {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("map"),
+        let pipeline = |vertex: &str| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(vertex),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some(vertex),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
@@ -200,7 +214,17 @@ impl MapRenderer {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, bind_group, camera, flags, points, from, n: n as u32 }
+        let (pipeline, copy_pipeline) = (pipeline("vs_main"), pipeline("vs_copy"));
+        Self { pipeline, copy_pipeline, bind_group, camera, flags, points, from, copies, n_copies: 0, n: n as u32 }
+    }
+
+    /// The matches' copies beside the world: photo `photos[k]` at `at[k]`.
+    pub fn set_copies(&mut self, queue: &wgpu::Queue, photos: &[usize], at: &[crate::data::Point]) {
+        let copies: Vec<[f32; 4]> = photos.iter().zip(at).map(|(&i, p)| [p.x, p.y, f32::from_bits(i as u32), 0.0]).collect();
+        if !copies.is_empty() {
+            queue.write_buffer(&self.copies, 0, bytemuck::cast_slice(&copies));
+        }
+        self.n_copies = copies.len() as u32;
     }
 
     /// The photos move from `from` to where `data` has them now (they slide there as `CameraUniform::slide` goes from 0 to 1).
@@ -232,6 +256,10 @@ impl MapRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..6, 0..self.n);
+        if self.n_copies > 0 {
+            pass.set_pipeline(&self.copy_pipeline);
+            pass.draw(0..6, 0..self.n_copies);
+        }
     }
 }
 

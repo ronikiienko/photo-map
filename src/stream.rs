@@ -7,7 +7,7 @@
 //! evicting a level also drops the ones above it. The table's first entry is the loaded level count: 1 (just the colour),
 //! or the top streamed level + 1 (levels 1 ... 5 never exist). The table is re-uploaded whole whenever it changed.
 
-use crate::data::MapData;
+use crate::data::{MapData, Point};
 use crate::photo;
 use crate::pages::{LEVELS, Layout, PAGE, RESIDENT, STREAMED, slot_size};
 use glam::Vec2;
@@ -193,30 +193,45 @@ impl Streamer {
     }
 
     /// Once per frame: take in finished loads, then request what the current view needs.
-    /// `view_min`/`view_max`: the visible world box; `size_px`: a photo's longer side on screen.
-    pub fn update(&mut self, queue: &wgpu::Queue, data: &MapData, view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32) {
+    /// `view_min`/`view_max`: the visible world box; `size_px`: a photo's longer side on screen. `copies`: the matches' copies
+    /// beside the world (beside.rs), which photo is where, and their longer side on screen.
+    pub fn update(&mut self, queue: &wgpu::Queue, data: &MapData, view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32, copies: (&[usize], &[Point], f32)) {
         self.frame += 1;
         let frame = self.frame;
-        // the level matching the on-screen size, plus the next one up to blend towards
-        let want = (size_px.max(1.0).log2().floor() as usize + 1).min(LEVELS - 1);
+        // the level matching an on-screen size, plus the next one up to blend towards
+        let level = |px: f32| (px.max(1.0).log2().floor() as usize + 1).min(LEVELS - 1);
 
-        let mut wanted: Vec<(f32, usize, usize, usize)> = Vec::new();
+        // the photos on screen (a photo and its copy may both be): the level each wants, and how far it is from the middle
+        let mut visible: Vec<(usize, usize, Vec2)> = Vec::new();
+        let want = level(size_px);
         if want >= STREAMED {
-            let mut visible = Vec::new();
-            data.grid.within(&data.points, view_min, view_max, |i| visible.push(i));
-            for i in visible {
-                let count = self.table_cpu[i * ENTRY] as usize;
-                for l in STREAMED..count {
-                    let slot = self.table_cpu[i * ENTRY + 4 + l] as usize;
-                    self.pools[l - STREAMED].last_seen[slot] = frame;
-                }
-                let need = want.min(self.max_level(i));
-                if need >= STREAMED && count <= need && !self.loading[i] {
-                    let p = data.points[i];
-                    wanted.push((Vec2::new(p.x, p.y).distance_squared(center), i, count, need));
+            data.grid.within(&data.points, view_min, view_max, |i| visible.push((i, want, Vec2::new(data.points[i].x, data.points[i].y))));
+        }
+        let (photos, at, copy_px) = copies;
+        let want = level(copy_px);
+        if want >= STREAMED {
+            for (&i, p) in photos.iter().zip(at) {
+                let p = Vec2::new(p.x, p.y);
+                if p.cmpge(view_min).all() && p.cmple(view_max).all() {
+                    visible.push((i, want, p));
                 }
             }
         }
+        let mut wanted: Vec<(f32, usize, usize, usize)> = Vec::new();
+        for (i, want, p) in visible {
+            let count = self.table_cpu[i * ENTRY] as usize;
+            for l in STREAMED..count {
+                let slot = self.table_cpu[i * ENTRY + 4 + l] as usize;
+                self.pools[l - STREAMED].last_seen[slot] = frame;
+            }
+            let need = want.min(self.max_level(i));
+            if need >= STREAMED && count <= need && !self.loading[i] {
+                wanted.push((p.distance_squared(center), i, count, need));
+            }
+        }
+        // a photo wanted twice (itself and its copy): once, at the bigger of the two
+        wanted.sort_by(|a, b| a.1.cmp(&b.1).then(b.3.cmp(&a.3)));
+        wanted.dedup_by_key(|w| w.1);
 
         // finished loads, level by level from the bottom: each into a free or least-recently-seen slot
         while let Ok(done) = self.results.try_recv() {
