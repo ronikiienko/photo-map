@@ -139,6 +139,16 @@ pub fn tinted(ui: &mut Ui, colour: Color32, enabled: bool, button: egui::Button)
     .inner
 }
 
+/// A plain button that looks like every other button, also inside a menu (menus draw their buttons as menu items: no frame, no
+/// fill, little room round the text, so a button there would read as plain text).
+pub fn button(ui: &mut Ui, button: egui::Button) -> egui::Response {
+    ui.scope(|ui| {
+        ui.set_style(ui.ctx().global_style());
+        ui.add(button.frame(true))
+    })
+    .inner
+}
+
 /// A close cross that lights up when the pointer is on it and again when it is pressed.
 pub fn close_button(ui: &mut Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());

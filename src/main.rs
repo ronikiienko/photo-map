@@ -12,6 +12,7 @@ mod data;
 mod embed;
 mod gallery;
 mod gpu;
+mod groups;
 mod home;
 mod layout;
 mod library;
@@ -68,11 +69,13 @@ const LABEL_OUT: (f32, f32) = (300.0, 500.0);
 /// Seconds the photos take to slide to their places in another view.
 const SLIDE_SECONDS: f32 = 0.8;
 
-/// Where the photos are: the map's own layout (similar photos together), or along two pairs of words (axes.rs).
+/// Where the photos are: the map's own layout (similar photos together), along two pairs of words (axes.rs), or sorted into
+/// groups by words (groups.rs).
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Map,
     Axes,
+    Groups,
 }
 
 /// The two screens: your maps (and the ones being made), and a map.
@@ -135,6 +138,9 @@ struct OpenMap {
     moved: Option<Instant>,
     /// The photos' cosines with the axes' four words, kept while the Axes view shows (changing how they spread needs no model).
     axes_cos: Option<[Vec<f32>; 4]>,
+    /// The Groups view's islands and their words (empty in the other views).
+    islands: Vec<groups::Island>,
+    island_words: Vec<String>,
 }
 
 impl OpenMap {
@@ -201,13 +207,17 @@ struct Viewer {
     photo: Option<PathBuf>,
     /// What the last search did, next to the box.
     status: String,
-    /// The words of the Axes view (as typed), the view the Layout menu has chosen, and the four words' vectors on their way
-    /// from the model (the query number each was asked as, and its answer).
+    /// The words of the Axes view and of the Groups view (as typed), and the view the Layout menu has chosen.
     axes: axes::Words,
     axes_spread: axes::Spread,
+    groups_text: String,
     view_choice: View,
-    axes_asked: [Option<u64>; 4],
-    axes_vectors: [Option<Vec<f32>>; 4],
+    /// A layout's words on their way from the model: which view they are for, the query number each was asked as (None once
+    /// answered), and the answers.
+    layout_for: View,
+    layout_words: Vec<String>,
+    layout_asked: Vec<Option<u64>>,
+    layout_vectors: Vec<Option<Vec<f32>>>,
     /// How many photos a search should light up (the slider): the closest this many match.
     wanted: f32,
     /// What the search looks at: the photos' images, their captions, or both.
@@ -282,9 +292,12 @@ impl Viewer {
             status: String::new(),
             axes: axes::Words::default(),
             axes_spread: axes::Spread::default(),
+            groups_text: String::new(),
             view_choice: View::Map,
-            axes_asked: [None; 4],
-            axes_vectors: Default::default(),
+            layout_for: View::Map,
+            layout_words: Vec::new(),
+            layout_asked: Vec::new(),
+            layout_vectors: Vec::new(),
             wanted: 100.0,
             on: SearchOn::default(),
             shown: String::new(),
@@ -341,8 +354,8 @@ impl Viewer {
         }
         let in_process = vectors.is_some();
         self.asked = None;
-        self.view_choice = View::Map; // a map opens as itself; the axes' words are kept for the next one
-        self.axes_asked = [None; 4];
+        self.view_choice = View::Map; // a map opens as itself; the words are kept for the next one
+        self.layout_asked.clear();
         self.engine.want(data.manifest.model()); // load the map's model now, so that the first search is quick
         let (map_points, from) = (data.points.clone(), data.points.clone());
         self.map = Some(OpenMap {
@@ -363,6 +376,8 @@ impl Viewer {
             from,
             moved: None,
             axes_cos: None,
+            islands: Vec::new(),
+            island_words: Vec::new(),
         });
         if !in_process {
             self.status = "this map has no search vectors (embeddings.bin)".into();
@@ -623,13 +638,14 @@ impl Viewer {
         }
     }
 
-    /// The Layout menu's choice: back to the map's own layout, or the axes' four words to the model (the photos move once all
-    /// four vectors are back, in poll_engine).
+    /// The Layout menu's choice: back to the map's own layout, or the chosen view's words to the model (the photos move once
+    /// all their vectors are back, in poll_engine).
     fn arrange(&mut self) {
         let Some(m) = &mut self.map else { return };
         if self.view_choice == View::Map {
-            self.axes_asked = [None; 4];
+            self.layout_asked.clear();
             m.axes_cos = None;
+            m.islands.clear();
             if m.view != View::Map {
                 let (points, size) = (m.map_points.clone(), m.map_photo_world);
                 m.move_to(&self.gpu.queue, View::Map, points, size);
@@ -637,10 +653,23 @@ impl Viewer {
             }
             return;
         }
-        if self.axes.all().iter().any(|w| w.trim().is_empty()) {
-            self.status = "the axes need a word at each of the four ends".into();
-            return;
-        }
+        let words: Vec<String> = match self.view_choice {
+            View::Axes => {
+                if self.axes.all().iter().any(|w| w.trim().is_empty()) {
+                    self.status = "the axes need a word at each of the four ends".into();
+                    return;
+                }
+                self.axes.all().iter().map(|w| w.trim().to_string()).collect()
+            }
+            _ => {
+                let words = groups::words(&self.groups_text);
+                if words.len() < 2 {
+                    self.status = "type at least two words to sort the photos into".into();
+                    return;
+                }
+                words
+            }
+        };
         if m.vectors.is_none() {
             self.status = "this map has no vectors (embeddings.bin) to arrange the photos by".into();
             return;
@@ -650,24 +679,34 @@ impl Viewer {
             return;
         }
         let model = m.data.manifest.model().to_string();
-        let words = self.axes.clone();
-        for (k, w) in words.all().into_iter().enumerate() {
-            self.axes_asked[k] = Some(self.engine.ask(&model, search::Query::Words(w.trim().to_string())));
-        }
-        self.axes_vectors = Default::default();
+        self.layout_asked = words.iter().map(|w| Some(self.engine.ask(&model, search::Query::Words(w.clone())))).collect();
+        self.layout_vectors = vec![None; words.len()];
+        self.layout_words = words;
+        self.layout_for = self.view_choice;
         self.status = "arranging the photos…".into();
     }
 
-    /// All four words' vectors are back: each photo's cosines with them place it (axes.rs), and the photos slide there.
-    fn arrange_by_axes(&mut self) {
+    /// All the words' vectors are back: each photo's cosines with them place it (axes.rs, groups.rs), and the photos slide there.
+    fn arranged(&mut self) {
         let Some(m) = &mut self.map else { return };
         let Some(vectors) = &m.vectors else { return };
-        let words = std::mem::take(&mut self.axes_vectors);
+        let words = std::mem::take(&mut self.layout_vectors);
         let Some(cos) = words.iter().map(|v| v.as_ref().map(|v| vectors.image_cosines(v))).collect::<Option<Vec<_>>>() else { return };
-        m.axes_cos = Some(cos.try_into().unwrap());
-        self.spread_axes();
-        let a = &self.axes;
-        self.status = format!("left to right: {} to {}, bottom to top: {} to {}", a.left.trim(), a.right.trim(), a.down.trim(), a.up.trim());
+        if self.layout_for == View::Axes {
+            m.axes_cos = Some(cos.try_into().unwrap());
+            m.islands.clear();
+            self.spread_axes();
+            let a = &self.axes;
+            self.status = format!("left to right: {} to {}, bottom to top: {} to {}", a.left.trim(), a.right.trim(), a.down.trim(), a.up.trim());
+        } else {
+            m.axes_cos = None;
+            let (points, islands) = groups::place(&cos);
+            let size = median_neighbour_distance(&points);
+            m.move_to(&self.gpu.queue, View::Groups, points, size);
+            self.status = format!("{} groups: each photo is in the one whose word it is most like", islands.len());
+            m.islands = islands;
+            m.island_words = self.layout_words.clone();
+        }
         self.camera.fly_to(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
     }
 
@@ -684,17 +723,17 @@ impl Viewer {
     fn poll_engine(&mut self) {
         for event in self.engine.poll() {
             let search::Event::Vector { id, vector, note } = event;
-            if let Some(k) = self.axes_asked.iter().position(|&a| a == Some(id)) {
-                self.axes_asked[k] = None;
+            if let Some(k) = self.layout_asked.iter().position(|&a| a == Some(id)) {
+                self.layout_asked[k] = None;
                 match vector {
-                    Ok(v) => self.axes_vectors[k] = Some(v),
+                    Ok(v) => self.layout_vectors[k] = Some(v),
                     Err(e) => {
-                        self.axes_asked = [None; 4]; // the other words are no use without this one
+                        self.layout_asked.clear(); // the other words are no use without this one
                         self.status = format!("couldn't arrange the photos: {e}");
                     }
                 }
-                if self.axes_vectors.iter().all(Option::is_some) {
-                    self.arrange_by_axes();
+                if !self.layout_vectors.is_empty() && self.layout_vectors.iter().all(Option::is_some) {
+                    self.arranged();
                 }
                 continue;
             }
@@ -1112,8 +1151,10 @@ impl Viewer {
     fn draw_labels(&mut self, ctx: &egui::Context) {
         self.label_rects.clear();
         let Some(m) = &self.map else { return };
-        if m.view == View::Axes {
-            return self.draw_axis_words(ctx);
+        match m.view {
+            View::Axes => return self.draw_axis_words(ctx),
+            View::Groups => return self.draw_island_words(ctx),
+            View::Map => {}
         }
         let mut shown: Vec<(egui::Rect, usize, usize)> = Vec::new();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "region names".into()));
@@ -1185,6 +1226,33 @@ impl Viewer {
                 (screen.top() - rect.top()).max(0.0) + (screen.bottom() - rect.bottom()).min(0.0),
             );
             let rect = rect.translate(shift);
+            painter.rect_filled(rect.expand2(egui::vec2(8.0, 3.0)), 6.0, egui::Color32::from_black_alpha(170));
+            painter.galley(rect.min, galley, egui::Color32::WHITE);
+        }
+    }
+
+    /// The Groups view's words, each above its island with how many photos it has.
+    fn draw_island_words(&self, ctx: &egui::Context) {
+        let Some(m) = &self.map else { return };
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "group words".into()));
+        let ppp = ctx.pixels_per_point();
+        for island in &m.islands {
+            let Some(word) = m.island_words.get(island.word) else { continue };
+            // no wider than the island on screen (cut with "…"), so neighbours' names never run into each other
+            let width = island.side * self.camera.scale / ppp;
+            if width < 24.0 {
+                continue;
+            }
+            let mut job = egui::text::LayoutJob::default();
+            job.append(word, 0.0, egui::TextFormat::simple(egui::FontId::proportional(20.0), egui::Color32::from_rgb(255, 220, 120)));
+            job.append(&format!("  {}", island.photos), 0.0, egui::TextFormat::simple(egui::FontId::proportional(15.0), theme::MUTED));
+            job.wrap.max_width = width;
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            job.wrap.overflow_character = Some('…');
+            let galley = painter.layout_job(job);
+            let at = self.camera.to_screen(Vec2::new(island.min.x + island.side / 2.0, island.min.y)) / ppp;
+            let rect = egui::Align2::CENTER_BOTTOM.anchor_size(egui::pos2(at.x, at.y - 8.0), galley.size());
             painter.rect_filled(rect.expand2(egui::vec2(8.0, 3.0)), 6.0, egui::Color32::from_black_alpha(170));
             painter.galley(rect.min, galley, egui::Color32::WHITE);
         }
@@ -1384,22 +1452,23 @@ impl Viewer {
                                 let options = [
                                     (View::Map, "Map", "similar photos together, as the map was made"),
                                     (View::Axes, "Axes", "along two pairs of words you choose"),
+                                    (View::Groups, "Groups", "sorted into groups by words you choose"),
                                 ];
                                 if theme::segmented(ui, &mut self.view_choice, &options) && self.view_choice == View::Map {
                                     actions.arrange = true;
                                 }
                                 if self.view_choice == View::Map {
                                     ui.label(theme::muted("Photos that look alike sit close together, in regions with names."));
-                                } else {
+                                } else if self.view_choice == View::Axes {
                                     ui.label(theme::muted("Left to right: from the first word to the second. Bottom to top: the same with the other pair. Each photo goes by how much more it is like one end than the other."));
                                     ui.add_space(6.0);
                                     let mut enter = false;
                                     let a = &mut self.axes;
                                     for (label, first, second, hints) in [("across", &mut a.left, &mut a.right, ("left: day", "right: night")), ("up", &mut a.down, &mut a.up, ("bottom: nature", "top: city"))] {
                                         ui.horizontal(|ui| {
-                                            ui.add_sized([46.0, 26.0], egui::Label::new(theme::muted(label)));
+                                            ui.add_sized([46.0, 20.0], egui::Label::new(theme::muted(label)));
                                             for (text, hint) in [(first, hints.0), (second, hints.1)] {
-                                                let edit = ui.add_sized([112.0, 26.0], egui::TextEdit::singleline(text).hint_text(hint));
+                                                let edit = ui.add(egui::TextEdit::singleline(text).hint_text(hint).margin(egui::Margin::symmetric(8, 5)).desired_width(112.0));
                                                 enter |= edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                             }
                                         });
@@ -1417,8 +1486,16 @@ impl Viewer {
                                         axes::Spread::Score => "By score: distance means difference. Most photos crowd the middle.",
                                     }));
                                     ui.add_space(6.0);
-                                    // the menu draws its buttons without a frame: this one gets the usual one, like Prev and Next
-                                    if ui.add(egui::Button::new("Arrange").frame(true)).on_hover_text("place the photos along these words (Enter in a box does it too)").clicked() || enter {
+                                    if theme::button(ui, egui::Button::new("Arrange")).on_hover_text("place the photos along these words (Enter in a box does it too)").clicked() || enter {
+                                        actions.arrange = true;
+                                    }
+                                } else {
+                                    ui.label(theme::muted("Each photo joins the word it is most like. In each group the strongest matches are in the middle, the weakest at the edge."));
+                                    ui.add_space(6.0);
+                                    ui.add(egui::TextEdit::multiline(&mut self.groups_text).hint_text("beach, mountain, city, forest").desired_rows(3).desired_width(f32::INFINITY));
+                                    ui.label(theme::muted("Separate the words with commas or new lines."));
+                                    ui.add_space(6.0);
+                                    if theme::button(ui, egui::Button::new("Arrange")).on_hover_text("sort the photos into these groups").clicked() {
                                         actions.arrange = true;
                                     }
                                 }
