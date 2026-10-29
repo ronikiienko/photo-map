@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 pub enum Action {
     Open(PathBuf),
-    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String },
+    Create { name: String, sources: Vec<PathBuf>, names_as_captions: bool, every: usize, model: String, copy_photos: bool },
     Pause(PathBuf),
     SetBackend(crate::backends::Backend),
     GetModel(String),
@@ -69,9 +69,14 @@ struct NewMap {
     name_edited: bool,
     /// Which list of sources `photos` counts (the list as text).
     counted: String,
-    count: Option<Receiver<usize>>,
+    /// How many photos the sources hold, and whether any source is on another disk than the maps.
+    count: Option<Receiver<(usize, bool)>>,
     /// How many photos the sources hold, all of them.
     photos: Option<usize>,
+    /// Some of the sources are on another disk: their photos can't be hard linked.
+    other_disk: bool,
+    /// Photos on another disk are copied into the map instead of linked to where they are.
+    copy_photos: bool,
     /// Use every Nth photo.
     every: usize,
     names_as_captions: bool,
@@ -119,7 +124,7 @@ impl Home {
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, every: 1, names_as_captions: false, model: crate::models::DEFAULT.to_string() });
+        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, other_disk: false, copy_photos: false, every: 1, names_as_captions: false, model: crate::models::DEFAULT.to_string() });
     }
 
     pub fn set_drag_over(&mut self, over: bool) {
@@ -307,7 +312,7 @@ impl Home {
                         let mut line = format!("{}", b.stage.label());
                         if s.total > 0 {
                             // only these stages count photos; the others count steps of their own (shown as a percentage)
-                            let by_photo = matches!(b.stage, Stage::Scan | Stage::Copy | Stage::Embed);
+                            let by_photo = matches!(b.stage, Stage::Scan | Stage::Embed);
                             if by_photo {
                                 line += &format!(" · {} of {}", thousands(s.done), thousands(s.total));
                             } else {
@@ -522,6 +527,14 @@ impl Home {
                 ui.label(RichText::new(format!("{} of photos are links, not copies", storage::human(sizes.linked))).strong());
                 ui.label(theme::muted("The map was made from photos on the same disk, so instead of copying them it points at the originals. They take no extra space here, and they are not counted above. If you delete or move the originals, the map keeps its own link to the data, so it still works."));
             }
+            if sizes.elsewhere > 0 || sizes.unreachable > 0 {
+                ui.separator();
+                ui.label(RichText::new(format!("{} of photos are on another disk", storage::human(sizes.elsewhere))).strong());
+                ui.label(theme::muted("They were not copied: the map points at them where they are, and they are not counted above. Zoomed out, the map works without that disk; to see a photo at full size, the disk must be plugged in and the photo where it was. Moving or renaming the photos breaks the map's link to them."));
+                if sizes.unreachable > 0 {
+                    ui.label(RichText::new(format!("{} can't be found now: is the disk plugged in?", if sizes.unreachable == 1 { "1 photo".to_string() } else { format!("{} photos", thousands(sizes.unreachable)) })).color(Color32::from_rgb(235, 150, 100)));
+                }
+            }
         });
         if closed || response.should_close() {
             self.details = None;
@@ -602,8 +615,9 @@ impl Home {
     fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         let Some(nm) = &mut self.new_map else { return };
         if let Some(rx) = &nm.count {
-            if let Ok(n) = rx.try_recv() {
+            if let Ok((n, other_disk)) = rx.try_recv() {
                 nm.photos = Some(n);
+                nm.other_disk = other_disk;
                 nm.count = None;
             }
         }
@@ -664,9 +678,9 @@ impl Home {
                 if !sources.is_empty() {
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
-                    let list = sources.clone();
+                    let (list, maps) = (sources.clone(), lib.dir().to_path_buf());
                     std::thread::spawn(move || {
-                        let _ = tx.send(build::collect_photos(&list, 1).len());
+                        let _ = tx.send((build::collect_photos(&list, 1).len(), list.iter().any(|s| !build::same_disk(s, &maps))));
                         ctx.request_repaint();
                     });
                     nm.count = Some(rx);
@@ -686,6 +700,15 @@ impl Home {
                 ui.label(theme::muted("Counting photos…"));
             } else if let Some(n) = nm.photos {
                 ui.label(theme::muted(if nm.every > 1 { format!("{} photos found, {} of them used", thousands(n), thousands(n.div_ceil(nm.every))) } else { format!("{} photos found", thousands(n)) }));
+                if nm.other_disk && n > 0 {
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut nm.copy_photos, "Copy the photos into the map").on_hover_text("They take space here as well, and the map shows them at full size without the other disk.");
+                    ui.label(theme::muted(if nm.copy_photos {
+                        "The photos are on another disk: they will be copied into the map."
+                    } else {
+                        "The photos are on another disk, so the map will point at them where they are instead of copying them. Zoomed out, it works without that disk; to see a photo at full size, the disk must be plugged in and the photo where it was."
+                    }));
+                }
             }
             ui.add_space(8.0);
             ui.label("How many");
@@ -736,7 +759,7 @@ impl Home {
             ui.horizontal(|ui| {
                 let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
-                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone() });
+                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), names_as_captions: nm.names_as_captions, every: nm.every, model: nm.model.clone(), copy_photos: nm.copy_photos });
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;
@@ -1020,7 +1043,6 @@ fn size_text(mb: u32) -> String {
 fn step(ui: &mut Ui, step: Stage, current: Stage, last: bool) {
     let short = match step {
         Stage::Scan => "Find",
-        Stage::Copy => "Copy",
         Stage::Embed => "Understand",
         Stage::Layout => "Lay out",
         Stage::Regions => "Regions",

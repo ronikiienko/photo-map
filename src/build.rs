@@ -3,8 +3,8 @@
 //! A map being made is a folder maps/<name>.building/ that keeps everything done so far, so closing the app (or pausing) loses at
 //! most a few seconds of work:
 //!     job.json      name, source folder, the stage to run next, photo count
-//!     files.json    the photos found (scan), in order; photo i is originals/<i, 6 digits>.<ext> (copy)
-//!     originals/    hard links to the photos (copies if they are on another disk)
+//!     files.json    the photos found (scan), in order; photo i is originals/<i, 6 digits>.<ext>
+//!     originals/    hard links to the photos; on another disk, links by path (or copies, if the job asks for them)
 //!     vectors/      the photos' vectors in shards of SHARD photos (embed): a finished shard is never redone
 //! When the last stage is done the folder is renamed to maps/<name>.photomap (see data.rs for what is in one).
 //! Each stage can be stopped at any time (pause, close) and run again; it picks up what it can.
@@ -30,8 +30,8 @@ const BATCH: usize = 16;
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
+    #[serde(alias = "copy")] // linking the photos into the map was a step of its own
     Scan,
-    Copy,
     #[serde(alias = "load")] // a job saved while loading the model was a step of its own
     Embed,
     Layout,
@@ -42,13 +42,12 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 8] = [Stage::Scan, Stage::Copy, Stage::Embed, Stage::Layout, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
+    pub const ALL: [Stage; 7] = [Stage::Scan, Stage::Embed, Stage::Layout, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
 
     /// What the stage is doing, for the list of steps.
     pub fn label(self) -> &'static str {
         match self {
             Stage::Scan => "Finding photos",
-            Stage::Copy => "Copying photos into the map",
             Stage::Embed => "Understanding photos",
             Stage::Layout => "Laying out the map",
             Stage::Regions => "Finding regions",
@@ -61,8 +60,7 @@ impl Stage {
     /// What the stage does and why, in plain words, for the card of a map being made.
     pub fn explain(self) -> &'static str {
         match self {
-            Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on) and counts them. Nothing is changed in your folders.",
-            Stage::Copy => "Makes the map its own list of the photos. Where it can, a photo is a hard link to your file (the same data, no second copy), so this takes almost no space. The map also notes each photo's size and where it came from.",
+            Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and links each one into the map: on the same disk a hard link (the same data, no second copy), on another disk a link to where the photo is. Nothing is changed in your folders, and no space is taken.",
             Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. This is the slow part, because every photo goes through the model on the graphics card.",
             Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP).",
             Stage::Regions => "Groups the photos on the map into areas, from a few big ones down to small ones of about 10 photos. The groups are made from neighbours on the map, so each area is one connected piece. Zooming in shows the finer ones.",
@@ -100,6 +98,10 @@ pub struct Job {
     /// life of the job: its vectors, and the map's search, are only good with the same one.
     #[serde(default = "default_model")]
     pub model: String,
+    /// Photos on another disk are copied into the map; otherwise the map links to them by path (jobs from before this copied them:
+    /// either way a job can carry on).
+    #[serde(default)]
+    pub copy_photos: bool,
 }
 
 fn default_model() -> String {
@@ -172,7 +174,7 @@ pub fn clean_name(name: &str) -> String {
 }
 
 /// Start a new build: its folder with job.json. Err with what is wrong (name taken, folder missing).
-pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: bool, every: usize, model: &str) -> Result<PathBuf, String> {
+pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: bool, every: usize, model: &str, copy_photos: bool) -> Result<PathBuf, String> {
     if models::spec(model).is_none() {
         return Err(format!("unknown model {model}"));
     }
@@ -191,7 +193,7 @@ pub fn create(maps: &Path, name: &str, sources: &[PathBuf], names_as_captions: b
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, sources, created, stage: Stage::Scan, photos: 0, names_as_captions, every: every.max(1), model: model.to_string() }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, sources, created, stage: Stage::Scan, photos: 0, names_as_captions, every: every.max(1), model: model.to_string(), copy_photos }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -420,7 +422,6 @@ fn run(mut ctx: Ctx) -> (Arc<Shared>, Result<(), String>) {
             }
             let flow = match stage {
                 Stage::Scan => scan(&mut ctx)?,
-                Stage::Copy => copy(&mut ctx)?,
                 Stage::Embed => embed_photos(&mut ctx)?,
                 Stage::Layout => lay_out(&mut ctx)?,
                 Stage::Regions => find_regions(&mut ctx)?,
@@ -503,7 +504,18 @@ fn shown_size(path: &Path) -> Option<(u32, u32)> {
     Some(if turned { (h, w) } else { (w, h) })
 }
 
+/// Find the photos (once: a scan paused while linking keeps its list, so each photo keeps its number), then link them into the map.
 fn scan(ctx: &mut Ctx) -> Result<Flow, String> {
+    if !ctx.dir.join("files.json").exists() {
+        match find_photos(ctx)? {
+            Flow::Done => {}
+            paused => return Ok(paused),
+        }
+    }
+    link_photos(ctx)
+}
+
+fn find_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     ctx.progress(0, 0, "looking for photos");
     let files = collect_photos(&ctx.job.sources, ctx.job.every);
     let total = files.len();
@@ -543,20 +555,53 @@ fn original_name(i: usize, src: &Path) -> String {
     format!("originals/{i:06}.{}", src.extension().and_then(|e| e.to_str()).unwrap_or("jpg").to_lowercase())
 }
 
-fn copy(ctx: &mut Ctx) -> Result<Flow, String> {
+/// Whether a hard link from one to the other can be made: the same file system (on btrfs, the same subvolume). Unknown: yes.
+pub fn same_disk(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev(),
+            _ => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        true
+    }
+}
+
+/// A symbolic link at `dst` to `src`'s full path: it stays good when the map's folder moves, not when the photo does.
+fn link_by_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let src = fs::canonicalize(src)?;
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(src, dst);
+    #[cfg(not(unix))]
+    {
+        let _ = (src, dst);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let found = read_found(&ctx.dir)?;
+    ctx.job.photos = found.len();
     let total = found.len();
     fs::create_dir_all(ctx.dir.join("originals")).map_err(|e| e.to_string())?;
     ctx.progress(0, total, "linking the photos into the map");
     let done = AtomicUsize::new(0);
+    let copy_photos = ctx.job.copy_photos;
     let failed = found.par_iter().enumerate().try_for_each(|(i, f)| {
         if ctx.paused() {
             return Err(None);
         }
         let dst = ctx.dir.join(original_name(i, &f.src));
-        if !dst.exists() {
-            // the same disk: a link costs nothing; another disk: a copy (to a temporary name first: a half copy never counts)
-            if fs::hard_link(&f.src, &dst).is_err() {
+        // not exists(): that follows a link, and a link to a disk not plugged in is done all the same
+        if fs::symlink_metadata(&dst).is_err() {
+            // the same disk: a hard link costs nothing; another disk: a link by path, or a copy if asked for (to a temporary name
+            // first: a half copy never counts)
+            if fs::hard_link(&f.src, &dst).is_err() && (copy_photos || link_by_path(&f.src, &dst).is_err()) {
                 let tmp = dst.with_extension("part");
                 fs::copy(&f.src, &tmp).and_then(|_| fs::rename(&tmp, &dst)).map_err(|e| Some(format!("{}: {e}", f.src.display())))?;
             }
@@ -926,6 +971,24 @@ mod tests {
 
     /// A photo an earlier map already holds a vector for (same file, not changed since) is not embedded again: its row is copied.
     /// Proved by changing a row in the first map to a vector the model would never make, and finding it in the second.
+    #[cfg(unix)]
+    #[test]
+    fn links_a_photo_by_its_full_path() {
+        let temp = std::env::temp_dir().join(format!("photo-map-link-test-{}", std::process::id()));
+        fs::create_dir_all(temp.join("photos")).unwrap();
+        fs::create_dir_all(temp.join("map")).unwrap();
+        fs::write(temp.join("photos/a.jpg"), b"photo").unwrap();
+        // a relative source still makes a link that works from inside the map
+        let relative = temp.join("photos/../photos/a.jpg");
+        link_by_path(&relative, &temp.join("map/a.jpg")).unwrap();
+        assert!(fs::read_link(temp.join("map/a.jpg")).unwrap().is_absolute());
+        assert_eq!(fs::read(temp.join("map/a.jpg")).unwrap(), b"photo");
+        assert!(same_disk(&temp.join("photos"), &temp.join("map")));
+        fs::remove_dir_all(&temp).unwrap();
+        // a job saved at the step that linked the photos (it was its own) carries on at the scan, which does it now
+        assert_eq!(serde_json::from_str::<Stage>("\"copy\"").unwrap(), Stage::Scan);
+    }
+
     #[test]
     fn reuses_vectors_of_earlier_maps() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
@@ -942,7 +1005,7 @@ mod tests {
         }
         let model = models::test_hub();
         let build = |name: &str| {
-            let dir = create(&maps, name, &[source.clone()], false, 1, models::DEFAULT).unwrap();
+            let dir = create(&maps, name, &[source.clone()], false, 1, models::DEFAULT, false).unwrap();
             let run = Run::start(dir, root.clone(), model.clone(), || {}).unwrap();
             while run.running() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -995,8 +1058,8 @@ mod tests {
         fs::write(source.join("notes.txt"), "not a photo").unwrap();
 
         let model = models::test_hub();
-        let dir = create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT).unwrap();
-        assert!(create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT).is_err(), "a second map with the same name");
+        let dir = create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT, false).unwrap();
+        assert!(create(&maps, "test map", &[source.clone()], true, 1, models::DEFAULT, false).is_err(), "a second map with the same name");
         // stop and go on a few times at arbitrary moments
         for pause_after_ms in [0u64, 150, 900, 2500] {
             let run = Run::start(dir.clone(), root.clone(), model.clone(), || {}).unwrap();
@@ -1066,7 +1129,7 @@ mod tests {
         }
         let hub = models::test_hub();
         let build = |name: &str, model: &str| {
-            let dir = create(&maps, name, &[source.clone()], false, 1, model).unwrap();
+            let dir = create(&maps, name, &[source.clone()], false, 1, model, false).unwrap();
             let run = Run::start(dir, root.clone(), hub.clone(), || {}).unwrap();
             while run.running() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
