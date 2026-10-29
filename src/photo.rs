@@ -41,6 +41,10 @@ fn scaled_jpeg(path: &Path, needed: &dyn Fn(u32, u32) -> u32) -> Option<RgbaImag
     }
     let orientation = reader.into_decoder().ok()?.orientation().ok()?;
     let info = libjpeg_turbo_rs::probe(&bytes).ok()?;
+    // libjpeg-turbo-rs 0.8 panics on CMYK (YCCK) JPEGs, reading past the end of a row: those are read by `load`
+    if info.components == 4 {
+        return None;
+    }
     let (w, h) = (info.width as u32, info.height as u32);
     let (shown_w, shown_h) = if matches!(orientation, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH) { (h, w) } else { (w, h) };
     // twice what is needed is kept: the shrink that follows then has something to average, and the picture stays as sharp as it
@@ -52,10 +56,14 @@ fn scaled_jpeg(path: &Path, needed: &dyn Fn(u32, u32) -> u32) -> Option<RgbaImag
     // the smallest size, in eighths, whose longer side is still enough
     let long = w.max(h);
     let eighths = (1..=8u32).find(|&n| (long * n).div_ceil(8) >= need).unwrap_or(8);
-    let mut decoder = libjpeg_turbo_rs::Decoder::new(&bytes).ok()?;
-    decoder.set_scale(libjpeg_turbo_rs::ScalingFactor::new(eighths, 8));
-    decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgba);
-    let decoded = decoder.decode_image().ok()?;
+    // a decoder bug on some other odd file shouldn't take a build's worker down with it: that photo too is read by `load`
+    let decoded = std::panic::catch_unwind(|| {
+        let mut decoder = libjpeg_turbo_rs::Decoder::new(&bytes).ok()?;
+        decoder.set_scale(libjpeg_turbo_rs::ScalingFactor::new(eighths, 8));
+        decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgba);
+        decoder.decode_image().ok()
+    })
+    .ok()??;
     let mut img = DynamicImage::ImageRgba8(RgbaImage::from_raw(decoded.width as u32, decoded.height as u32, decoded.data)?);
     img.apply_orientation(orientation);
     Some(img.into_rgba8())
