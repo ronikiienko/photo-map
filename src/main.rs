@@ -229,6 +229,8 @@ struct Viewer {
     layout_vectors: Vec<Option<Vec<f32>>>,
     /// How many photos a search should light up (the slider): the closest this many match.
     wanted: f32,
+    /// Photos drawn with their pixels blended (smooth) or each pixel as it is (nearest).
+    smooth: bool,
     /// What the shown search was for (words and/or a photo's name).
     shown: String,
     /// The photo in the box, as a small picture.
@@ -309,6 +311,7 @@ impl Viewer {
             layout_asked: Vec::new(),
             layout_vectors: Vec::new(),
             wanted: 100.0,
+            smooth: true,
             shown: String::new(),
             photo_tex: None,
             last_frame: Instant::now(),
@@ -1110,7 +1113,7 @@ impl Viewer {
                 }
                 let copies = (&m.order[..], &m.copies[..], cam.copy_px);
                 m.streamer.update(&self.gpu.queue, &m.data, view_min, view_max, self.camera.center, size_px, copies);
-                m.renderer.draw(&self.gpu.queue, &mut encoder, &view, cam);
+                m.renderer.draw(&self.gpu.queue, &mut encoder, &view, cam, self.smooth);
             }
             _ => gpu::clear(&mut encoder, &view),
         }
@@ -1562,6 +1565,9 @@ impl Viewer {
                                 }
                                 ui.label(theme::muted("Always marks exactly this many photos, best first, from yellow (strong) to red (weak). It does not judge whether they are good matches."));
                                 ui.label(theme::muted("Too few: good matches beyond the count are missed. Too many: poor matches get marked too."));
+                                ui.add_space(8.0);
+                                ui.label(theme::muted("PHOTO PIXELS"));
+                                theme::segmented(ui, &mut self.smooth, &[(true, "Smooth", "pixels blended with their neighbours"), (false, "Nearest", "each pixel as it is: sharp, blocky up close")]);
                             });
                         });
                         egui::containers::menu::MenuButton::new("Layout").config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| {

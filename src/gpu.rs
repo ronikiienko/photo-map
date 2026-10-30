@@ -84,6 +84,8 @@ pub struct MapRenderer {
     /// The same, drawing the matches' copies (map.wgsl's vs_copy).
     copy_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    /// The same with the pixels taken as they are (nearest), not blended with their neighbours.
+    bind_group_nearest: wgpu::BindGroup,
     camera: wgpu::Buffer,
     flags: wgpu::Buffer,
     /// Per photo: x, y and shape (where it is going, while the photos slide to another view).
@@ -135,6 +137,7 @@ impl MapRenderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let nearest = device.create_sampler(&wgpu::SamplerDescriptor::default());
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("map"),
@@ -169,7 +172,7 @@ impl MapRenderer {
                 entry(8, wgpu::ShaderStages::VERTEX, storage),
             ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group_with = |sampler: &wgpu::Sampler| device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("map"),
             layout: &layout,
             entries: &[
@@ -177,13 +180,14 @@ impl MapRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: points.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: flags.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&streamer.view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(sampler) },
                 wgpu::BindGroupEntry { binding: 5, resource: streamer.table.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: streamer.first_pages.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: from.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: copies.as_entire_binding() },
             ],
         });
+        let (bind_group, bind_group_nearest) = (bind_group_with(&sampler), bind_group_with(&nearest));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("map"),
             bind_group_layouts: &[Some(&layout)],
@@ -215,7 +219,7 @@ impl MapRenderer {
             cache: None,
         });
         let (pipeline, copy_pipeline) = (pipeline("vs_main"), pipeline("vs_copy"));
-        Self { pipeline, copy_pipeline, bind_group, camera, flags, points, from, copies, n_copies: 0, n: n as u32 }
+        Self { pipeline, copy_pipeline, bind_group, bind_group_nearest, camera, flags, points, from, copies, n_copies: 0, n: n as u32 }
     }
 
     /// The matches' copies beside the world: photo `photos[k]` at `at[k]`.
@@ -238,7 +242,9 @@ impl MapRenderer {
         queue.write_buffer(&self.flags, 0, bytemuck::cast_slice(flags));
     }
 
-    pub fn draw(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, cam: CameraUniform) {
+    /// `smooth`: pixels blended with their neighbours when a photo is shown bigger or smaller than it is stored; else each screen
+    /// pixel takes the nearest one.
+    pub fn draw(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, cam: CameraUniform, smooth: bool) {
         queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&cam));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("map"),
@@ -254,7 +260,7 @@ impl MapRenderer {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(0, if smooth { &self.bind_group } else { &self.bind_group_nearest }, &[]);
         pass.draw(0..6, 0..self.n);
         if self.n_copies > 0 {
             pass.set_pipeline(&self.copy_pipeline);
