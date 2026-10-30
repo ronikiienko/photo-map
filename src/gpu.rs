@@ -80,8 +80,15 @@ pub struct CameraUniform {
     /// The lens (lens.rs): its centre on screen and radius, px; a radius of 0 for the map's own camera (nothing clipped).
     pub lens_at: [f32; 2],
     pub lens_radius: f32,
-    pub lens_pad: f32,
+    /// The photo under the mouse, lifted: how far (0 ... 1), and which: a photo or a match's copy (its position), else NO_LIFT.
+    pub lift: f32,
+    pub lift_photo: u32,
+    pub lift_copy: u32,
+    pub pad: [f32; 2],
 }
+
+/// Nothing lifted (CameraUniform's lift_photo, lift_copy).
+pub const NO_LIFT: u32 = u32::MAX;
 
 pub struct MapRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -89,6 +96,8 @@ pub struct MapRenderer {
     copy_pipeline: wgpu::RenderPipeline,
     /// The lens's ground (map.wgsl's vs_disc, fs_disc).
     disc_pipeline: wgpu::RenderPipeline,
+    /// The photo under the mouse, over the others (vs_lift).
+    lift_pipeline: wgpu::RenderPipeline,
     /// Per camera (the map's, the lens's) and sampler (smooth, nearest).
     bind_groups: [[wgpu::BindGroup; 2]; 2],
     camera: wgpu::Buffer,
@@ -225,8 +234,9 @@ impl MapRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let lift_pipeline = pipeline("vs_lift", "fs_main");
         let (pipeline, copy_pipeline, disc_pipeline) = (pipeline("vs_main", "fs_main"), pipeline("vs_copy", "fs_main"), pipeline("vs_disc", "fs_disc"));
-        Self { pipeline, copy_pipeline, disc_pipeline, bind_groups, camera, lens_camera, flags, points, from, copies, n_copies: 0, n: n as u32 }
+        Self { pipeline, copy_pipeline, disc_pipeline, lift_pipeline, bind_groups, camera, lens_camera, flags, points, from, copies, n_copies: 0, n: n as u32 }
     }
 
     /// The matches' copies beside the world: photo `photos[k]` at `at[k]`.
@@ -277,7 +287,7 @@ impl MapRenderer {
         }
     }
 
-    /// Every photo, then the matches' copies, with this bind group's camera.
+    /// Every photo, then the matches' copies, then the one under the mouse, with this bind group's camera.
     fn draw_photos(&self, pass: &mut wgpu::RenderPass, bind_group: &wgpu::BindGroup) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
@@ -286,6 +296,8 @@ impl MapRenderer {
             pass.set_pipeline(&self.copy_pipeline);
             pass.draw(0..6, 0..self.n_copies);
         }
+        pass.set_pipeline(&self.lift_pipeline);
+        pass.draw(0..6, 0..1);
     }
 }
 

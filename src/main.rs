@@ -43,7 +43,7 @@ mod tree;
 use camera::{Camera, Keys};
 use data::{MapData, Progress, WORLD};
 use glam::Vec2;
-use gpu::{CameraUniform, Gpu, MapRenderer};
+use gpu::{CameraUniform, Gpu, MapRenderer, NO_LIFT};
 use library::Library;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -72,6 +72,15 @@ const LABEL_IN: (f32, f32) = (25.0, 50.0);
 const LABEL_OUT: (f32, f32) = (300.0, 500.0);
 /// Seconds the photos take to slide to their places in another view.
 const SLIDE_SECONDS: f32 = 0.8;
+/// Seconds the photo under the mouse takes to lift (and to settle back).
+const LIFT_SECONDS: f32 = 0.12;
+
+/// What is lifted under the mouse: a photo, or a match's copy beside the world (its position among the matches).
+#[derive(Clone, Copy, PartialEq)]
+enum Lifted {
+    Photo(usize),
+    Copy(usize),
+}
 
 /// Where the photos are: the map's own layout (similar photos together), along two pairs of words (axes.rs), or sorted into
 /// groups by words (groups.rs).
@@ -202,6 +211,8 @@ struct Viewer {
     hovered: Option<usize>,
     /// The match whose copy beside the world is under the mouse (its position among the matches; `hovered` is its photo).
     hovered_copy: Option<usize>,
+    /// What is lifted, and how far (0 ... 1): it settles back before the next one lifts.
+    lifted: (Option<Lifted>, f32),
     /// The right-click menu: for which photo, and where (points).
     menu: Option<(usize, egui::Pos2)>,
     /// "Details" was chosen in the menu: the photo, where the card goes, and its lines (files::details).
@@ -297,6 +308,7 @@ impl Viewer {
             cursor: None,
             hovered: None,
             hovered_copy: None,
+            lifted: (None, 0.0),
             menu: None,
             details: None,
             path_from: None,
@@ -1119,6 +1131,19 @@ impl Viewer {
             (Some(c), _, _) if self.page == Page::Viewer && !self.camera.dragging() && !over_ui => self.pick(c),
             _ => None,
         };
+        let want = match (self.hovered_copy, self.hovered) {
+            (Some(k), _) => Some(Lifted::Copy(k)),
+            (None, Some(i)) => Some(Lifted::Photo(i)),
+            _ => None,
+        };
+        if self.lifted.0 == want {
+            self.lifted.1 = (self.lifted.1 + dt / LIFT_SECONDS).min(1.0);
+        } else {
+            self.lifted.1 -= dt / LIFT_SECONDS;
+            if self.lifted.1 <= 0.0 {
+                self.lifted = (want, 0.0);
+            }
+        }
 
         let frame = match self.gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -1148,7 +1173,16 @@ impl Viewer {
             copy_px: self.map.as_ref().map_or(0.0, |m| m.copy_side * self.camera.scale),
             lens_at: [0.0; 2],
             lens_radius: 0.0,
-            lens_pad: 0.0,
+            lift: { let t = self.lifted.1; t * t * (3.0 - 2.0 * t) },
+            lift_photo: match (self.lifted.0, &self.map) {
+                (Some(Lifted::Photo(i)), Some(m)) if i < m.data.n() => i as u32,
+                _ => NO_LIFT,
+            },
+            lift_copy: match (self.lifted.0, &self.map) {
+                (Some(Lifted::Copy(k)), Some(m)) if k < m.order.len() => k as u32,
+                _ => NO_LIFT,
+            },
+            pad: [0.0; 2],
         };
         // the lens's camera, and what it wants loaded: the world box under its circle at its sharpness
         let lens = self.lens_view().zip(self.map.as_ref()).map(|(l, m)| {

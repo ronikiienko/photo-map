@@ -2,7 +2,8 @@
 // level L holds each photo in a 2^L px slot. The shader blends the two levels around the on-screen size,
 // using only levels the table says are loaded (always 1 ... 32 px, larger ones when streamed in).
 // Edges are antialiased analytically: the quad reaches AA px past the photo, and each pixel is covered by how much
-// of it lies inside the photo's rect (box filter, per axis), blended with premultiplied alpha.
+// of it lies inside the photo's rounded rect (by its distance to the edge), blended with premultiplied alpha.
+// The photo under the mouse is lifted: drawn last (vs_lift), a little bigger, over a soft shadow.
 
 struct Camera {
     center: vec2f,     // world point at the middle of the screen
@@ -13,7 +14,10 @@ struct Camera {
     copy_px: f32,      // a match's copy beside the world (beside.rs): its longer side on screen
     lens_at: vec2f,    // the lens (lens.rs): its centre on screen, px ...
     lens_radius: f32,  // ... and radius; 0 when this is not the lens's camera (nothing is clipped)
-    lens_pad: f32,
+    lift: f32,         // 0 ... 1: how far the photo under the mouse is lifted ...
+    lift_photo: u32,   // ... that photo (NONE if it is a copy or there is none) ...
+    lift_copy: u32,    // ... or that match's copy beside the world (NONE if not)
+    pad: vec2f,
 }
 
 const PAGE: f32 = 4096.0;
@@ -28,6 +32,12 @@ const OUTLINE: f32 = 3.0;     // px: a match keeps an outline of its colour at e
 const AA: f32 = 1.0;  // px the quad reaches past the photo's edge, for the partly covered pixels
 const BACKGROUND = vec3f(0.047, 0.051, 0.063);  // the map's background (gpu.rs BACKGROUND)
 const LENS_SHADOW: f32 = 26.0;  // px the lens's shadow reaches past its edge
+const CORNER: f32 = 0.04;       // corners' radius, of the photo's shorter side ...
+const CORNER_MAX: f32 = 10.0;   // ... up to this many px
+const LIFT: f32 = 0.08;         // a lifted photo is this much bigger
+const LIFT_SHADOW: f32 = 0.12;  // its shadow reaches this much of its longer side past it ...
+const LIFT_SHADOW_MAX: f32 = 22.0;  // ... up to this many px, a third of it lower than the photo
+const NONE: u32 = 0xffffffffu;
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var<storage, read> points: array<vec4f>;  // x, y, shape (1, 0.67 for a 3:2 photo)
@@ -47,14 +57,17 @@ struct VsOut {
     @location(3) @interpolate(flat) size: vec2f,  // on-screen width, height
     @location(4) @interpolate(flat) shape: vec2f,
     @location(5) @interpolate(flat) px: f32,  // the photo's longer side on screen, before a match grows (picks the level)
+    @location(6) @interpolate(flat) shadow: f32,  // px the lifted photo's shadow reaches (0: not lifted)
 }
 
-// One corner of photo `id`'s quad, centred on `at` (world), `px` its longer side on screen, drawn `grow` times bigger.
-fn quad(v: u32, id: u32, at: vec2f, px: f32, grow: f32) -> VsOut {
+// One corner of photo `id`'s quad, centred on `at` (world), `px` its longer side on screen, drawn `grow` times bigger,
+// lifted by `lift` (0 ... 1).
+fn quad(v: u32, id: u32, at: vec2f, px: f32, grow: f32, lift: f32) -> VsOut {
     var corners = array(vec2f(0., 0.), vec2f(1., 0.), vec2f(0., 1.), vec2f(0., 1.), vec2f(1., 0.), vec2f(1., 1.));
     let shape = points[id].zw;
-    let size = max(px * shape, vec2f(1.0)) * grow;  // longer side = px, the other follows the shape; never under 1 px
-    let local = (corners[v] - 0.5) * (size + 2.0 * AA);
+    let size = max(px * shape, vec2f(1.0)) * grow * (1.0 + LIFT * lift);  // longer side = px, the other follows the shape; never under 1 px
+    let shadow = min(LIFT_SHADOW * max(size.x, size.y), LIFT_SHADOW_MAX) * lift;
+    let local = (corners[v] - 0.5) * (size + 2.0 * AA + 2.7 * shadow);
     let screen = (at - cam.center) * cam.scale + cam.viewport * 0.5 + local;
     var out: VsOut;
     out.pos = vec4f(screen.x / cam.viewport.x * 2.0 - 1.0, 1.0 - screen.y / cam.viewport.y * 2.0, 0.0, 1.0);
@@ -64,23 +77,47 @@ fn quad(v: u32, id: u32, at: vec2f, px: f32, grow: f32) -> VsOut {
     out.size = size;
     out.shape = shape;
     out.px = px;
+    out.shadow = shadow;
     return out;
+}
+
+// How much bigger photo `id` is drawn: a match, while it is small.
+fn grow(id: u32) -> f32 {
+    return 1.0 + select(0.0, GROW - 1.0, flags[id] != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
+}
+
+fn photo_quad(v: u32, id: u32, lift: f32) -> VsOut {
+    return quad(v, id, mix(from_xy[id], points[id].xy, cam.slide), cam.size_px, grow(id), lift);
 }
 
 @vertex
 fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) id: u32) -> VsOut {
-    let grow = 1.0 + select(0.0, GROW - 1.0, flags[id] != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
-    return quad(v, id, mix(from_xy[id], points[id].xy, cam.slide), cam.size_px, grow);
+    if id == cam.lift_photo { var none: VsOut; return none; }  // drawn last, by vs_lift
+    return photo_quad(v, id, 0.0);
 }
 
 // A match's copy beside the world: its own size, never grown (they sit in a grid, side by side), and just its picture (no tint,
 // no outline: they are in order, best first, and the tip under the mouse says how close each is).
-@vertex
-fn vs_copy(@builtin(vertex_index) v: u32, @builtin(instance_index) k: u32) -> VsOut {
+fn copy_quad(v: u32, k: u32, lift: f32) -> VsOut {
     let c = copies[k];
-    var out = quad(v, bitcast<u32>(c.z), c.xy, cam.copy_px, 1.0);
+    var out = quad(v, bitcast<u32>(c.z), c.xy, cam.copy_px, 1.0, lift);
     out.flags = 0u;
     return out;
+}
+
+@vertex
+fn vs_copy(@builtin(vertex_index) v: u32, @builtin(instance_index) k: u32) -> VsOut {
+    if k == cam.lift_copy { var none: VsOut; return none; }  // drawn last, by vs_lift
+    return copy_quad(v, k, 0.0);
+}
+
+// The photo or copy under the mouse, over everything else.
+@vertex
+fn vs_lift(@builtin(vertex_index) v: u32) -> VsOut {
+    if cam.lift_copy != NONE { return copy_quad(v, cam.lift_copy, cam.lift); }
+    if cam.lift_photo != NONE && cam.lift_photo < arrayLength(&points) { return photo_quad(v, cam.lift_photo, cam.lift); }
+    var none: VsOut;
+    return none;
 }
 
 // One level of one photo: find its slot on its page, sample inside the photo's part of the slot.
@@ -98,12 +135,26 @@ fn sample_level(id: u32, level: u32, uv: vec2f, shape: vec2f) -> vec3f {
     return textureSampleLevel(pages, pages_sampler, (origin + texel) / PAGE, first_page[level] + slot / per_page, 0.0).rgb;
 }
 
+// Px from `p` to the edge of a rect of this size centred on 0 with corners of radius `r` (negative inside).
+fn rounded(p: vec2f, size: vec2f, r: f32) -> f32 {
+    let q = abs(p) - size * 0.5 + r;
+    return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
-    let inside = in.size * 0.5 - abs(in.local);  // px to the nearest edge, per axis (negative: outside)
-    var cover = clamp(inside.x + 0.5, 0.0, 1.0) * clamp(inside.y + 0.5, 0.0, 1.0);
-    if cam.lens_radius > 0.0 { cover *= clamp(cam.lens_radius - distance(in.pos.xy, cam.lens_at) + 0.5, 0.0, 1.0); }  // inside the lens only
-    if cover <= 0.0 { discard; }
+    let edge = rounded(in.local, in.size, min(CORNER * min(in.size.x, in.size.y), CORNER_MAX));
+    var cover = clamp(0.5 - edge, 0.0, 1.0);
+    var shadow = 0.0;
+    if in.shadow > 0.0 {
+        let d = rounded(in.local - vec2f(0.0, in.shadow / 3.0), in.size, min(CORNER_MAX, 0.5 * min(in.size.x, in.size.y)));
+        shadow = 0.55 * (1.0 - smoothstep(-in.shadow * 0.5, in.shadow, d)) * clamp(in.shadow / 6.0, 0.0, 1.0);
+    }
+    var clip = 1.0;
+    if cam.lens_radius > 0.0 { clip = clamp(cam.lens_radius - distance(in.pos.xy, cam.lens_at) + 0.5, 0.0, 1.0); }  // inside the lens only
+    cover *= clip;
+    shadow *= clip;
+    if cover <= 0.0 && shadow <= 0.0 { discard; }
     let uv = clamp(in.local / in.size + 0.5, vec2f(0.0), vec2f(1.0));
 
     // ideal level: slot size = on-screen size; blend it with the next one up, within what is loaded
@@ -116,10 +167,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     if in.flags != 0u {  // a match: tinted from afar (red to yellow with the match), its picture up close
         let tint = mix(COLD, HOT, f32(in.flags - 1u) / 254.0);
         c = mix(c, tint, 1.0 - smoothstep(TINT_FROM, TINT_UNTIL, in.px));
-        c = mix(tint, c, smoothstep(OUTLINE - 1.0, OUTLINE, min(inside.x, inside.y)));  // the outline, inside the photo's edge
+        c = mix(tint, c, smoothstep(OUTLINE - 1.0, OUTLINE, -edge));  // the outline, inside the photo's edge
     }
-    return vec4f(c * cover, cover);
+    return vec4f(c * cover, cover + (1.0 - cover) * shadow);  // over its shadow (black)
 }
+
 
 // The lens's ground, drawn before the photos it shows: the background inside the circle (covering the map under it), and a soft
 // shadow round it.
