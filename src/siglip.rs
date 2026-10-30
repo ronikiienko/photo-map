@@ -302,6 +302,9 @@ mod tests {
         let hub = models::test_hub();
         for (id, name) in [SIGLIP_BASE_512, models::SIGLIP_BASE_256].into_iter().flat_map(|id| ["data/rare-species/images", "data/wikivoyage/images_zim"].map(|n| (id, n))) {
             let spec = models::spec(id).unwrap();
+            if !spec.installed(&crate::data_root()) {
+                continue;
+            }
             assert_eq!(hub.wait_for(id, &|| false), Ok(true));
             let mut files: Vec<_> = std::fs::read_dir(root.join(name)).unwrap().flatten().map(|e| e.path()).collect();
             files.sort();
