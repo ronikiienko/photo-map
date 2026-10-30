@@ -1985,23 +1985,6 @@ impl Viewer {
             }
         }
 
-        if let (Some(id), Some(c), Some(m), None) = (self.hovered, self.cursor, &self.map, self.menu) {
-            let ppp = ctx.pixels_per_point();
-            let score = m.sims.get(id).copied();
-            egui::Area::new("tip".into()).fixed_pos([c.x / ppp + 14.0, c.y / ppp + 14.0]).interactable(false).show(&ctx, |ui| {
-                // just the name (and how close a match is): the keys are in the help (H)
-                theme::card().inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
-                    ui.set_max_width(320.0);
-                    ui.label(&m.data.photos[id].title);
-                    if let Some(score) = score {
-                        ui.label(theme::muted(format!("similarity {score:.2}")));
-                    }
-                    if self.hovered_copy.is_some() {
-                        ui.label(theme::muted("click: go to it on the map"));
-                    }
-                });
-            });
-        }
     }
 }
 
