@@ -204,7 +204,9 @@ struct Viewer {
     keys: Keys,
     /// The magnifier while Space is held (lens.rs).
     lens: lens::Lens,
+    /// Alt held, as the modifiers say, and as the Alt keys themselves say (in some layouts the modifiers never show Alt).
     alt: bool,
+    alt_key: bool,
     /// Fingers are on the trackpad, scrolling (or the system's momentum after them): the scroll pans instead of zooming.
     scroll_gesture: bool,
     /// The window is minimized or covered: no frames are asked for until it is shown again.
@@ -307,6 +309,7 @@ impl Viewer {
             keys: Keys::default(),
             lens: lens::Lens::default(),
             alt: false,
+            alt_key: false,
             scroll_gesture: false,
             hidden: false,
             help_open: false,
@@ -1043,7 +1046,10 @@ impl Viewer {
             WindowEvent::PinchGesture { delta, .. } if !over_ui && self.page == Page::Viewer => self.camera.pinch(delta as f32),
             WindowEvent::ModifiersChanged(m) => self.alt = m.state().alt_key(),
             WindowEvent::KeyboardInput { event, .. } => {
-                if self.alt && event.state == ElementState::Pressed && !event.repeat && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter)) {
+                if let PhysicalKey::Code(KeyCode::AltLeft | KeyCode::AltRight) = event.physical_key {
+                    self.alt_key = event.state == ElementState::Pressed;
+                }
+                if (self.alt || self.alt_key) && event.state == ElementState::Pressed && !event.repeat && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter)) {
                     return self.toggle_fullscreen();
                 }
                 let typing = self.ui.ctx.egui_wants_keyboard_input() && event.state == ElementState::Pressed;
@@ -1080,6 +1086,7 @@ impl Viewer {
             WindowEvent::Focused(false) => {
                 self.keys = Keys::default();
                 self.lens.held = false;
+                self.alt_key = false; // Alt+Tab away: its release goes to another window
             }
             WindowEvent::Focused(true) => self.window.request_redraw(),
             WindowEvent::Occluded(hidden) => {
