@@ -135,20 +135,20 @@ mod tests {
         let photo = temp.join("a.jpg");
         std::fs::create_dir_all(&maps).unwrap();
         std::fs::write(&photo, b"x").unwrap();
-        map(&maps, "by-gemma", "google/embeddinggemma-2", 768, &photo);
+        map(&maps, "by-siglip-256", "google/siglip2-base-patch16-256", 768, &photo);
         map(&maps, "by-siglip", "google/siglip2-base-patch16-512", 768, &photo); // the same size of vector, another model
         let wanted: HashSet<PathBuf> = [photo.clone()].into();
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000); // the photo is older than the maps
         std::fs::File::options().write(true).open(&photo).unwrap().set_modified(old).unwrap();
 
-        for (model, from) in [("google/embeddinggemma-2", "by-gemma"), ("google/siglip2-base-patch16-512", "by-siglip")] {
+        for (model, from) in [("google/siglip2-base-patch16-256", "by-siglip-256"), ("google/siglip2-base-patch16-512", "by-siglip")] {
             let found = Found::open(&maps, &wanted, model, 768);
             let hit = found.find(&photo).expect("the model's own map has it");
             assert_eq!(found.maps.len(), 1, "the other model's map isn't even opened ({from})");
             assert_eq!(found.row(hit).len(), 768 * 2);
         }
         assert!(Found::open(&maps, &wanted, "some/other-model", 768).find(&photo).is_none(), "no map of that model");
-        assert!(Found::open(&maps, &wanted, "google/embeddinggemma-2", 1024).find(&photo).is_none(), "the size of a vector must match too");
+        assert!(Found::open(&maps, &wanted, "google/siglip2-base-patch16-256", 1024).find(&photo).is_none(), "the size of a vector must match too");
         std::fs::remove_dir_all(&temp).unwrap();
     }
 }

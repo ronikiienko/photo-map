@@ -1,4 +1,4 @@
-//! Making a map from a folder of photos, in this process (no Python): scan, copy, embed with Gemma, lay out, find regions, name them.
+//! Making a map from a folder of photos, in this process (no Python): scan, copy, embed, lay out, find regions, name them.
 //!
 //! A map being made is a folder maps/<name>.building/ that keeps everything done so far, so closing the app (or pausing) loses at
 //! most a few seconds of work:
@@ -25,7 +25,7 @@ use std::time::Instant;
 pub const SHARD: usize = 256;
 /// The photo files a folder is searched for.
 pub const TYPES: [&str; 8] = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff"];
-/// Photos handed to the model at once (Gemma overlaps its photo encoder with its text model inside the group, in fours).
+/// Photos handed to the model at once.
 const BATCH: usize = 16;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -1158,12 +1158,12 @@ mod tests {
             assert!(run.state().error.is_none(), "{:?}", run.state().error);
             finished_dir(&maps, name)
         };
-        let gemma = build("by gemma", models::GEMMA);
+        let other = build("by siglip 256", models::SIGLIP_BASE_256);
         // a row the model would never make, to see whether it is copied
-        let mut raw = fs::read(gemma.join("embeddings.bin")).unwrap();
+        let mut raw = fs::read(other.join("embeddings.bin")).unwrap();
         let marker: Vec<u8> = (0..DIM).flat_map(|d| half::f16::from_f32(if d == 0 { 1.0 } else { 0.0 }).to_le_bytes()).collect();
         raw[..DIM * 2].copy_from_slice(&marker);
-        fs::write(gemma.join("embeddings.bin"), &raw).unwrap();
+        fs::write(other.join("embeddings.bin"), &raw).unwrap();
 
         let siglip = build("by siglip", models::SIGLIP_BASE_512);
         let spec = models::spec(models::SIGLIP_BASE_512).unwrap();

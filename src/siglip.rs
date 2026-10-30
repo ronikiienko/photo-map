@@ -118,7 +118,7 @@ impl Siglip {
     }
 
     /// A text's vector, unit length.
-    pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>> {
+    pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
         let encoding = self.tokenizer.encode(text.to_lowercase(), true).map_err(|e| e.to_string())?;
         let ids: Vec<i64> = encoding.get_ids().iter().map(|&i| i as i64).collect();
         if ids.len() != TOKENS {
@@ -130,17 +130,17 @@ impl Siglip {
     }
 
     /// Is the text longer than the 64 tokens the encoder reads?
-    pub fn cuts(&self, text: &str) -> bool {
+    pub fn query_cut(&self, text: &str) -> bool {
         self.tokenizer.encode(text.to_lowercase(), true).is_ok_and(|e| !e.get_overflowing().is_empty())
     }
 
     pub fn embed_image(&mut self, img: &RgbaImage) -> Result<Vec<f32>> {
         let pixels = prepare(img, self.size)?;
-        self.embed_pixels(vec![pixels]).pop().unwrap()
+        self.embed_prepared(vec![pixels]).pop().unwrap()
     }
 
     /// Prepared photos (see `prepare`), a few at a time.
-    pub fn embed_pixels(&mut self, photos: Vec<Vec<f32>>) -> Vec<Result<Vec<f32>>> {
+    pub fn embed_prepared(&mut self, photos: Vec<Vec<f32>>) -> Vec<Result<Vec<f32>>> {
         let n = photos.len();
         let mut out: Vec<Result<Vec<f32>>> = Vec::with_capacity(n);
         let mut photos = photos.into_iter().peekable();
@@ -236,7 +236,7 @@ mod tests {
     #[ignore]
     fn models_swap() {
         let hub = models::test_hub();
-        for id in [SIGLIP_BASE_512, models::GEMMA, models::SIGLIP_BASE_256, SIGLIP_BASE_512, models::GEMMA] {
+        for id in [SIGLIP_BASE_512, models::SIGLIP_BASE_256, SIGLIP_BASE_512] {
             assert_eq!(hub.wait_for(id, &|| false), Ok(true));
             let dim = hub.with(id, |m: &mut Model| m.embed_query("a dog on a beach").unwrap().len()).unwrap();
             assert_eq!(dim, models::spec(id).unwrap().dim, "{id}");

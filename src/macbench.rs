@@ -1,7 +1,7 @@
 //! Speed and accuracy of the models on whatever the machine has, for the photos in `.cache/photos/` (any folder of real photos
 //! will do: BENCH_PHOTOS). One process measures one setting, since ONNX Runtime allows one environment in a process:
 //!
-//!   BENCH_MODEL=gemma|s512|s256 BENCH_TAG=name [BENCH_N=96] [BENCH_BATCH=4] [BENCH_REF=tag] PHOTO_MAP_COREML=off|cpu|gpu|ane|all \
+//!   BENCH_MODEL=s256|s512 BENCH_TAG=name [BENCH_N=96] [BENCH_BATCH=4] [BENCH_REF=tag] PHOTO_MAP_COREML=off|cpu|gpu|ane|all \
 //!   cargo test --release mac_embed_speed -- --ignored --nocapture
 //!
 //! The vectors go to `.cache/bench/<tag>.f32`; with BENCH_REF the cosine to the vectors of that tag is printed (lowest and mean).
@@ -29,8 +29,7 @@ fn mac_embed_speed() {
     let root = crate::data_root();
     let id = match std::env::var("BENCH_MODEL").as_deref() {
         Ok("s512") => models::SIGLIP_BASE_512,
-        Ok("s256") => models::SIGLIP_BASE_256,
-        _ => models::GEMMA,
+        _ => models::SIGLIP_BASE_256,
     };
     let env_num = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let (n, batch) = (env_num("BENCH_N", 96), env_num("BENCH_BATCH", 4));

@@ -91,11 +91,6 @@ pub fn vectors(
         dir.join(format!("curated2.{name}.f16")),
         dir.join(format!("curated2.{name}.key")),
     );
-    // the cache from before models could be chosen was Gemma's
-    if model == crate::models::GEMMA && !bin.exists() {
-        let _ = std::fs::rename(dir.join("curated2.f16"), &bin);
-        let _ = std::fs::rename(dir.join("curated2.key"), &stamp);
-    }
     let want = key(phrases).to_string();
     if std::fs::read_to_string(&stamp).ok().as_deref() == Some(want.as_str()) {
         if let Ok(raw) = std::fs::read(&bin) {

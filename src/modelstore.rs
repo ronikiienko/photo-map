@@ -155,12 +155,6 @@ fn leftovers(root: &Path, spec: &Spec) -> Vec<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(root.join(".cache/vocab")) {
         found.extend(entries.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().contains(&format!(".{slug}.")))));
     }
-    if spec.id == models::GEMMA {
-        // TensorRT's engines for Gemma are files in .cache/trt itself (the SigLIP ones are in folders of their own)
-        if let Ok(entries) = std::fs::read_dir(root.join(".cache/trt")) {
-            found.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_file()));
-        }
-    }
     found.sort();
     found.dedup();
     found

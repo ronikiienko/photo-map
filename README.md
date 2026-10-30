@@ -17,6 +17,6 @@ Build and run: `cargo run --release`. It is plain Rust: no C compiler, cmake or 
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.
 
-The models the app runs (EmbeddingGemma 2, SigLIP 2) and the libraries it downloads (ONNX Runtime, NVIDIA CUDA, cuDNN, TensorRT) are not part of this repository and have their own licenses.
+The models the app runs (SigLIP 2) and the libraries it downloads (ONNX Runtime, NVIDIA CUDA, cuDNN, TensorRT) are not part of this repository and have their own licenses.
 
 `assets/places.zip` is made from [GeoNames](https://www.geonames.org/) data (cities1000, admin1 codes, country info), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

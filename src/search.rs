@@ -5,7 +5,7 @@
 //! Only the pictures are searched, never the captions (captions.bin, which older maps have, is not read). Measured on Wikivoyage
 //! (4,139 photos with their real captions): with SigLIP, words are much closer to any caption than to any picture (a typical
 //! caption 0.70 like "church", the best picture 0.15), so a caption decided every match, and SigLIP judges text against text
-//! poorly ("seal": Carp, shore, Woodpecker). With Gemma both were alike and captions helped only with names a picture can't show.
+//! poorly ("seal": Carp, shore, Woodpecker).
 
 use crate::models::{self, Hub, Model};
 use half::f16;
@@ -149,47 +149,5 @@ impl Vectors {
     /// One photo's vector.
     pub fn row(&self, i: usize) -> Vec<f32> {
         self.images[i * self.dim * 2..(i + 1) * self.dim * 2].chunks_exact(2).map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32()).collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A real map and Python's answer for the same words (/tmp/wv_ref.*, made by hand; the test is skipped without them; its
-    /// u16 file has the n picture cosines as 0..1 in 0..65535, then the captions', not used): the picture cosines agree to within the noise of fp16 vs bf16, and the best photos are the same.
-    #[test]
-    fn wikivoyage_matches_python() {
-        let root = &crate::data_root();
-        let bundle = root.join("maps/wikivoyage.photomap");
-        let Ok(answer) = std::fs::read(std::path::Path::new("/tmp/wv_ref.json")) else { return };
-        let query = serde_json::from_slice::<serde_json::Value>(&answer).unwrap()["query"].as_str().unwrap().to_string();
-        let n = 88133;
-        let Some(vectors) = Vectors::open(&bundle, n, 768) else { return };
-        let python: Vec<u16> = std::fs::read(std::path::Path::new("/tmp/wv_ref.u16")).unwrap().chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        let shared = crate::models::test_hub();
-        let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let model = guard.as_mut().unwrap();
-        let started = std::time::Instant::now();
-        let vector = model.embed_query(&query).unwrap();
-        let embedded = started.elapsed();
-        let started = std::time::Instant::now();
-        let mine: Vec<u16> = vectors.cosines(&vector).into_iter().map(|c| (c.clamp(0.0, 1.0) * 65535.0).round() as u16).collect();
-        let python = &python[..n];
-        eprintln!("{query:?}: query {embedded:?}, {n} photos compared in {:?}", started.elapsed());
-        assert_eq!(mine.len(), python.len());
-        let worst = mine.iter().zip(python).map(|(&a, &b)| (a as i32 - b as i32).abs()).max().unwrap();
-        eprintln!("largest difference {:.4} in cosine", worst as f32 / 65535.0);
-        let top = |v: &[u16]| {
-            let mut idx: Vec<usize> = (0..n).collect();
-            idx.sort_by_key(|&i| std::cmp::Reverse(v[i]));
-            idx.truncate(30);
-            idx
-        };
-        let (a, b) = (top(&mine), top(python));
-        let shared = a.iter().filter(|i| b.contains(i)).count();
-        eprintln!("{shared} of the best 30 photos are the same");
-        assert!(worst < 1500, "cosines differ by up to {}", worst as f32 / 65535.0);
-        assert!(shared >= 24);
     }
 }
