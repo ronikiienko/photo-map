@@ -64,7 +64,7 @@ impl Stage {
         match self {
             Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and links each one into the map: on the same disk a hard link (the same data, no second copy), on another disk a link to where the photo is. Nothing is changed in your folders, and no space is taken.",
             Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. This is the slow part, because every photo goes through the model on the graphics card.",
-            Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP).",
+            Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP). Last, photos that would cover each other are moved apart a little, so that every photo can be seen.",
             Stage::Tree => "Joins all the photos into one tree by the shortest links between them (the most similar pairs). A path between two photos (right-click one on the map) follows this tree: of all the ways from one to the other, it is the one whose biggest change from photo to photo is the smallest. Each photo is compared with the photos in the parts of the map nearest to it, not with all of them.",
             Stage::Regions => "Groups the photos on the map into areas, from a few big ones down to small ones of about 10 photos. The groups are made from neighbours on the map, so each area is one connected piece. Zooming in shows the finer ones.",
             Stage::Names => "Gives each area a name. About 4,500 common phrases (\"a beach\", \"old buildings\"...) are run through the same model; the phrase whose vector is closest to the area's average vector is its name.",
@@ -102,6 +102,9 @@ pub struct Job {
     /// either way a job can carry on).
     #[serde(default)]
     pub copy_photos: bool,
+    /// A photo's longer side on the map (world units), set by the layout: the photos are spread to it (data::spread).
+    #[serde(default)]
+    pub photo_side: Option<f32>,
 }
 
 fn default_model() -> String {
@@ -193,7 +196,7 @@ pub fn create(maps: &Path, name: &str, sources: &[PathBuf], every: usize, model:
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, sources, created, stage: Stage::Scan, photos: 0, every: every.max(1), model: model.to_string(), copy_photos }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, sources, created, stage: Stage::Scan, photos: 0, every: every.max(1), model: model.to_string(), copy_photos, photo_side: None }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -783,8 +786,13 @@ fn lay_out(ctx: &mut Ctx) -> Result<Flow, String> {
     let vectors = ndarray::Array2::from_shape_vec((n, ctx.dim()), read_vectors(&ctx.dir, n, ctx.dim())?).map_err(|e| e.to_string())?;
     let xy = crate::layout::layout(vectors, &|what, done, total| ctx.progress(done, total, what), &|| ctx.paused())?;
     let Some(xy) = xy else { return Ok(Flow::Paused) };
-    let bytes: Vec<u8> = xy.iter().flat_map(|v| v.to_le_bytes()).collect();
+    // moved apart so that no photo covers another, at the size the viewer will draw them
+    let points: &[crate::data::Point] = bytemuck::cast_slice(&xy);
+    let side = crate::median_neighbour_distance(points);
+    let points = crate::data::spread(points, side);
+    let bytes: Vec<u8> = points.iter().flat_map(|p| [p.x, p.y]).flat_map(|v| v.to_le_bytes()).collect();
     write_atomic(&ctx.dir.join("layout.bin"), &bytes).map_err(|e| e.to_string())?;
+    ctx.job.photo_side = Some(side);
     Ok(Flow::Done)
 }
 
@@ -865,7 +873,7 @@ fn bake_pages(ctx: &mut Ctx) -> Result<Flow, String> {
 }
 
 fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
-    let manifest = serde_json::json!({
+    let mut manifest = serde_json::json!({
         "format": 1,
         "name": ctx.job.name,
         "created": ctx.job.created,
@@ -873,6 +881,9 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
         "world": crate::data::WORLD as u32,
         "embedding": { "model": ctx.job.model, "dim": ctx.dim(), "dtype": "float16", "input": "image" },
     });
+    if let Some(side) = ctx.job.photo_side {
+        manifest["photo_side"] = side.into();
+    }
     write_atomic(&ctx.dir.join("manifest.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let maps = ctx.dir.parent().ok_or("no maps folder")?;
     let target = finished_dir(maps, &ctx.job.name);
@@ -889,6 +900,59 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spreads the layout of maps made before the layout was spread (data::spread), in place: layout.bin (the old one kept as
+    /// layout.unspread.bin), the region names' places (each sits on a photo: it goes where the photo went) and photo_side in
+    /// manifest.json. cargo test --release spread_made_maps -- --ignored --nocapture (PHOTO_MAP_MAPS: the maps folder, else maps/)
+    #[test]
+    #[ignore]
+    fn spread_made_maps() {
+        let maps = std::env::var_os("PHOTO_MAP_MAPS").map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("maps"), PathBuf::from);
+        for entry in fs::read_dir(&maps).unwrap() {
+            let dir = entry.unwrap().path();
+            let Ok(raw) = fs::read(dir.join("manifest.json")) else { continue };
+            let mut manifest: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            if manifest.get("photo_side").is_some() {
+                eprintln!("{}: spread already", dir.display());
+                continue;
+            }
+            let before: Vec<crate::data::Point> = bytemuck::pod_collect_to_vec(&fs::read(dir.join("layout.bin")).unwrap());
+            let side = crate::median_neighbour_distance(&before);
+            let after = crate::data::spread(&before, side);
+            let moved = before.iter().zip(&after).filter(|(a, b)| a.x != b.x || a.y != b.y).count();
+            // a label's place is its region's most central photo's
+            let mut place = std::collections::HashMap::new();
+            for (a, b) in before.iter().zip(&after) {
+                place.entry((a.x.to_bits(), a.y.to_bits())).or_insert(*b);
+            }
+            let mut labels = Vec::new();
+            for name in ["region_names.json", "regions.json"] {
+                let Ok(raw) = fs::read(dir.join(name)) else { continue };
+                let mut regions: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                let (mut found, mut all) = (0, 0);
+                for level in regions["levels"].as_array_mut().unwrap() {
+                    for label in level.as_array_mut().unwrap() {
+                        all += 1;
+                        let at = (label["x"].as_f64().unwrap() as f32, label["y"].as_f64().unwrap() as f32);
+                        if let Some(p) = place.get(&(at.0.to_bits(), at.1.to_bits())) {
+                            (label["x"], label["y"]) = (p.x.into(), p.y.into());
+                            found += 1;
+                        }
+                    }
+                }
+                labels.push((name, regions, found, all));
+            }
+            fs::copy(dir.join("layout.bin"), dir.join("layout.unspread.bin")).unwrap();
+            write_atomic(&dir.join("layout.bin"), bytemuck::cast_slice(&after)).unwrap();
+            for (name, regions, found, all) in &labels {
+                write_atomic(&dir.join(name), &serde_json::to_vec(regions).unwrap()).unwrap();
+                eprintln!("  {name}: {found} of {all} labels moved with their photo");
+            }
+            manifest["photo_side"] = side.into();
+            write_atomic(&dir.join("manifest.json"), &serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+            eprintln!("{}: {moved} of {} photos moved, side {side:.2}", dir.display(), before.len());
+        }
+    }
 
     const DIM: usize = 768;
 

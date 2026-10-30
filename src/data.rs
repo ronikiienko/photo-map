@@ -53,6 +53,10 @@ pub struct Manifest {
     pub photos: usize,
     #[serde(default)]
     embedding: Embedding,
+    /// A photo's longer side on the map, world units: set when the layout was spread (spread) while the map was made. A map made
+    /// before has its photos spread when it is opened.
+    #[serde(default)]
+    photo_side: Option<f32>,
 }
 
 /// What the vectors of a map are: which model made them, and how many numbers each has. A map without it (made before models could
@@ -141,6 +145,8 @@ pub struct MapData {
     pub manifest: Manifest,
     pub photos: Vec<Photo>,
     pub points: Vec<Point>,
+    /// A photo's longer side on the map (world units): the median distance to the nearest photo before they were spread.
+    pub side: f32,
     /// The always-loaded levels as BC7 pages (bake.rs), uploaded to the GPU as they are.
     pub pages: Mmap,
     pub grid: Grid,
@@ -163,12 +169,19 @@ impl MapData {
         if pages.len() != crate::pages::resident_bytes(n) {
             return Err(std::io::Error::other("pages_bc7.bin is not the size of the photos"));
         }
+        let (side, points) = match manifest.photo_side {
+            Some(side) => (side, points),
+            None => {
+                let side = crate::median_neighbour_distance(&points);
+                (side, spread(&points, side))
+            }
+        };
         let grid = Grid::new(&points);
         let mut regions: Regions = read("region_names.json").or_else(|_| read("regions.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for level in &mut regions.levels {
             level.sort_by(|a, b| b.photos.cmp(&a.photos));
         }
-        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, pages, grid, regions })
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, side, pages, grid, regions })
     }
 
     pub fn n(&self) -> usize {
@@ -196,6 +209,40 @@ impl MapData {
         glam::Vec2::new(p.width as f32, p.height as f32) / self.native_long(id).max(1) as f32
     }
 }
+
+/// The photos moved apart so that none covers another: in turn, each stays where it is if its square (`side`, the photos' longer side on
+/// the map) overlaps none placed before, else it goes to the nearest spot that is free, on rings around it. No grid: a grid shimmers
+/// when zoomed out. Measured on three maps: 36-39% of photos move, half of them by under 0.75 of a side, the farthest 2-6 sides;
+/// 88-97% keep their 10 nearest.
+pub fn spread(points: &[Point], side: f32) -> Vec<Point> {
+    let g = side * GAP;
+    let mut placed: std::collections::HashMap<(i32, i32), Vec<Point>> = std::collections::HashMap::with_capacity(points.len());
+    let square = |p: Point| ((p.x / g).floor() as i32, (p.y / g).floor() as i32);
+    let free = |placed: &std::collections::HashMap<(i32, i32), Vec<Point>>, p: Point| {
+        let (cx, cy) = square(p);
+        (cy - 1..=cy + 1).all(|y| (cx - 1..=cx + 1).all(|x| placed.get(&(x, y)).is_none_or(|v| v.iter().all(|q| (q.x - p.x).abs().max((q.y - p.y).abs()) >= g))))
+    };
+    points
+        .iter()
+        .map(|&p| {
+            let mut at = p;
+            // rings a quarter of the gap apart, points on each a quarter of the gap apart
+            let mut r = 0.0;
+            while !free(&placed, at) {
+                r += g * 0.25;
+                let steps = ((std::f32::consts::TAU * r / (g * 0.25)) as usize).max(6);
+                if let Some(q) = (0..steps).map(|k| k as f32 * std::f32::consts::TAU / steps as f32).map(|a| Point { x: p.x + r * a.cos(), y: p.y + r * a.sin() }).find(|&q| free(&placed, q)) {
+                    at = q;
+                }
+            }
+            placed.entry(square(at)).or_default().push(at);
+            at
+        })
+        .collect()
+}
+
+/// How close two photos' centres may be along x or y, in photo sizes (1: they may touch).
+const GAP: f32 = 1.0;
 
 /// G x G cells over the world; each cell lists the photos inside it.
 pub struct Grid {
@@ -245,6 +292,31 @@ impl Grid {
                         f(i as usize);
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Photos piled on one spot end up side by side, near where they were; photos apart enough stay where they are.
+    #[test]
+    fn spread_photos_hide_none() {
+        let side = 10.0;
+        let mut points: Vec<Point> = (0..200).map(|_| Point { x: 500.0, y: 500.0 }).collect();
+        points.extend((0..300).map(|i| Point { x: (i % 20) as f32 * 3.0 + 100.0, y: (i / 20) as f32 * 3.0 + 100.0 }));
+        points.extend((0..50).map(|i| Point { x: 900.0 + i as f32 * side, y: 900.0 }));
+        let spread = spread(&points, side);
+        for (i, a) in spread.iter().enumerate() {
+            for b in &spread[i + 1..] {
+                assert!((a.x - b.x).abs().max((a.y - b.y).abs()) >= side * 0.999, "overlap");
+            }
+            let moved = ((a.x - points[i].x).powi(2) + (a.y - points[i].y).powi(2)).sqrt();
+            assert!(moved < side * 12.0, "{i} moved {moved}");
+            if i >= 500 {
+                assert_eq!(moved, 0.0, "{i} was apart enough");
             }
         }
     }

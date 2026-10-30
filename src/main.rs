@@ -344,7 +344,7 @@ impl Viewer {
         self.window.set_title(&format!("{} — photo map", data.manifest.name));
         self.camera.jump(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
         let n = data.n();
-        let photo_world = median_neighbour_distance(&data.points);
+        let photo_world = data.side;
         self.status.clear();
         // the last map's search is over with it: its words, its photo, and what the box said it was
         self.search.clear();
