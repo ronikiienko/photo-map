@@ -53,7 +53,7 @@ use stream::Streamer;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 /// Side of a photo square in world units is the median distance between nearest neighbours: a map of 12,000 photos
@@ -928,14 +928,14 @@ impl Viewer {
         self.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
     }
 
-    fn key(&mut self, key: &Key, down: bool) {
-        if let (true, Key::Named(NamedKey::F11)) = (down, key) {
+    fn key(&mut self, key: KeyCode, down: bool) {
+        if let (true, KeyCode::F11) = (down, key) {
             return self.toggle_fullscreen();
         }
         if self.page != Page::Viewer {
             return;
         }
-        if let (true, Key::Named(NamedKey::Escape)) = (down, key) {
+        if let (true, KeyCode::Escape) = (down, key) {
             if self.menu.is_some() {
                 self.menu = None;
             } else if self.details.is_some() {
@@ -950,44 +950,35 @@ impl Viewer {
             }
             return;
         }
-        if let (true, Key::Character(c)) = (down, key) {
-            match c.as_str() {
-                "n" | "N" | "]" => return self.step_match(1),
-                "p" | "P" | "[" => return self.step_match(-1),
-                "h" | "H" => {
+        if down {
+            match key {
+                KeyCode::KeyN | KeyCode::BracketRight => return self.step_match(1),
+                KeyCode::KeyP | KeyCode::BracketLeft => return self.step_match(-1),
+                KeyCode::KeyH => {
                     self.help_open = !self.help_open;
                     return;
                 }
                 _ => {}
             }
         }
-        if let Key::Character(c) = key {
-            if c.eq_ignore_ascii_case("f") {
-                if let (true, Some(i)) = (down, self.hovered) {
-                    self.ask_like(i);
-                }
-                return;
+        if key == KeyCode::KeyF {
+            if let (true, Some(i)) = (down, self.hovered) {
+                self.ask_like(i);
             }
+            return;
         }
-        if *key == Key::Named(NamedKey::Space) {
+        if key == KeyCode::Space {
             self.lens.held = down && self.page == Page::Viewer;
             return;
         }
         let k = &mut self.keys;
         match key {
-            Key::Named(NamedKey::ArrowLeft) => k.left = down,
-            Key::Named(NamedKey::ArrowRight) => k.right = down,
-            Key::Named(NamedKey::ArrowUp) => k.up = down,
-            Key::Named(NamedKey::ArrowDown) => k.down = down,
-            Key::Character(c) => match c.to_lowercase().as_str() {
-                "a" => k.left = down,
-                "d" => k.right = down,
-                "w" => k.up = down,
-                "s" => k.down = down,
-                "e" | "=" | "+" => k.zoom_in = down,
-                "q" | "-" => k.zoom_out = down,
-                _ => {}
-            },
+            KeyCode::ArrowLeft | KeyCode::KeyA => k.left = down,
+            KeyCode::ArrowRight | KeyCode::KeyD => k.right = down,
+            KeyCode::ArrowUp | KeyCode::KeyW => k.up = down,
+            KeyCode::ArrowDown | KeyCode::KeyS => k.down = down,
+            KeyCode::KeyE | KeyCode::Equal | KeyCode::NumpadAdd => k.zoom_in = down,
+            KeyCode::KeyQ | KeyCode::Minus | KeyCode::NumpadSubtract => k.zoom_out = down,
             _ => {}
         }
     }
@@ -1052,14 +1043,16 @@ impl Viewer {
             WindowEvent::PinchGesture { delta, .. } if !over_ui && self.page == Page::Viewer => self.camera.pinch(delta as f32),
             WindowEvent::ModifiersChanged(m) => self.alt = m.state().alt_key(),
             WindowEvent::KeyboardInput { event, .. } => {
-                if self.alt && event.state == ElementState::Pressed && !event.repeat && event.logical_key == Key::Named(NamedKey::Enter) {
+                if self.alt && event.state == ElementState::Pressed && !event.repeat && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter)) {
                     return self.toggle_fullscreen();
                 }
                 let typing = self.ui.ctx.egui_wants_keyboard_input() && event.state == ElementState::Pressed;
+                // by where the key is, not what it types: the shortcuts work in any keyboard layout
+                let PhysicalKey::Code(code) = event.physical_key else { return };
                 if !typing && !egui_took {
-                    self.key(&event.logical_key, event.state == ElementState::Pressed);
+                    self.key(code, event.state == ElementState::Pressed);
                 } else if event.state == ElementState::Released {
-                    self.key(&event.logical_key, false); // never leave a key stuck down
+                    self.key(code, false); // never leave a key stuck down
                 }
             }
             WindowEvent::HoveredFile(_) if self.page == Page::Maps => {
