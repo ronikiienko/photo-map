@@ -73,9 +73,9 @@ struct NewMap {
     count: Option<Receiver<(usize, bool)>>,
     /// How many photos the sources hold, all of them.
     photos: Option<usize>,
-    /// Some of the sources are on another disk: their photos can't be hard linked.
+    /// Some of the sources are on another disk (the note under the copy option says so).
     other_disk: bool,
-    /// Photos on another disk are copied into the map instead of linked to where they are.
+    /// The photos are copied into the map instead of read where they are.
     copy_photos: bool,
     /// Use every Nth photo.
     every: usize,
@@ -524,7 +524,7 @@ impl Home {
             if sizes.linked > 0 {
                 ui.separator();
                 ui.label(RichText::new(format!("{} of photos are links, not copies", storage::human(sizes.linked))).strong());
-                ui.label(theme::muted("The map was made from photos on the same disk, so instead of copying them it points at the originals. They take no extra space here, and they are not counted above. If you delete or move the originals, the map keeps its own link to the data, so it still works."));
+                ui.label(theme::muted("The map was made from photos on the same disk, so instead of copying them it shares their data with the originals: they take no extra space while the originals are there, and they are not counted above. If you delete or move the originals, the map still works, but deleting them frees no space while the map is there: the space is freed when the map is deleted too (photos whose original is gone are counted above, as the map's own)."));
             }
             if sizes.elsewhere > 0 || sizes.unreachable > 0 {
                 ui.separator();
@@ -699,13 +699,13 @@ impl Home {
                 ui.label(theme::muted("Counting photos…"));
             } else if let Some(n) = nm.photos {
                 ui.label(theme::muted(if nm.every > 1 { format!("{} photos found, {} of them used", thousands(n), thousands(n.div_ceil(nm.every))) } else { format!("{} photos found", thousands(n)) }));
-                if nm.other_disk && n > 0 {
+                if n > 0 {
                     ui.add_space(6.0);
-                    ui.checkbox(&mut nm.copy_photos, "Copy the photos into the map").on_hover_text("They take space here as well, and the map shows them at full size without the other disk.");
-                    ui.label(theme::muted(if nm.copy_photos {
-                        "The photos are on another disk: they will be copied into the map."
-                    } else {
-                        "The photos are on another disk, so the map will point at them where they are instead of copying them. Zoomed out, it works without that disk; to see a photo at full size, the disk must be plugged in and the photo where it was."
+                    ui.checkbox(&mut nm.copy_photos, "Copy the photos into the map").on_hover_text("They take space here as well, and the map shows them at full size whatever happens to the originals.");
+                    ui.label(theme::muted(match (nm.copy_photos, nm.other_disk) {
+                        (true, _) => "The photos will be copied into the map: they take space here as well, and stay sharp at full size even if the originals are moved or deleted.",
+                        (false, false) => "The map will read the photos where they are and take no space for them. Zoomed out it always works; at full size, a photo that has been moved or deleted shows as not found.",
+                        (false, true) => "The photos are on another disk: the map will read them there and take no space for them. Zoomed out it works without that disk; to see a photo at full size, the disk must be plugged in and the photo where it was.",
                     }));
                 }
             }
@@ -1111,15 +1111,15 @@ fn duration(secs: f32) -> String {
     }
 }
 
-/// The cover of a map: read cover.png if it is there, else make it from the first four photos and keep it.
+/// The cover of a map: read cover.png if it is there, else make it from the first four photos it can read and keep it.
 fn cover_image(map: &Path) -> Option<egui::ColorImage> {
     let file = map.join("cover.png");
     let img = match image::open(&file) {
         Ok(i) => i.to_rgba8(),
         Err(_) => {
             const SIZE: u32 = 384;
-            let mut paths: Vec<PathBuf> = std::fs::read_dir(map.join("originals")).ok()?.flatten().map(|e| e.path()).take(64).collect();
-            paths.sort();
+            let photos: Vec<crate::data::Photo> = serde_json::from_slice(&std::fs::read(map.join("photos.json")).ok()?).ok()?;
+            let paths = photos.iter().take(64).map(|p| p.path(map));
             let mut mosaic = image::RgbaImage::from_pixel(SIZE, SIZE, image::Rgba([32, 35, 44, 255]));
             let mut put = 0;
             for p in paths {

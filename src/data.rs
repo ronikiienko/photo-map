@@ -1,8 +1,8 @@
 //! A map bundle, plus a spatial grid for "which photo is under the mouse". Bundles are made in Python
 //! (src/photomap.py: maps/<name>.photomap/):
 //!     manifest.json   name, photo count
-//!     photos.json     per photo: file (originals/NNNNNN.ext), source, width, height, title, caption (optional), meta (any strings, for people to read)
-//!     originals/      the images; photo i = position i in photos.json
+//!     photos.json     per photo: file (originals/NNNNNN.ext if copied into the map, else empty), source, width, height, title, caption (optional), meta (any strings, for people to read)
+//!     originals/      the photos copied into the map (maps made before kept links to all of them here); photo i = position i in photos.json
 //!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
 //!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
 //!     embeddings.bin  per photo: float16 vector of the picture (search, Axes and Groups)
@@ -97,11 +97,11 @@ impl Manifest {
 
 #[derive(Deserialize)]
 pub struct Photo {
-    /// Path inside the bundle (originals/NNNNNN.ext).
+    /// Path inside the bundle (originals/NNNNNN.ext) if the photo was copied into the map; empty: it is read at `source`.
     pub file: String,
-    /// The full path of the file the photo was made from. Builds use it to find vectors already made for the same file (reuse.rs).
+    /// The full path of the file the photo was made from: where it is read from if it wasn't copied. Builds use it to find vectors
+    /// already made for the same file (reuse.rs).
     #[serde(default)]
-    #[allow(dead_code)]
     pub source: String,
     pub width: u32,
     pub height: u32,
@@ -111,8 +111,14 @@ pub struct Photo {
     pub caption: String,
     /// Whatever the image file said about itself: description, date taken, camera, location...
     #[serde(default)]
-    #[allow(dead_code)] // not shown yet
     pub meta: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Photo {
+    /// Where the photo is read from: its copy in the map `bundle`, else where it came from.
+    pub fn path(&self, bundle: &Path) -> PathBuf {
+        if self.file.is_empty() { PathBuf::from(&self.source) } else { bundle.join(&self.file) }
+    }
 }
 
 /// A named area of the map (regions.json).
@@ -195,7 +201,7 @@ impl MapData {
     }
 
     pub fn path(&self, id: usize) -> PathBuf {
-        self.bundle.join(&self.photos[id].file)
+        self.photos[id].path(&self.bundle)
     }
 
     /// Longer side of the original, in pixels.

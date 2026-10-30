@@ -12,6 +12,7 @@ mod camera;
 mod cells;
 mod data;
 mod embed;
+mod files;
 mod gpu;
 mod groups;
 mod home;
@@ -30,6 +31,7 @@ mod pages;
 mod regions;
 mod reuse;
 mod photo;
+mod places;
 mod search;
 mod siglip;
 mod storage;
@@ -199,6 +201,8 @@ struct Viewer {
     hovered_copy: Option<usize>,
     /// The right-click menu: for which photo, and where (points).
     menu: Option<(usize, egui::Pos2)>,
+    /// "Details" was chosen in the menu: the photo, where the card goes, and its lines (files::details).
+    details: Option<(usize, egui::Pos2, files::Details)>,
     /// "Path from here" was chosen on this photo: the path's end is picked next.
     path_from: Option<usize>,
     /// The region names drawn last frame, where on screen (points) and which (level, number in the level): a click on one zooms to its region.
@@ -288,6 +292,7 @@ impl Viewer {
             hovered: None,
             hovered_copy: None,
             menu: None,
+            details: None,
             path_from: None,
             label_rects: Vec::new(),
             search: String::new(),
@@ -836,7 +841,7 @@ impl Viewer {
 
     /// F over a photo: the same as dropping that photo's file on the window (it goes in the search box and is searched).
     fn ask_like(&mut self, photo: usize) {
-        let Some(file) = self.map.as_ref().map(|m| m.path.join(&m.data.photos[photo].file)) else { return };
+        let Some(file) = self.map.as_ref().map(|m| m.data.path(photo)) else { return };
         if self.set_photo(file) {
             self.ask();
         }
@@ -883,6 +888,8 @@ impl Viewer {
         if let (true, Key::Named(NamedKey::Escape)) = (down, key) {
             if self.menu.is_some() {
                 self.menu = None;
+            } else if self.details.is_some() {
+                self.details = None;
             } else if self.path_from.is_some() {
                 self.path_from = None;
                 self.status.clear();
@@ -954,6 +961,7 @@ impl Viewer {
             WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
                 ElementState::Pressed if !over_ui && self.page == Page::Viewer => {
                     self.menu = None;
+                    self.details = None;
                     self.camera.press();
                 }
                 ElementState::Released if self.camera.dragging() => {
@@ -1396,6 +1404,31 @@ impl Viewer {
         }
     }
 
+    /// A photo whose file can't be found (moved, deleted, or on a disk not plugged in) is darkened once it is big enough to want it,
+    /// with "not found" on it: what shows is its small picture made when the map was, blown up.
+    fn draw_missing(&self, ctx: &egui::Context) {
+        let Some(m) = &self.map else { return };
+        let ppp = ctx.pixels_per_point();
+        let long = self.size_px() / ppp;
+        if long < 48.0 {
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "missing photos".into()));
+        let (view_min, view_max) = (self.camera.to_world(Vec2::ZERO), self.camera.to_world(self.camera.viewport));
+        m.data.grid.within(&m.data.points, view_min, view_max, |i| {
+            if !m.streamer.missing(i) {
+                return;
+            }
+            let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
+            let size = m.data.shape(i) * long;
+            let rect = egui::Rect::from_center_size(egui::pos2(at.x, at.y), egui::vec2(size.x, size.y));
+            painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(190));
+            if size.x >= 70.0 {
+                painter.text(rect.center(), egui::Align2::CENTER_CENTER, "not found", egui::FontId::proportional((size.x / 8.0).clamp(11.0, 18.0)), egui::Color32::from_gray(200));
+            }
+        });
+    }
+
     /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view
     /// and only when they are big, so it costs nothing when zoomed out. A caption that would overlap one already drawn is skipped.
     fn draw_photo_captions(&self, ctx: &egui::Context) {
@@ -1487,6 +1520,7 @@ impl Viewer {
         if SHOW_REGION_NAMES {
             self.draw_labels(&ctx);
         }
+        self.draw_missing(&ctx);
         self.draw_photo_captions(&ctx);
         self.draw_beside(&ctx);
 
@@ -1755,11 +1789,73 @@ impl Viewer {
                     if theme::button(ui, egui::Button::new("Photos like this")).on_hover_text("search with this photo (F)").clicked() {
                         actions.like = Some(photo);
                     }
+                    ui.separator();
+                    let file = files::original(&m.data, photo);
+                    let source = &m.data.photos[photo].source;
+                    let tip = if file.as_os_str() == source.as_str() || source.is_empty() { file.display().to_string() } else { format!("{source} is not there any more: the map's own copy, {}", file.display()) };
+                    if theme::button(ui, egui::Button::new("Show in folder")).on_hover_text(tip).clicked() {
+                        files::show_in_folder(&file);
+                        actions.done = true;
+                    }
+                    if theme::button(ui, egui::Button::new("Open")).on_hover_text("in the app your system opens it with").clicked() {
+                        files::open(&file);
+                        actions.done = true;
+                    }
+                    if theme::button(ui, egui::Button::new("Details")).on_hover_text("file, date taken, camera, place").clicked() {
+                        actions.details = Some((photo, at));
+                    }
                 });
             });
         }
-        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() {
+        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.details.is_some() || actions.done {
             self.menu = None;
+        }
+        if let (Some((photo, at)), Some(m)) = (actions.details, &self.map) {
+            self.details = Some((photo, at, files::details(&m.data, photo)));
+        }
+        if let (Some((photo, at, details)), Some(m)) = (&self.details, &self.map) {
+            let mut close = false;
+            let root = self.library.root();
+            egui::Area::new("photo details".into()).fixed_pos(*at + egui::vec2(4.0, 4.0)).order(egui::Order::Foreground).constrain(true).show(&ctx, |ui| {
+                theme::card().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+                    ui.set_max_width(420.0);
+                    close = theme::window_header(ui, &m.data.photos[*photo].title);
+                    egui::Grid::new("details grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                        for (name, value) in &details.lines {
+                            ui.label(theme::muted(name));
+                            match details.place {
+                                Some((lat, lon)) if name == "Place" => {
+                                    let (place, waiting) = places::describe(&root, lat, lon);
+                                    if waiting {
+                                        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.add(egui::Label::new(place).wrap()).on_hover_text("the nearest town; place names from GeoNames (geonames.org)");
+                                        ui.label(theme::muted(format!("{lat:.5}, {lon:.5}")));
+                                    });
+                                }
+                                _ => {
+                                    ui.add(egui::Label::new(value).wrap());
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let file = files::original(&m.data, *photo);
+                        if theme::button(ui, egui::Button::new("Show in folder")).clicked() {
+                            files::show_in_folder(&file);
+                        }
+                        if theme::button(ui, egui::Button::new("Open")).clicked() {
+                            files::open(&file);
+                        }
+                    });
+                });
+            });
+            if close {
+                self.details = None;
+            }
         }
 
         if let (Some(id), Some(c), Some(m), None) = (self.hovered, self.cursor, &self.map, self.menu) {
@@ -1808,6 +1904,10 @@ struct UiActions {
     path_from: Option<usize>,
     path_to: Option<usize>,
     like: Option<usize>,
+    /// "Details": the photo and where the menu was.
+    details: Option<(usize, egui::Pos2)>,
+    /// A menu item that needs nothing more was chosen: the menu closes.
+    done: bool,
     /// The back arrow.
     back: bool,
     /// What the Maps page asked for.

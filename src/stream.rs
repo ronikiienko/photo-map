@@ -19,6 +19,8 @@ const MAX_IN_FLIGHT: usize = 24;
 /// u32s per photo in the table: loaded level count, original's longer side, 2 unused, then one slot per level.
 pub const ENTRY: usize = 4 + LEVELS;
 const NONE: u32 = u32::MAX;
+/// A photo whose file couldn't be read is tried again after this many frames (a disk may be plugged in meanwhile).
+const RETRY_FRAMES: u64 = 300;
 
 /// Slot bookkeeping of one streamed level.
 struct Pool {
@@ -53,6 +55,8 @@ struct Level {
 
 struct Loaded {
     id: usize,
+    /// The file could be read.
+    found: bool,
     levels: Vec<Level>,
 }
 
@@ -67,6 +71,8 @@ pub struct Streamer {
     dirty: bool,
     pools: Vec<Pool>,
     loading: Vec<bool>,
+    /// The frame a photo's file was found not to be there (0: it was, or it hasn't been asked for).
+    missing: Vec<u64>,
     in_flight: usize,
     jobs: mpsc::Sender<Job>,
     results: mpsc::Receiver<Loaded>,
@@ -156,7 +162,7 @@ impl Streamer {
                 }
             });
         }
-        Self { texture, view, table, first_pages, layout, table_cpu, dirty: true, pools, loading: vec![false; n], in_flight: 0, jobs, results, frame: 1 }
+        Self { texture, view, table, first_pages, layout, table_cpu, dirty: true, pools, loading: vec![false; n], missing: vec![0; n], in_flight: 0, jobs, results, frame: 1 }
     }
 
     pub fn in_flight(&self) -> usize {
@@ -176,6 +182,11 @@ impl Streamer {
     fn max_level(&self, id: usize) -> usize {
         let long = self.table_cpu[id * ENTRY + 1].max(1) as f32;
         (long.log2().round() as usize).clamp(STREAMED, LEVELS - 1)
+    }
+
+    /// The photo's file couldn't be read the last time it was wanted at full size (moved, deleted, or on a disk not plugged in).
+    pub fn missing(&self, id: usize) -> bool {
+        self.missing[id] != 0
     }
 
     /// Drop levels `from..` of a photo (keeps its loaded levels contiguous).
@@ -225,7 +236,8 @@ impl Streamer {
                 self.pools[l - STREAMED].last_seen[slot] = frame;
             }
             let need = want.min(self.max_level(i));
-            if need >= STREAMED && count <= need && !self.loading[i] {
+            let retry = self.missing[i] == 0 || frame >= self.missing[i] + RETRY_FRAMES;
+            if need >= STREAMED && count <= need && !self.loading[i] && retry {
                 wanted.push((p.distance_squared(center), i, count, need));
             }
         }
@@ -237,6 +249,7 @@ impl Streamer {
         while let Ok(done) = self.results.try_recv() {
             self.in_flight -= 1;
             self.loading[done.id] = false;
+            self.missing[done.id] = if done.found { 0 } else { frame };
             for lv in done.levels {
                 let id = done.id;
                 if self.table_cpu[id * ENTRY].max(STREAMED as u32) as usize != lv.level {
@@ -285,8 +298,9 @@ impl Streamer {
 /// Worker: decode the original once; for each level fit it (longer side = min(slot size, original)), pad to
 /// whole 4 x 4 blocks by repeating the edge, and BC7-compress.
 fn decode(job: &Job) -> Loaded {
-    let mut loaded = Loaded { id: job.id, levels: Vec::new() };
+    let mut loaded = Loaded { id: job.id, found: false, levels: Vec::new() };
     let Some(rgba) = photo::load_for(&job.path, |_, _| slot_size(job.to)) else { return loaded };
+    loaded.found = true;
     let long = rgba.width().max(rgba.height());
     for level in job.from..=job.to {
         let fitted = photo::fit(&rgba, slot_size(level).min(long), false);

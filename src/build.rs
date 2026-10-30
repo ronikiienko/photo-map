@@ -3,8 +3,9 @@
 //! A map being made is a folder maps/<name>.building/ that keeps everything done so far, so closing the app (or pausing) loses at
 //! most a few seconds of work:
 //!     job.json      name, source folder, the stage to run next, photo count
-//!     files.json    the photos found (scan), in order; photo i is originals/<i, 6 digits>.<ext>
-//!     originals/    hard links to the photos; on another disk, links by path (or copies, if the job asks for them)
+//!     files.json    the photos found (scan), in order
+//!     originals/    copies of the photos, if the job asks for them (photo i: originals/<i, 6 digits>.<ext>); else the map reads
+//!                   them where they are (photos.json: source)
 //!     vectors/      the photos' vectors in shards of SHARD photos (embed): a finished shard is never redone
 //! When the last stage is done the folder is renamed to maps/<name>.photomap (see data.rs for what is in one).
 //! Each stage can be stopped at any time (pause, close) and run again; it picks up what it can.
@@ -62,7 +63,7 @@ impl Stage {
     /// What the stage does and why, in plain words, for the card of a map being made.
     pub fn explain(self) -> &'static str {
         match self {
-            Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and links each one into the map: on the same disk a hard link (the same data, no second copy), on another disk a link to where the photo is. Nothing is changed in your folders, and no space is taken.",
+            Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and notes where each one is: the map reads them there, and takes no space for them (unless you asked for them to be copied into the map). Nothing is changed in your folders.",
             Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. This is the slow part, because every photo goes through the model on the graphics card.",
             Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP). Last, photos that would cover each other are moved apart a little, so that every photo can be seen.",
             Stage::Tree => "Joins all the photos into one tree by the shortest links between them (the most similar pairs). A path between two photos (right-click one on the map) follows this tree: of all the ways from one to the other, it is the one whose biggest change from photo to photo is the smallest. Each photo is compared with the photos in the parts of the map nearest to it, not with all of them.",
@@ -98,8 +99,8 @@ pub struct Job {
     /// life of the job: its vectors, and the map's search, are only good with the same one.
     #[serde(default = "default_model")]
     pub model: String,
-    /// Photos on another disk are copied into the map; otherwise the map links to them by path (jobs from before this copied them:
-    /// either way a job can carry on).
+    /// The photos are copied into the map; otherwise the map reads them where they are (jobs from before this linked them into the
+    /// map, and copied only photos on another disk: either way a job can carry on).
     #[serde(default)]
     pub copy_photos: bool,
     /// A photo's longer side on the map (world units), set by the layout: the photos are spread to it (data::spread).
@@ -576,57 +577,44 @@ pub fn same_disk(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// A symbolic link at `dst` to `src`'s full path: it stays good when the map's folder moves, not when the photo does.
-fn link_by_path(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let src = fs::canonicalize(src)?;
-    #[cfg(unix)]
-    return std::os::unix::fs::symlink(src, dst);
-    #[cfg(not(unix))]
-    {
-        let _ = (src, dst);
-        Err(std::io::ErrorKind::Unsupported.into())
-    }
-}
 
 fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let found = read_found(&ctx.dir)?;
     ctx.job.photos = found.len();
     let total = found.len();
-    fs::create_dir_all(ctx.dir.join("originals")).map_err(|e| e.to_string())?;
-    ctx.progress(0, total, "linking the photos into the map");
-    let done = AtomicUsize::new(0);
     let copy_photos = ctx.job.copy_photos;
-    let failed = found.par_iter().enumerate().try_for_each(|(i, f)| {
-        if ctx.paused() {
-            return Err(None);
-        }
-        let dst = ctx.dir.join(original_name(i, &f.src));
-        // not exists(): that follows a link, and a link to a disk not plugged in is done all the same
-        if fs::symlink_metadata(&dst).is_err() {
-            // the same disk: a hard link costs nothing; another disk: a link by path, or a copy if asked for (to a temporary name
-            // first: a half copy never counts)
-            if fs::hard_link(&f.src, &dst).is_err() && (copy_photos || link_by_path(&f.src, &dst).is_err()) {
+    if copy_photos {
+        // copies, if asked for (to a temporary name first: a half copy never counts); else the map reads the photos where they are
+        fs::create_dir_all(ctx.dir.join("originals")).map_err(|e| e.to_string())?;
+        ctx.progress(0, total, "copying the photos into the map");
+        let done = AtomicUsize::new(0);
+        let failed = found.par_iter().enumerate().try_for_each(|(i, f)| {
+            if ctx.paused() {
+                return Err(None);
+            }
+            let dst = ctx.dir.join(original_name(i, &f.src));
+            if fs::symlink_metadata(&dst).is_err() {
                 let tmp = dst.with_extension("part");
                 fs::copy(&f.src, &tmp).and_then(|_| fs::rename(&tmp, &dst)).map_err(|e| Some(format!("{}: {e}", f.src.display())))?;
             }
+            let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+            if d % 64 == 0 {
+                ctx.set_done(d);
+            }
+            Ok(())
+        });
+        match failed {
+            Err(None) => return Ok(Flow::Paused),
+            Err(Some(e)) => return Err(e),
+            Ok(()) => {}
         }
-        let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-        if d % 64 == 0 {
-            ctx.set_done(d);
-        }
-        Ok(())
-    });
-    match failed {
-        Err(None) => return Ok(Flow::Paused),
-        Err(Some(e)) => return Err(e),
-        Ok(()) => {}
     }
     let photos: Vec<serde_json::Value> = found
         .iter()
         .enumerate()
         .map(|(i, f)| {
             serde_json::json!({
-                "file": original_name(i, &f.src),
+                "file": if copy_photos { original_name(i, &f.src) } else { String::new() },
                 "source": f.src.to_string_lossy(),
                 "width": f.width,
                 "height": f.height,
@@ -679,8 +667,8 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     ctx.progress(already + reused_count, n, if reused_count > 0 { format!("{reused_count} photos were embedded in earlier maps; embedding the rest") } else { "reading the photos and embedding them".to_string() });
 
     // CPU side ahead of the GPU: the next shard's photos are decoded and cut into patches while this one is embedded
-    let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let files: Vec<PathBuf> = photos.iter().map(|p| ctx.dir.join(p["file"].as_str().unwrap_or_default())).collect();
+    let photos: Vec<crate::data::Photo> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let files: Vec<PathBuf> = photos.iter().map(|p| p.path(&ctx.dir)).collect();
     let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<Option<(Prepared, image::RgbaImage)>>)>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let producer = {
@@ -700,6 +688,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     };
 
     let mut processed = 0usize; // photos that were not reused, seen to so far
+    let mut embedded = 0usize; // ... and of those, the ones that got a vector
     let mut outcome = Ok(Flow::Done);
     'shards: for (k, mut cuts) in rx {
         let mut vectors = vec![0f32; cuts.len() * dim];
@@ -729,6 +718,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                 for (i, r) in idx.into_iter().zip(results) {
                     match r {
                         Ok(v) => {
+                            embedded += 1;
                             vectors[i * dim..(i + 1) * dim].copy_from_slice(&v);
                             head = Some(v[..HEAD].to_vec());
                         }
@@ -753,6 +743,13 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let flow = outcome?;
     if matches!(flow, Flow::Paused) {
         return Ok(flow);
+    }
+    // not one photo could be read (say, the disk they are on went away): a map of them would be all in one spot
+    if processed > 0 && embedded == 0 {
+        for k in todo {
+            let _ = fs::remove_file(shard_path(&ctx.dir, k));
+        }
+        return Err(format!("none of the {processed} photos could be read (the first: {})", files.iter().zip(reused.iter()).find(|(_, r)| !**r).map_or(String::new(), |(f, _)| f.display().to_string())));
     }
 
     // all the vectors in one file; a photo it couldn't read has the average vector (it lands in the middle of the map)
@@ -998,17 +995,15 @@ mod tests {
     /// A photo an earlier map already holds a vector for (same file, not changed since) is not embedded again: its row is copied.
     /// Proved by changing a row in the first map to a vector the model would never make, and finding it in the second.
     #[cfg(unix)]
+    /// A photo not copied into the map is read where it came from; a copied one (or, in maps made before, a linked one) from the map.
     #[test]
-    fn links_a_photo_by_its_full_path() {
-        let temp = std::env::temp_dir().join(format!("photo-map-link-test-{}", std::process::id()));
+    fn a_map_reads_photos_where_they_are() {
+        let temp = std::env::temp_dir().join(format!("photo-map-path-test-{}", std::process::id()));
         fs::create_dir_all(temp.join("photos")).unwrap();
         fs::create_dir_all(temp.join("map")).unwrap();
-        fs::write(temp.join("photos/a.jpg"), b"photo").unwrap();
-        // a relative source still makes a link that works from inside the map
-        let relative = temp.join("photos/../photos/a.jpg");
-        link_by_path(&relative, &temp.join("map/a.jpg")).unwrap();
-        assert!(fs::read_link(temp.join("map/a.jpg")).unwrap().is_absolute());
-        assert_eq!(fs::read(temp.join("map/a.jpg")).unwrap(), b"photo");
+        let photo = |file: &str| -> crate::data::Photo { serde_json::from_value(serde_json::json!({ "file": file, "source": "/photos/a.jpg", "width": 1, "height": 1, "title": "a" })).unwrap() };
+        assert_eq!(photo("").path(&temp.join("map")), Path::new("/photos/a.jpg"));
+        assert_eq!(photo("originals/000000.jpg").path(&temp.join("map")), temp.join("map/originals/000000.jpg"));
         assert!(same_disk(&temp.join("photos"), &temp.join("map")));
         fs::remove_dir_all(&temp).unwrap();
         // a job saved at the step that linked the photos (it was its own) carries on at the scan, which does it now
@@ -1111,7 +1106,9 @@ mod tests {
         assert_eq!(fs::metadata(done.join("embeddings.bin")).unwrap().len() as usize, count * DIM * 2);
         let photos: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(done.join("photos.json")).unwrap()).unwrap();
         assert_eq!(photos.len(), count);
-        assert!(done.join(photos[count - 1]["file"].as_str().unwrap()).exists());
+        // not copied: read where they are
+        assert_eq!(photos[count - 1]["file"], "");
+        assert!(Path::new(photos[count - 1]["source"].as_str().unwrap()).exists());
         // the vectors are unit length and not all alike
         let raw = fs::read(done.join("embeddings.bin")).unwrap();
         let vector = |i: usize| -> Vec<f32> { raw[i * DIM * 2..(i + 1) * DIM * 2].chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect() };
