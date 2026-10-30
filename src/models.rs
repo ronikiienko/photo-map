@@ -343,8 +343,7 @@ pub fn test_hub_with(id: &str) -> Arc<Hub> {
     static HUB: std::sync::OnceLock<Arc<Hub>> = std::sync::OnceLock::new();
     let hub = HUB
         .get_or_init(|| {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-            Hub::start(root, || {})
+            Hub::start(crate::data_root(), || {})
         })
         .clone();
     assert_eq!(hub.wait_for(id, &|| false), Ok(true));
@@ -366,7 +365,7 @@ mod tests {
     #[test]
     #[ignore]
     fn models_match_the_maps() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = &crate::data_root();
         let mut hub = None;
         for (id, map) in [(SIGLIP_BASE_256, "rare-species 2"), (SIGLIP_BASE_256, "nasa"), (GEMMA, "rare-species"), (GEMMA, "everything from usb")] {
             let spec = spec(id).unwrap();
@@ -410,7 +409,7 @@ mod tests {
     #[test]
     #[ignore]
     fn backends_agree() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = &crate::data_root();
         let folder = std::path::PathBuf::from(std::env::var("PHOTO_MAP_PHOTOS").expect("PHOTO_MAP_PHOTOS: a folder of photos"));
         let backend = format!("{:?}", crate::backends::Choice::load(root).selected(&crate::runtime::Setup::detect(root)));
         let mut files: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| ["jpg", "jpeg", "png", "webp"].contains(&e.to_string_lossy().to_lowercase().as_str()))).collect();

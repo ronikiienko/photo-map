@@ -827,7 +827,7 @@ fn name_regions(ctx: &mut Ctx) -> Result<Flow, String> {
         return Err("levels.bin is not the size of the photos".into());
     }
     let levels: Vec<Vec<u32>> = (0..count).map(|l| words[2 + l * n..2 + (l + 1) * n].to_vec()).collect();
-    let phrases = crate::naming::phrases(&ctx.root)?;
+    let phrases = crate::naming::phrases();
 
     // the vocabulary's vectors: cached after the first map; made with the shared model otherwise
     ctx.progress(0, phrases.len(), "reading the vocabulary");
@@ -900,11 +900,11 @@ mod tests {
 
     /// Spreads the layout of maps made before the layout was spread (data::spread), in place: layout.bin (the old one kept as
     /// layout.unspread.bin), the region names' places (each sits on a photo: it goes where the photo went) and photo_side in
-    /// manifest.json. cargo test --release spread_made_maps -- --ignored --nocapture (PHOTO_MAP_MAPS: the maps folder, else maps/)
+    /// manifest.json. cargo test --release spread_made_maps -- --ignored --nocapture (PHOTO_MAP_MAPS: the maps folder, else the app's)
     #[test]
     #[ignore]
     fn spread_made_maps() {
-        let maps = std::env::var_os("PHOTO_MAP_MAPS").map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("maps"), PathBuf::from);
+        let maps = std::env::var_os("PHOTO_MAP_MAPS").map_or_else(|| crate::data_root().join("maps"), PathBuf::from);
         for entry in fs::read_dir(&maps).unwrap() {
             let dir = entry.unwrap().path();
             let Ok(raw) = fs::read(dir.join("manifest.json")) else { continue };
@@ -1012,7 +1012,7 @@ mod tests {
 
     #[test]
     fn reuses_vectors_of_earlier_maps() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+        let root = crate::data_root();
         let temp = std::env::temp_dir().join(format!("photo-map-reuse-test-{}", std::process::id()));
         let (source, maps) = (temp.join("photos"), temp.join("maps"));
         fs::create_dir_all(&source).unwrap();
@@ -1065,7 +1065,7 @@ mod tests {
     /// A folder of photos becomes a map's vectors, also when the build is paused and continued several times on the way.
     #[test]
     fn builds_from_a_folder_and_resumes() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+        let root = crate::data_root();
         let temp = std::env::temp_dir().join(format!("photo-map-build-test-{}", std::process::id()));
         let (source, maps) = (temp.join("photos"), temp.join("maps"));
         fs::create_dir_all(source.join("sub")).unwrap();
@@ -1136,7 +1136,7 @@ mod tests {
     #[test]
     #[ignore]
     fn another_model_makes_its_own_vectors() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+        let root = crate::data_root();
         let temp = std::env::temp_dir().join(format!("photo-map-models-test-{}", std::process::id()));
         let (source, maps) = (temp.join("photos"), temp.join("maps"));
         fs::create_dir_all(&source).unwrap();

@@ -1,14 +1,20 @@
 //! Naming the place a photo was taken from its coordinates, offline: the nearest town of GeoNames' list of the world's towns of
-//! over 1,000 people (about 150,000; CC BY 4.0, geonames.org), with its region and country. The list is downloaded the first time
-//! a place is asked for (about 10 MB) and kept, made smaller, in .cache/places/.
+//! over 1,000 people (171,731; CC BY 4.0, geonames.org), with its region and country. The list is built into the program
+//! (assets/places.zip, 2.6 MB: one line per town, made by make_the_list from GeoNames' files) and read the first time a place is
+//! asked for.
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+/// name, latitude, longitude, "Region, Country": one line per town, in places.tsv inside.
+const PACKED: &[u8] = include_bytes!("../assets/places.zip");
+
+#[cfg(test)]
 const CITIES: &str = "https://download.geonames.org/export/dump/cities1000.zip";
+#[cfg(test)]
 const REGIONS: &str = "https://download.geonames.org/export/dump/admin1CodesASCII.txt";
+#[cfg(test)]
 const COUNTRIES: &str = "https://download.geonames.org/export/dump/countryInfo.txt";
 /// Further than this from the nearest town: "near" it; further than FAR_KM: how far.
 const NEAR_KM: f64 = 10.0;
@@ -24,7 +30,7 @@ struct Town {
 
 enum State {
     Idle,
-    Fetching,
+    Reading,
     Ready(Vec<Town>),
     Failed(String),
 }
@@ -34,19 +40,14 @@ fn state() -> &'static Mutex<State> {
     STATE.get_or_init(|| Mutex::new(State::Idle))
 }
 
-fn file(root: &Path) -> PathBuf {
-    root.join(".cache/places/places.tsv")
-}
-
 /// The place at lat, lon in words ("Girvan, Scotland, United Kingdom"), or what is happening instead; and whether to ask again
-/// soon (the list is on its way).
-pub fn describe(root: &Path, lat: f64, lon: f64) -> (String, bool) {
+/// soon (the list is being read: a moment, the first time).
+pub fn describe(lat: f64, lon: f64) -> (String, bool) {
     let mut now = state().lock().unwrap();
     if let State::Idle = *now {
-        *now = State::Fetching;
-        let root = root.to_path_buf();
+        *now = State::Reading;
         std::thread::spawn(move || {
-            let loaded = load(&root);
+            let loaded = load();
             *state().lock().unwrap() = match loaded {
                 Ok(towns) => State::Ready(towns),
                 Err(e) => State::Failed(e),
@@ -54,8 +55,8 @@ pub fn describe(root: &Path, lat: f64, lon: f64) -> (String, bool) {
         });
     }
     match &*now {
-        State::Idle | State::Fetching => ("finding the place (the first time: downloading the list of places, 10 MB)".into(), true),
-        State::Failed(e) => (format!("couldn't get the list of places: {e}"), false),
+        State::Idle | State::Reading => ("finding the place".into(), true),
+        State::Failed(e) => (format!("couldn't read the list of places: {e}"), false),
         State::Ready(towns) => (nearest(towns, lat, lon).unwrap_or_default(), false),
     }
 }
@@ -87,15 +88,11 @@ fn km_between(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     2.0 * 6371.0 * a.sqrt().min(1.0).asin()
 }
 
-/// The list from .cache/places/, downloaded and made there first if it isn't.
-fn load(root: &Path) -> Result<Vec<Town>, String> {
-    let path = file(root);
-    if !path.exists() {
-        let text = download()?;
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-        crate::build::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
-    }
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+/// The built-in list.
+fn load() -> Result<Vec<Town>, String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(PACKED)).map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    archive.by_name("places.tsv").map_err(|e| e.to_string())?.read_to_string(&mut text).map_err(|e| e.to_string())?;
     Ok(text
         .lines()
         .filter_map(|line| {
@@ -107,6 +104,7 @@ fn load(root: &Path) -> Result<Vec<Town>, String> {
 }
 
 /// GeoNames' three files made into one line per town: name, lat, lon, "Region, Country".
+#[cfg(test)]
 fn download() -> Result<String, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(std::time::Duration::from_secs(30))).timeout_recv_body(Some(std::time::Duration::from_secs(120))).build().into();
     let get = |url: &str| -> Result<Vec<u8>, String> {
@@ -138,6 +136,7 @@ fn download() -> Result<String, String> {
 
 /// cities1000.txt's columns: 1 name, 4 latitude, 5 longitude, 8 country code, 10 region code. Parts of big cities are towns of their
 /// own here ("Stare Misto, Kyiv City, Ukraine"): the region names the city.
+#[cfg(test)]
 fn towns_from(cities: &str, regions: &HashMap<String, String>, countries: &HashMap<String, String>) -> String {
     let mut out = String::new();
     for line in cities.lines() {
@@ -175,15 +174,28 @@ mod tests {
         assert!((km_between(48.85, 2.35, 51.51, -0.13) - 344.0).abs() < 5.0, "Paris to London");
     }
 
-    /// Downloads the list for real (needs the network, 10 MB, kept in .cache/places/) and names a few places:
-    /// cargo test --release names_real_places -- --ignored --nocapture
+    /// The built-in list is read and names real places.
+    #[test]
+    fn names_real_places() {
+        let towns = load().unwrap();
+        assert!(towns.len() > 150_000, "{} towns", towns.len());
+        assert_eq!(nearest(&towns, 55.2375, -4.8540).unwrap(), "Girvan, Scotland, United Kingdom");
+        assert_eq!(nearest(&towns, 64.1466, -21.9426).unwrap(), "Reykjavík, Capital Region, Iceland");
+        assert!(nearest(&towns, 0.0, -30.0).unwrap().contains(" km from "), "mid-ocean");
+    }
+
+    /// Makes assets/places.zip again from GeoNames' files (needs the network, 10 MB):
+    /// cargo test --release make_the_list -- --ignored --nocapture
     #[test]
     #[ignore]
-    fn names_real_places() {
-        let towns = load(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        eprintln!("{} towns", towns.len());
-        for (lat, lon) in [(55.2375, -4.8540), (50.4501, 30.5234), (35.6595, 139.7005), (-33.8568, 151.2153), (64.1466, -21.9426), (0.0, -30.0)] {
-            eprintln!("{lat}, {lon}: {}", nearest(&towns, lat, lon).unwrap());
-        }
+    fn make_the_list() {
+        use std::io::Write;
+        let text = download().unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/places.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file("places.tsv", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).compression_level(Some(9))).unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        eprintln!("{} towns, {} bytes", text.lines().count(), std::fs::metadata(&path).unwrap().len());
     }
 }

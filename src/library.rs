@@ -1,4 +1,4 @@
-//! The maps the app knows: every finished bundle in the project's maps/ folder (maps/<name>.photomap, see data.rs) and every
+//! The maps the app knows: every finished bundle in the maps/ folder (main.rs: data_root) (maps/<name>.photomap, see data.rs) and every
 //! one still being made (maps/<name>.building, see build.rs).
 
 use crate::build::Job;
@@ -77,7 +77,7 @@ impl Library {
         &self.dir
     }
 
-    /// The project folder (maps/ is in it; so are runtime/ and .cache/).
+    /// The app's folder (maps/ is in it; so are runtime/ and .cache/): main.rs, data_root.
     pub fn root(&self) -> PathBuf {
         self.dir.parent().map(PathBuf::from).unwrap_or_default()
     }

@@ -321,7 +321,7 @@ mod tests {
     #[test]
     #[ignore]
     fn get_models() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = &crate::data_root();
         for id in std::env::var("PHOTO_MAP_GET").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
             let spec = models::spec(id).unwrap();
             let last = Mutex::new(-1i32);

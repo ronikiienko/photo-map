@@ -471,6 +471,13 @@ pub fn shared_model() -> std::sync::Arc<crate::models::Hub> {
 mod tests {
     use super::*;
 
+    /// The Wikivoyage map's photos, in its order.
+    fn wikivoyage() -> Vec<PathBuf> {
+        let dir = crate::data_root().join("maps/wikivoyage.photomap");
+        let photos: Vec<crate::data::Photo> = serde_json::from_slice(&std::fs::read(dir.join("photos.json")).unwrap()).unwrap();
+        photos.iter().map(|p| p.path(&dir)).collect()
+    }
+
     /// Where the time goes per photo once everything is warm: the layers, the pooling, the text model. PHOTO_MAP_PHOTOS=<folder>.
     #[test]
     #[ignore]
@@ -530,7 +537,9 @@ mod tests {
         let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let model = guard.as_mut().unwrap().gemma();
         for (k, file) in fixture["files"].as_array().unwrap().iter().enumerate() {
-            let path = root.join("maps/wikivoyage.photomap/originals").join(file.as_str().unwrap());
+            // the fixture names photos by their place in the map (originals/000123.webp: photo 123)
+            let at: usize = file.as_str().unwrap().split('.').next().unwrap().parse().unwrap();
+            let path = wikivoyage()[at].clone();
             let Some(img) = crate::photo::load(&path) else { return };
             if k == 0 {
                 // the patches themselves, against the processor's (saved by hand, in /tmp)
@@ -557,10 +566,7 @@ mod tests {
     /// Photos embedded together (their token lists padded) give the same vectors as each one alone.
     #[test]
     fn together_is_the_same_as_alone() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let dir = root.join("maps/wikivoyage.photomap/originals");
-        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
-        files.sort();
+        let files = wikivoyage();
         let imgs: Vec<_> = files.iter().take(8).filter_map(|f| crate::photo::load(f)).collect();
         let copy = |c: &Patches| Patches { pixels: c.pixels.clone(), positions: c.positions.clone(), soft_tokens: c.soft_tokens };
         let cuts: Vec<Patches> = imgs.iter().map(|i| patches(i).unwrap()).collect();
@@ -584,7 +590,7 @@ mod tests {
     fn cpu_side_speed() {
         use rayon::prelude::*;
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for name in ["data/wikiart/images", "maps/wikivoyage.photomap/originals"] {
+        for name in ["data/wikiart/images", "data/wikivoyage/images_zim"] {
             let mut files: Vec<_> = std::fs::read_dir(root.join(name)).unwrap().flatten().map(|e| e.path()).collect();
             files.sort();
             let files: Vec<_> = files.into_iter().step_by(37).take(64).collect();
@@ -658,11 +664,9 @@ mod tests {
     #[test]
     #[ignore]
     fn closing_is_clean() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let dir = root.join("maps/wikivoyage.photomap/originals");
-        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
-        files.sort();
+        let files = wikivoyage();
         let cuts: Vec<Patches> = files.iter().take(8).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
+        let root = &crate::data_root();
         let mut model = Gemma::load_with(&Runtime::start(root).unwrap(), root).unwrap();
         for r in model.embed_patches(cuts) {
             r.unwrap();
@@ -678,10 +682,7 @@ mod tests {
     #[test]
     #[ignore]
     fn where_the_time_goes() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let dir = root.join("maps/wikivoyage.photomap/originals");
-        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
-        files.sort();
+        let files = wikivoyage();
         let cuts: Vec<Patches> = files.iter().take(96).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
         let shared = shared_model();
         let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -718,10 +719,7 @@ mod tests {
     #[test]
     #[ignore]
     fn batch_sizes() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let dir = root.join("maps/wikivoyage.photomap/originals");
-        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
-        files.sort();
+        let files = wikivoyage();
         let cuts: Vec<Patches> = files.iter().take(96).filter_map(|f| crate::photo::load(f)).map(|i| patches(&i).unwrap()).collect();
         let shared = shared_model();
         let mut guard = shared.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

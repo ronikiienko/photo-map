@@ -26,7 +26,7 @@ fn peak_mb() -> f64 {
 #[test]
 #[ignore]
 fn mac_embed_speed() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = crate::data_root();
     let id = match std::env::var("BENCH_MODEL").as_deref() {
         Ok("s512") => models::SIGLIP_BASE_512,
         Ok("s256") => models::SIGLIP_BASE_256,
@@ -98,7 +98,7 @@ fn mac_embed_speed() {
 #[test]
 #[ignore]
 fn show_model_edges() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = crate::data_root();
     let rt = crate::embed::Runtime::start(&root).unwrap();
     for f in std::env::var("BENCH_FILES").unwrap().split(',') {
         let session = ort::session::Session::builder(&rt.env).unwrap().commit_from_file(f).unwrap();

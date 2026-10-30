@@ -1815,7 +1815,6 @@ impl Viewer {
         }
         if let (Some((photo, at, details)), Some(m)) = (&self.details, &self.map) {
             let mut close = false;
-            let root = self.library.root();
             egui::Area::new("photo details".into()).fixed_pos(*at + egui::vec2(4.0, 4.0)).order(egui::Order::Foreground).constrain(true).show(&ctx, |ui| {
                 theme::card().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
                     ui.set_max_width(420.0);
@@ -1825,7 +1824,7 @@ impl Viewer {
                             ui.label(theme::muted(name));
                             match details.place {
                                 Some((lat, lon)) if name == "Place" => {
-                                    let (place, waiting) = places::describe(&root, lat, lon);
+                                    let (place, waiting) = places::describe(lat, lon);
                                     if waiting {
                                         ctx.request_repaint_after(std::time::Duration::from_millis(250));
                                     }
@@ -2017,8 +2016,23 @@ fn photo_path(text: &str) -> Option<PathBuf> {
     (image && path.is_file()).then_some(path)
 }
 
+/// Where the app keeps everything it makes and downloads (maps/, runtime/, .cache/): the folder named by PHOTO_MAP_HOME if set, else
+/// the system's place for an app's data: ~/.local/share/photo-map on Linux, ~/Library/Application Support/photo-map on macOS,
+/// %APPDATA%\photo-map\data on Windows. Tests use it too (the models and maps they need are there).
+pub fn data_root() -> PathBuf {
+    if let Some(home) = std::env::var_os("PHOTO_MAP_HOME") {
+        return PathBuf::from(home);
+    }
+    match directories::ProjectDirs::from("", "", "photo-map") {
+        Some(dirs) => dirs.data_dir().to_path_buf(),
+        // no home folder known: beside the program
+        None => std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from)).unwrap_or_default(),
+    }
+}
+
 fn main() {
-    let maps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("maps");
+    let maps = data_root().join("maps");
+    let _ = std::fs::create_dir_all(&maps);
     let first = std::env::args().nth(1).map(PathBuf::from);
     // winit doesn't deliver files dropped on a native Wayland window (the photo search takes dropped photos), but does on
     // an X11 one: with an X server around (XWayland), use that, unless PHOTO_MAP_WAYLAND is set

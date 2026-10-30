@@ -160,7 +160,7 @@ mod tests {
     /// u16 file has the n picture cosines as 0..1 in 0..65535, then the captions', not used): the picture cosines agree to within the noise of fp16 vs bf16, and the best photos are the same.
     #[test]
     fn wikivoyage_matches_python() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = &crate::data_root();
         let bundle = root.join("maps/wikivoyage.photomap");
         let Ok(answer) = std::fs::read(std::path::Path::new("/tmp/wv_ref.json")) else { return };
         let query = serde_json::from_slice::<serde_json::Value>(&answer).unwrap()["query"].as_str().unwrap().to_string();

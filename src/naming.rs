@@ -11,7 +11,15 @@ const COMMON: f32 = 0.01;
 /// Regions of fewer photos stay unnamed, and so do levels of regions of about 10 photos or fewer (the finest).
 const MIN_PHOTOS: usize = 10;
 const FINEST: usize = 6;
-const ROUNDS: [&str; 6] = ["1", "1b", "2", "3", "4", "5"];
+/// The vocabulary, built into the program: each round's phrases (vocab/curated2_round*.txt), most common first.
+const ROUNDS: [(&str, &str); 6] = [
+    ("1", include_str!("../vocab/curated2_round1.txt")),
+    ("1b", include_str!("../vocab/curated2_round1b.txt")),
+    ("2", include_str!("../vocab/curated2_round2.txt")),
+    ("3", include_str!("../vocab/curated2_round3.txt")),
+    ("4", include_str!("../vocab/curated2_round4.txt")),
+    ("5", include_str!("../vocab/curated2_round5.txt")),
+];
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Phrase {
@@ -21,14 +29,9 @@ pub struct Phrase {
 }
 
 /// Every phrase once (its earliest round).
-pub fn phrases(root: &Path) -> Result<Vec<Phrase>, String> {
+pub fn phrases() -> Vec<Phrase> {
     let (mut out, mut seen) = (Vec::new(), std::collections::HashSet::new());
-    for round in ROUNDS {
-        let file = root
-            .join("vocab")
-            .join(format!("curated2_round{round}.txt"));
-        let text =
-            std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    for (round, text) in ROUNDS {
         let rank: i32 = round.trim_end_matches('b').parse().unwrap_or(1);
         for line in text
             .lines()
@@ -43,7 +46,7 @@ pub fn phrases(root: &Path) -> Result<Vec<Phrase>, String> {
             }
         }
     }
-    Ok(out)
+    out
 }
 
 /// A key that changes when the vocabulary does (so cached vectors are made again).
@@ -257,8 +260,7 @@ mod tests {
     /// The vocabulary is read, every phrase once, with its commonness.
     #[test]
     fn reads_the_vocabulary() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let list = phrases(root).unwrap();
+        let list = phrases();
         assert_eq!(
             list.len(),
             3385,

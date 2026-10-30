@@ -616,7 +616,7 @@ mod tests {
     #[test]
     #[ignore]
     fn gemma_text_ops() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache/onnx/embeddinggemma-2/onnx");
+        let dir = crate::data_root().join(".cache/onnx/embeddinggemma-2/onnx");
         let m = load(&dir.join("model_fp16.onnx")).unwrap();
         let g = m.graph.as_ref().unwrap();
         let mut count: std::collections::BTreeMap<&str, usize> = Default::default();
@@ -672,7 +672,7 @@ mod tests {
     fn processor_speed_float16_against_float32() {
         // SAFETY: set before ONNX Runtime starts, in a test run on its own
         unsafe { std::env::set_var("PHOTO_MAP_BACKEND", "cpu") };
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = &crate::data_root();
         let dir = models::spec(models::SIGLIP_BASE_256).unwrap().dir(root);
         let half = dir.join("onnx/vision_model_fp16.onnx");
         let test = root.join(".cache/test/speed");
