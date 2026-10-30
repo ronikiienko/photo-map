@@ -14,6 +14,24 @@ pub struct Island {
     pub size: Point,
 }
 
+/// Ready-made groups for the Layout menu: a name and its words, as typed in the box. Across subjects, not just places.
+pub const PRESETS: [(&str, &str); 14] = [
+    ("Scenes", "beach, mountains, city, forest, desert, snow, lake, countryside"),
+    ("Time of day", "sunrise, daytime, sunset, night"),
+    ("Seasons", "spring, summer, autumn, winter"),
+    ("Weather", "sunny, cloudy, rain, fog, snow, storm"),
+    ("People", "portrait, group of people, crowd, no people"),
+    ("Animals", "dog, cat, bird, horse, insect, fish, wild animal"),
+    ("Food and drink", "fruit, vegetables, meat, fish dish, dessert, bread, drink"),
+    ("Buildings", "church, castle, bridge, skyscraper, house, ruins, monument"),
+    ("Getting around", "car, train, boat, airplane, bicycle, bus, walking"),
+    ("Plants and nature", "flower, tree, leaves, grass, rock, water, sky"),
+    ("Sport", "football, tennis, running, swimming, skiing, cycling, climbing"),
+    ("Colours", "red, orange, yellow, green, blue, purple, black and white"),
+    ("Kind of picture", "photograph, painting, drawing, map, diagram, text, screenshot"),
+    ("Mood", "happy, calm, sad, dramatic, mysterious, romantic"),
+];
+
 /// The words in a box: split at commas and new lines, trimmed, each once (ignoring case).
 pub fn words(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();

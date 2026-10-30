@@ -1708,6 +1708,15 @@ impl Viewer {
                                 } else if self.view_choice == View::Axes {
                                     ui.label(theme::muted("Left to right: from the first word to the second. Bottom to top: the same with the other pair. Each photo goes by how much more it is like one end than the other."));
                                     ui.add_space(6.0);
+                                    presets(ui, |ui| {
+                                        for (name, [left, right, down, up]) in axes::PRESETS {
+                                            if ui.selectable_label(false, name).on_hover_text(format!("across: {left} to {right}; up: {down} to {up}")).clicked() {
+                                                self.axes = axes::Words { left: left.into(), right: right.into(), down: down.into(), up: up.into() };
+                                                actions.arrange = true;
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(6.0);
                                     let mut enter = false;
                                     let a = &mut self.axes;
                                     for (label, first, second, hints) in [("across", &mut a.left, &mut a.right, ("left: day", "right: night")), ("up", &mut a.down, &mut a.up, ("bottom: nature", "top: city"))] {
@@ -1738,6 +1747,15 @@ impl Viewer {
                                 } else {
                                     ui.label(theme::muted("Each photo joins the word it is most like. In each group the strongest matches are in the middle, the weakest at the edge."));
                                     ui.add_space(6.0);
+                                    presets(ui, |ui| {
+                                        for (name, words) in groups::PRESETS {
+                                            if ui.selectable_label(false, name).on_hover_text(words).clicked() {
+                                                self.groups_text = words.to_string();
+                                                actions.arrange = true;
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(4.0);
                                     ui.add(egui::TextEdit::multiline(&mut self.groups_text).hint_text("beach, mountain, city, forest").desired_rows(3).desired_width(f32::INFINITY));
                                     ui.label(theme::muted("Separate the words with commas or new lines."));
                                     ui.add_space(6.0);
@@ -2082,6 +2100,17 @@ impl ApplicationHandler for App {
             }
         }
     }
+}
+
+/// A "Presets" button in the Layout menu, opening a list beside it: a submenu, so choosing one leaves the menu open (a combo box's
+/// list is a popup of its own, and a click on it closed the menu).
+fn presets(ui: &mut egui::Ui, list: impl FnOnce(&mut egui::Ui)) {
+    let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    ui.scope(|ui| {
+        ui.set_style(ui.ctx().global_style()); // a button that looks like one, as theme::button
+        let button = egui::Button::new("Presets").right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW).frame(true);
+        egui::containers::menu::SubMenuButton::from_button(button).config(config).ui(ui, list);
+    });
 }
 
 /// The median distance from a photo to its nearest neighbour, over a sample of up to 2,000 photos.

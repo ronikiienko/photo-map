@@ -21,6 +21,20 @@ impl Words {
     }
 }
 
+/// Ready-made axes for the Layout menu: a name, then left, right, bottom, top. Contrasts most collections have on both ends.
+pub const PRESETS: [(&str, [&str; 4]); 10] = [
+    ("Day and night · nature and city", ["day", "night", "nature", "city"]),
+    ("Inside and outside · close and far", ["indoors", "outdoors", "close-up", "wide view"]),
+    ("Dark and bright · cold and warm colours", ["dark", "bright", "cold colours", "warm colours"]),
+    ("Calm and busy · empty and crowded", ["calm", "busy", "empty", "crowded"]),
+    ("Old and modern · simple and detailed", ["old", "modern", "simple", "detailed"]),
+    ("Winter and summer · sea and mountains", ["winter", "summer", "sea", "mountains"]),
+    ("Natural and man-made · still and moving", ["natural", "man-made", "still", "in motion"]),
+    ("Black and white and colourful · soft and sharp", ["black and white", "colourful", "soft", "sharp"]),
+    ("Photo and drawing · real and imagined", ["photograph", "drawing", "realistic", "fantasy"]),
+    ("Serious and playful · lonely and together", ["serious", "playful", "alone", "together"]),
+];
+
 /// How scores become places along an axis.
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum Spread {
