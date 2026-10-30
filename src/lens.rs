@@ -6,7 +6,7 @@
 use glam::Vec2;
 
 /// The lens's radius when open, in points (times the screen's pixels per point).
-pub const RADIUS: f32 = 170.0;
+pub const RADIUS: f32 = 260.0;
 /// How long it takes to open or close, seconds.
 const OPEN_SECONDS: f32 = 0.16;
 /// How much it magnifies at first, and the range the wheel can set.
