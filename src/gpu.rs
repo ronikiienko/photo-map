@@ -338,5 +338,11 @@ mod tests {
     fn shader_is_valid() {
         let module = wgpu::naga::front::wgsl::parse_str(include_str!("map.wgsl")).expect("map.wgsl does not parse");
         wgpu::naga::valid::Validator::new(Default::default(), wgpu::naga::valid::Capabilities::all()).validate(&module).expect("map.wgsl is not valid");
+        // every entry point a pipeline above names is there
+        let source = include_str!("gpu.rs");
+        let names = source.split("pipeline(\"").skip(1).flat_map(|s| s.split('"').step_by(2).take(2));
+        for name in names {
+            assert!(module.entry_points.iter().any(|e| e.name == name), "map.wgsl has no entry point {name}");
+        }
     }
 }
