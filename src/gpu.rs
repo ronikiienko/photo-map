@@ -105,7 +105,7 @@ pub struct MapRenderer {
     flags: wgpu::Buffer,
     /// Per photo: x, y and shape (where it is going, while the photos slide to another view).
     points: wgpu::Buffer,
-    /// Per photo: x, y where it was before the view changed.
+    /// Per photo: x, y and size where it was before the view changed, unused.
     from: wgpu::Buffer,
     /// The matches' copies beside the world: x, y, the photo's number (its bits), unused; and how many there are now.
     copies: wgpu::Buffer,
@@ -124,7 +124,7 @@ impl MapRenderer {
         });
         let from = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("from"),
-            contents: bytemuck::cast_slice(&data.points),
+            contents: bytemuck::cast_slice(&(0..data.n()).map(|i| [data.points[i].x, data.points[i].y, data.size(i), 0.0]).collect::<Vec<[f32; 4]>>()),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let copies = device.create_buffer(&wgpu::BufferDescriptor {
@@ -248,8 +248,9 @@ impl MapRenderer {
         self.n_copies = copies.len() as u32;
     }
 
-    /// The photos move from `from` to where `data` has them now (they slide there as `CameraUniform::slide` goes from 0 to 1).
-    pub fn move_points(&self, queue: &wgpu::Queue, data: &MapData, from: &[crate::data::Point]) {
+    /// The photos move from `from` (x, y, size) to where `data` has them now (they slide there as `CameraUniform::slide` goes
+    /// from 0 to 1).
+    pub fn move_points(&self, queue: &wgpu::Queue, data: &MapData, from: &[[f32; 4]]) {
         queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&points_with_shapes(data)));
         queue.write_buffer(&self.from, 0, bytemuck::cast_slice(from));
     }
@@ -301,7 +302,7 @@ impl MapRenderer {
     }
 }
 
-/// Per photo: x, y, and its shape (1, 0.67 for a 3:2 photo).
+/// Per photo: x, y, and its shape (1, 0.67 for a 3:2 photo; times its size).
 fn points_with_shapes(data: &MapData) -> Vec<[f32; 4]> {
     (0..data.n())
         .map(|i| {

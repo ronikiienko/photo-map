@@ -40,13 +40,13 @@ const LIFT_SHADOW_MAX: f32 = 22.0;  // ... up to this many px, a third of it low
 const NONE: u32 = 0xffffffffu;
 
 @group(0) @binding(0) var<uniform> cam: Camera;
-@group(0) @binding(1) var<storage, read> points: array<vec4f>;  // x, y, shape (1, 0.67 for a 3:2 photo)
+@group(0) @binding(1) var<storage, read> points: array<vec4f>;  // x, y, shape (1, 0.67 for a 3:2 photo; times its size)
 @group(0) @binding(2) var<storage, read> flags: array<u32>;
 @group(0) @binding(3) var pages: texture_2d_array<f32>;
 @group(0) @binding(4) var pages_sampler: sampler;
 @group(0) @binding(5) var<storage, read> table: array<u32>;
 @group(0) @binding(6) var<storage, read> first_page: array<u32>;
-@group(0) @binding(7) var<storage, read> from_xy: array<vec2f>;  // x, y before the view changed
+@group(0) @binding(7) var<storage, read> was: array<vec4f>;     // x, y and size before the view changed, unused
 @group(0) @binding(8) var<storage, read> copies: array<vec4f>;   // the matches' copies: x, y, the photo's number (its bits), unused
 
 struct VsOut {
@@ -56,15 +56,14 @@ struct VsOut {
     @location(2) @interpolate(flat) flags: u32,
     @location(3) @interpolate(flat) size: vec2f,  // on-screen width, height
     @location(4) @interpolate(flat) shape: vec2f,
-    @location(5) @interpolate(flat) px: f32,  // the photo's longer side on screen, before a match grows (picks the level)
+    @location(5) @interpolate(flat) px: f32,  // the photo's longer side on screen, before a match grows or it lifts (picks the level)
     @location(6) @interpolate(flat) shadow: f32,  // px the lifted photo's shadow reaches (0: not lifted)
 }
 
-// One corner of photo `id`'s quad, centred on `at` (world), `px` its longer side on screen, drawn `grow` times bigger,
+// One corner of photo `id`'s quad, centred on `at` (world), `shape` times `px` on screen, drawn `grow` times bigger,
 // lifted by `lift` (0 ... 1).
-fn quad(v: u32, id: u32, at: vec2f, px: f32, grow: f32, lift: f32) -> VsOut {
+fn quad(v: u32, id: u32, at: vec2f, shape: vec2f, px: f32, grow: f32, lift: f32) -> VsOut {
     var corners = array(vec2f(0., 0.), vec2f(1., 0.), vec2f(0., 1.), vec2f(0., 1.), vec2f(1., 0.), vec2f(1., 1.));
-    let shape = points[id].zw;
     let size = max(px * shape, vec2f(1.0)) * grow * (1.0 + LIFT * lift);  // longer side = px, the other follows the shape; never under 1 px
     let shadow = min(LIFT_SHADOW * max(size.x, size.y), LIFT_SHADOW_MAX) * lift;
     let local = (corners[v] - 0.5) * (size + 2.0 * AA + 2.7 * shadow);
@@ -75,8 +74,8 @@ fn quad(v: u32, id: u32, at: vec2f, px: f32, grow: f32, lift: f32) -> VsOut {
     out.id = id;
     out.flags = flags[id];
     out.size = size;
-    out.shape = shape;
-    out.px = px;
+    out.shape = shape / max(shape.x, shape.y);
+    out.px = px * max(shape.x, shape.y);
     out.shadow = shadow;
     return out;
 }
@@ -86,8 +85,13 @@ fn grow(id: u32) -> f32 {
     return 1.0 + select(0.0, GROW - 1.0, flags[id] != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
 }
 
+// A photo on the map, sliding from where it was (and its size then) to where it goes.
 fn photo_quad(v: u32, id: u32, lift: f32) -> VsOut {
-    return quad(v, id, mix(from_xy[id], points[id].xy, cam.slide), cam.size_px, grow(id), lift);
+    let p = points[id];
+    let f = was[id];
+    let size = mix(f.z, max(p.z, p.w), cam.slide);  // its longer side's size; the shape is 1 long times its size
+    let shape = p.zw / max(p.z, p.w) * size;
+    return quad(v, id, mix(f.xy, p.xy, cam.slide), shape, cam.size_px, grow(id), lift);
 }
 
 @vertex
@@ -100,7 +104,9 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) id: u32) -> V
 // no outline: they are in order, best first, and the tip under the mouse says how close each is).
 fn copy_quad(v: u32, k: u32, lift: f32) -> VsOut {
     let c = copies[k];
-    var out = quad(v, bitcast<u32>(c.z), c.xy, cam.copy_px, 1.0, lift);
+    let id = bitcast<u32>(c.z);
+    let shape = points[id].zw;
+    var out = quad(v, id, c.xy, shape / max(shape.x, shape.y), cam.copy_px, 1.0, lift);  // its shape at size 1
     out.flags = 0u;
     return out;
 }

@@ -132,8 +132,9 @@ struct OpenMap {
     view: View,
     map_points: Vec<data::Point>,
     map_photo_world: f32,
-    /// Where the photos were before the view last changed, and when it changed: they slide from there for SLIDE_SECONDS.
-    from: Vec<data::Point>,
+    /// Where the photos were before the view last changed (x, y, size, unused), and when it changed: they slide from there for
+    /// SLIDE_SECONDS.
+    from: Vec<[f32; 4]>,
     moved: Option<Instant>,
     /// The photos' cosines with the axes' four words, kept while the Axes view shows (changing how they spread needs no model).
     axes_cos: Option<[Vec<f32>; 4]>,
@@ -163,11 +164,17 @@ impl OpenMap {
         pts.fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p)))
     }
 
-    /// Put the photos at new places, sliding there from wherever they are drawn now (even halfway through another slide).
-    fn move_to(&mut self, queue: &wgpu::Queue, view: View, points: Vec<data::Point>, photo_world: f32) {
+    /// Put the photos at new places and sizes (empty: all 1), sliding there from wherever they are drawn now (even halfway through
+    /// another slide).
+    fn move_to(&mut self, queue: &wgpu::Queue, view: View, points: Vec<data::Point>, sizes: Vec<f32>, photo_world: f32) {
         let t = self.slide();
-        let shown: Vec<data::Point> = self.from.iter().zip(&self.data.points).map(|(a, b)| data::Point { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }).collect();
-        self.data.set_points(points);
+        let shown: Vec<[f32; 4]> = (0..self.data.n())
+            .map(|i| {
+                let (a, b, size) = (self.from[i], self.data.points[i], self.data.size(i));
+                [a[0] + (b.x - a[0]) * t, a[1] + (b.y - a[1]) * t, a[2] + (size - a[2]) * t, 0.0]
+            })
+            .collect();
+        self.data.set_points(points, sizes);
         self.renderer.move_points(queue, &self.data, &shown);
         self.from = shown;
         self.moved = Some(Instant::now());
@@ -382,7 +389,8 @@ impl Viewer {
         self.view_choice = View::Map; // a map opens as itself; the words are kept for the next one
         self.layout_asked.clear();
         self.engine.want(data.manifest.model()); // load the map's model now, so that the first search is quick
-        let (map_points, from) = (data.points.clone(), data.points.clone());
+        let map_points = data.points.clone();
+        let from = data.points.iter().map(|p| [p.x, p.y, 1.0, 0.0]).collect();
         self.map = Some(OpenMap {
             path,
             data,
@@ -619,7 +627,7 @@ impl Viewer {
         let to_screen = |w: Vec2| (w - center) * scale + viewport * 0.5;
         let size = (scale * m.photo_world).max(MIN_PX);
         let world = center + (screen - viewport * 0.5) / scale;
-        let reach = Vec2::splat((size * 0.5).max(4.0) / scale);
+        let reach = Vec2::splat((size * data.max_size() * 0.5).max(4.0) / scale);
         let mut best = None;
         data.grid.within(&data.points, world - reach, world + reach, |i| {
             let p = data.points[i];
@@ -710,7 +718,7 @@ impl Viewer {
             m.islands.clear();
             if m.view != View::Map {
                 let (points, size) = (m.map_points.clone(), m.map_photo_world);
-                m.move_to(&self.gpu.queue, View::Map, points, size);
+                m.move_to(&self.gpu.queue, View::Map, points, Vec::new(), size);
                 self.camera.fly_to(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
             }
             return;
@@ -762,9 +770,9 @@ impl Viewer {
             self.status = format!("left to right: {} to {}, bottom to top: {} to {}", a.left.trim(), a.right.trim(), a.down.trim(), a.up.trim());
         } else {
             m.axes_cos = None;
-            let (points, islands) = groups::place(&cos);
-            let size = median_neighbour_distance(&points);
-            m.move_to(&self.gpu.queue, View::Groups, points, size);
+            let forms: Vec<(f32, f32)> = (0..m.data.n()).map(|i| m.data.form(i).into()).collect();
+            let groups::Placed { points, sizes, islands, side } = groups::place(&cos, &forms);
+            m.move_to(&self.gpu.queue, View::Groups, points, sizes, side);
             self.status = format!("{} groups: each photo is in the one whose word it is most like", islands.len());
             m.islands = islands;
             m.island_words = self.layout_words.clone();
@@ -778,7 +786,7 @@ impl Viewer {
         let Some(cos) = &m.axes_cos else { return };
         let points = axes::place(cos, self.axes_spread);
         let size = median_neighbour_distance(&points);
-        m.move_to(&self.gpu.queue, View::Axes, points, size);
+        m.move_to(&self.gpu.queue, View::Axes, points, Vec::new(), size);
     }
 
     /// What the text model has said: a query's vector becomes the photos' cosines, shown at once.
@@ -1408,7 +1416,7 @@ impl Viewer {
         for island in &m.islands {
             let Some(word) = m.island_words.get(island.word) else { continue };
             // no wider than the island on screen (cut with "…"), so neighbours' names never run into each other
-            let width = island.side * self.camera.scale / ppp;
+            let width = island.size.x * self.camera.scale / ppp;
             if width < 24.0 {
                 continue;
             }
@@ -1420,7 +1428,7 @@ impl Viewer {
             job.wrap.break_anywhere = true;
             job.wrap.overflow_character = Some('…');
             let galley = painter.layout_job(job);
-            let at = self.camera.to_screen(Vec2::new(island.min.x + island.side / 2.0, island.min.y)) / ppp;
+            let at = self.camera.to_screen(Vec2::new(island.min.x + island.size.x / 2.0, island.min.y)) / ppp;
             let rect = egui::Align2::CENTER_BOTTOM.anchor_size(egui::pos2(at.x, at.y - 8.0), galley.size());
             painter.rect_filled(rect.expand2(egui::vec2(8.0, 3.0)), 6.0, egui::Color32::from_black_alpha(170));
             painter.galley(rect.min, galley, egui::Color32::WHITE);
@@ -1459,15 +1467,16 @@ impl Viewer {
             let s = self.camera.to_screen(Vec2::new(p.x, p.y)) / ppp;
             egui::pos2(s.x, s.y)
         };
-        // a photo's outline: `side` its longer side on screen (points), never smaller than a few points so it can be found
-        let outline = |i: usize, at: egui::Pos2, side: f32, width: f32| {
-            let shape = m.data.shape(i);
+        // a photo's outline: `side` its longer side on screen at size 1 (points), never smaller than a few points so it can be
+        // found; `copy`: its copy beside the world, never bigger
+        let outline = |i: usize, at: egui::Pos2, side: f32, width: f32, copy: bool| {
+            let shape = if copy { m.data.form(i) } else { m.data.shape(i) };
             let size = (egui::vec2(shape.x, shape.y) * side).max(egui::vec2(8.0, 8.0)) + egui::vec2(6.0, 6.0);
             painter.rect_stroke(egui::Rect::from_center_size(at, size), 3.0, egui::Stroke::new(width, egui::Color32::WHITE), egui::StrokeKind::Outside);
         };
         let (photo_side, copy_side) = (self.size_px() / ppp, m.copy_side * self.camera.scale / ppp);
         if let Some(i) = self.path_from {
-            outline(i, to_screen(m.data.points[i]), photo_side, 3.0);
+            outline(i, to_screen(m.data.points[i]), photo_side, 3.0, false);
         }
         let Some(first) = m.copies.first() else { return };
         if m.trail.is_some() {
@@ -1482,13 +1491,13 @@ impl Viewer {
         let galley = painter.layout_no_wrap(heading, egui::FontId::proportional(16.0), theme::MUTED);
         painter.galley(egui::pos2(top.x, top.y - galley.size().y - 6.0), galley, theme::MUTED);
         if let Some(k) = m.at {
-            outline(m.order[k], to_screen(m.copies[k]), copy_side, 2.0);
+            outline(m.order[k], to_screen(m.copies[k]), copy_side, 2.0, true);
         }
         match (self.hovered_copy, self.hovered) {
-            (Some(k), _) => outline(m.order[k], to_screen(m.data.points[m.order[k]]), photo_side, 2.0),
+            (Some(k), _) => outline(m.order[k], to_screen(m.data.points[m.order[k]]), photo_side, 2.0, false),
             (None, Some(i)) => {
                 if let Some(k) = m.order.iter().position(|&o| o == i) {
-                    outline(i, to_screen(m.copies[k]), copy_side, 2.0);
+                    outline(i, to_screen(m.copies[k]), copy_side, 2.0, true);
                 }
             }
             _ => {}
@@ -1980,7 +1989,8 @@ impl Viewer {
             let ppp = ctx.pixels_per_point();
             let score = m.sims.get(id).copied();
             egui::Area::new("tip".into()).fixed_pos([c.x / ppp + 14.0, c.y / ppp + 14.0]).interactable(false).show(&ctx, |ui| {
-                theme::card().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                // just the name (and how close a match is): the keys are in the help (H)
+                theme::card().inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
                     ui.set_max_width(320.0);
                     ui.label(&m.data.photos[id].title);
                     if let Some(score) = score {
@@ -1989,16 +1999,6 @@ impl Viewer {
                     if self.hovered_copy.is_some() {
                         ui.label(theme::muted("click: go to it on the map"));
                     }
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        theme::key(ui, "F");
-                        ui.label(theme::muted("photos like this"));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        theme::key(ui, "right-click");
-                        ui.label(theme::muted(if self.path_from.is_some() { "end the path here" } else { "a path from here" }));
-                    });
                 });
             });
         }

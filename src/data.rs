@@ -151,6 +151,8 @@ pub struct MapData {
     pub manifest: Manifest,
     pub photos: Vec<Photo>,
     pub points: Vec<Point>,
+    /// How big each photo is drawn, times `side` (the Groups view: the most typical photos biggest); empty: all 1.
+    pub sizes: Vec<f32>,
     /// A photo's longer side on the map (world units): the median distance to the nearest photo before they were spread.
     pub side: f32,
     /// The always-loaded levels as BC7 pages (bake.rs), uploaded to the GPU as they are.
@@ -187,17 +189,28 @@ impl MapData {
         for level in &mut regions.levels {
             level.sort_by(|a, b| b.photos.cmp(&a.photos));
         }
-        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, side, pages, grid, regions })
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, sizes: Vec::new(), side, pages, grid, regions })
     }
 
     pub fn n(&self) -> usize {
         self.photos.len()
     }
 
-    /// Put the photos somewhere else (another view of the same map): the grid follows.
-    pub fn set_points(&mut self, points: Vec<Point>) {
+    /// Put the photos somewhere else (another view of the same map), at these sizes (empty: all 1): the grid follows.
+    pub fn set_points(&mut self, points: Vec<Point>, sizes: Vec<f32>) {
         self.grid = Grid::new(&points);
         self.points = points;
+        self.sizes = sizes;
+    }
+
+    /// How big the photo is drawn (1 but in the Groups view).
+    pub fn size(&self, id: usize) -> f32 {
+        self.sizes.get(id).copied().unwrap_or(1.0)
+    }
+
+    /// The biggest any photo is drawn.
+    pub fn max_size(&self) -> f32 {
+        self.sizes.iter().copied().fold(1.0, f32::max)
     }
 
     pub fn path(&self, id: usize) -> PathBuf {
@@ -209,8 +222,13 @@ impl MapData {
         self.photos[id].width.max(self.photos[id].height)
     }
 
-    /// Photo size relative to a square: (1, 0.67) for a 3:2 landscape photo.
+    /// Photo size on the map relative to a square of `side`: (1, 0.67) for a 3:2 landscape photo, times its size.
     pub fn shape(&self, id: usize) -> glam::Vec2 {
+        self.form(id) * self.size(id)
+    }
+
+    /// The photo's shape alone (its longer side 1): for its copies beside the world, which are never bigger.
+    pub fn form(&self, id: usize) -> glam::Vec2 {
         let p = &self.photos[id];
         glam::Vec2::new(p.width as f32, p.height as f32) / self.native_long(id).max(1) as f32
     }

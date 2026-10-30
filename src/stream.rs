@@ -214,7 +214,7 @@ impl Streamer {
     }
 
     /// Once per frame: take in finished loads, then request what the current view needs.
-    /// `view_min`/`view_max`: the visible world box; `size_px`: a photo's longer side on screen. `copies`: the matches' copies
+    /// `view_min`/`view_max`: the visible world box; `size_px`: a photo's longer side on screen at size 1 (data.size). `copies`: the matches' copies
     /// beside the world (beside.rs), which photo is where, and their longer side on screen. `lens`: what the lens shows, if it is
     /// open; its photos come first.
     pub fn update(&mut self, queue: &wgpu::Queue, data: &MapData, view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32, copies: (&[usize], &[Point], f32), lens: Option<LensRequest>) {
@@ -227,9 +227,13 @@ impl Streamer {
         // how soon (the lens's first, then nearest the middle)
         let mut visible: Vec<(usize, usize, (u8, f32))> = Vec::new();
         let mut look = |view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32, copy_px: f32, group: u8| {
-            let want = level(size_px);
-            if want >= STREAMED {
-                data.grid.within(&data.points, view_min, view_max, |i| visible.push((i, want, (group, Vec2::new(data.points[i].x, data.points[i].y).distance_squared(center)))));
+            if level(size_px * data.max_size()) >= STREAMED {
+                data.grid.within(&data.points, view_min, view_max, |i| {
+                    let want = level(size_px * data.size(i));
+                    if want >= STREAMED {
+                        visible.push((i, want, (group, Vec2::new(data.points[i].x, data.points[i].y).distance_squared(center))));
+                    }
+                });
             }
             let (photos, at, _) = copies;
             let want = level(copy_px);
