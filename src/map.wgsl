@@ -11,6 +11,9 @@ struct Camera {
     size_px: f32,      // a photo's longer side on screen
     slide: f32,        // 0 ... 1: how far the photos have moved from `from_xy` to `points` (1 once the view has settled)
     copy_px: f32,      // a match's copy beside the world (beside.rs): its longer side on screen
+    lens_at: vec2f,    // the lens (lens.rs): its centre on screen, px ...
+    lens_radius: f32,  // ... and radius; 0 when this is not the lens's camera (nothing is clipped)
+    lens_pad: f32,
 }
 
 const PAGE: f32 = 4096.0;
@@ -23,6 +26,8 @@ const TINT_UNTIL: f32 = 96.0; // ... and shows its own picture by this size
 const GROW: f32 = 3.0;        // a match is drawn this much bigger while it is small, real size by TINT_UNTIL
 const OUTLINE: f32 = 3.0;     // px: a match keeps an outline of its colour at every zoom, so it stands out once its picture shows
 const AA: f32 = 1.0;  // px the quad reaches past the photo's edge, for the partly covered pixels
+const BACKGROUND = vec3f(0.047, 0.051, 0.063);  // the map's background (gpu.rs BACKGROUND)
+const LENS_SHADOW: f32 = 26.0;  // px the lens's shadow reaches past its edge
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var<storage, read> points: array<vec4f>;  // x, y, shape (1, 0.67 for a 3:2 photo)
@@ -96,7 +101,8 @@ fn sample_level(id: u32, level: u32, uv: vec2f, shape: vec2f) -> vec3f {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     let inside = in.size * 0.5 - abs(in.local);  // px to the nearest edge, per axis (negative: outside)
-    let cover = clamp(inside.x + 0.5, 0.0, 1.0) * clamp(inside.y + 0.5, 0.0, 1.0);
+    var cover = clamp(inside.x + 0.5, 0.0, 1.0) * clamp(inside.y + 0.5, 0.0, 1.0);
+    if cam.lens_radius > 0.0 { cover *= clamp(cam.lens_radius - distance(in.pos.xy, cam.lens_at) + 0.5, 0.0, 1.0); }  // inside the lens only
     if cover <= 0.0 { discard; }
     let uv = clamp(in.local / in.size + 0.5, vec2f(0.0), vec2f(1.0));
 
@@ -113,4 +119,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
         c = mix(tint, c, smoothstep(OUTLINE - 1.0, OUTLINE, min(inside.x, inside.y)));  // the outline, inside the photo's edge
     }
     return vec4f(c * cover, cover);
+}
+
+// The lens's ground, drawn before the photos it shows: the background inside the circle (covering the map under it), and a soft
+// shadow round it.
+@vertex
+fn vs_disc(@builtin(vertex_index) v: u32) -> @builtin(position) vec4f {
+    var corners = array(vec2f(0., 0.), vec2f(1., 0.), vec2f(0., 1.), vec2f(0., 1.), vec2f(1., 0.), vec2f(1., 1.));
+    let screen = cam.lens_at + (corners[v] - 0.5) * 2.0 * (cam.lens_radius + LENS_SHADOW);
+    return vec4f(screen.x / cam.viewport.x * 2.0 - 1.0, 1.0 - screen.y / cam.viewport.y * 2.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_disc(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let d = distance(pos.xy, cam.lens_at);
+    let inside = clamp(cam.lens_radius - d + 0.5, 0.0, 1.0);
+    let past = max(d - cam.lens_radius, 0.0) / LENS_SHADOW;
+    let shadow = 0.6 * (1.0 - smoothstep(0.0, 1.0, past)) * clamp(cam.lens_radius / 40.0, 0.0, 1.0);  // fades in as the lens grows
+    return vec4f(BACKGROUND * inside, inside + (1.0 - inside) * shadow);
 }

@@ -17,6 +17,7 @@ mod gpu;
 mod groups;
 mod home;
 mod layout;
+mod lens;
 mod library;
 #[cfg(test)]
 mod macbench;
@@ -185,6 +186,8 @@ struct Viewer {
     opening: Option<(PathBuf, JoinHandle<std::io::Result<MapData>>, Arc<Progress>)>,
     camera: Camera,
     keys: Keys,
+    /// The magnifier while Space is held (lens.rs).
+    lens: lens::Lens,
     alt: bool,
     /// Fingers are on the trackpad, scrolling (or the system's momentum after them): the scroll pans instead of zooming.
     scroll_gesture: bool,
@@ -284,6 +287,7 @@ impl Viewer {
             opening: None,
             camera,
             keys: Keys::default(),
+            lens: lens::Lens::default(),
             alt: false,
             scroll_gesture: false,
             hidden: false,
@@ -577,17 +581,38 @@ impl Viewer {
         (self.camera.scale * self.map.as_ref().map_or(PHOTO_WORLD_DEFAULT, |m| m.photo_world)).max(MIN_PX)
     }
 
-    /// The photo under the mouse: of the squares containing it, the one drawn last (on top).
+    /// The lens, if it shows (only on a map).
+    fn lens_view(&self) -> Option<lens::LensView> {
+        if self.page != Page::Viewer || self.map.is_none() {
+            return None;
+        }
+        self.lens.view(self.camera.center, self.camera.scale, self.camera.viewport, self.window.scale_factor() as f32)
+    }
+
+    /// The camera that shows this point of the screen: the lens's inside the lens, else the map's. (World point at the screen's
+    /// middle, screen px per world unit.)
+    fn camera_at(&self, screen: Vec2) -> (Vec2, f32) {
+        match self.lens_view().filter(|l| l.contains(screen)) {
+            Some(l) => (l.center, l.scale),
+            None => (self.camera.center, self.camera.scale),
+        }
+    }
+
+    /// The photo under the mouse: of the squares containing it, the one drawn last (on top). Inside the lens, the one it shows there.
     fn pick(&self, screen: Vec2) -> Option<usize> {
-        let data = &self.map.as_ref()?.data;
-        let size = self.size_px();
-        let world = self.camera.to_world(screen);
-        let reach = Vec2::splat((size * 0.5).max(4.0) / self.camera.scale);
+        let m = self.map.as_ref()?;
+        let data = &m.data;
+        let (center, scale) = self.camera_at(screen);
+        let viewport = self.camera.viewport;
+        let to_screen = |w: Vec2| (w - center) * scale + viewport * 0.5;
+        let size = (scale * m.photo_world).max(MIN_PX);
+        let world = center + (screen - viewport * 0.5) / scale;
+        let reach = Vec2::splat((size * 0.5).max(4.0) / scale);
         let mut best = None;
         data.grid.within(&data.points, world - reach, world + reach, |i| {
             let p = data.points[i];
             let half = (data.shape(i) * size * 0.5).max(Vec2::splat(4.0));  // real shape; tiny ones stay clickable
-            let d = (self.camera.to_screen(Vec2::new(p.x, p.y)) - screen).abs();
+            let d = (to_screen(Vec2::new(p.x, p.y)) - screen).abs();
             if d.x <= half.x && d.y <= half.y && best.is_none_or(|b| i > b) {
                 best = Some(i);
             }
@@ -598,10 +623,12 @@ impl Viewer {
     /// The match whose copy beside the world is under the mouse: its position among the matches.
     fn pick_copy(&self, screen: Vec2) -> Option<usize> {
         let m = self.map.as_ref()?;
+        let (center, scale) = self.camera_at(screen);
+        let viewport = self.camera.viewport;
         // the whole cell, not just the picture (a wide photo leaves most of its square empty)
-        let half = (m.copy_side / beside::FILL * self.camera.scale * 0.5).max(4.0);
+        let half = (m.copy_side / beside::FILL * scale * 0.5).max(4.0);
         m.copies.iter().position(|p| {
-            let d = (self.camera.to_screen(Vec2::new(p.x, p.y)) - screen).abs();
+            let d = ((Vec2::new(p.x, p.y) - center) * scale + viewport * 0.5 - screen).abs();
             d.x <= half && d.y <= half
         })
     }
@@ -922,6 +949,10 @@ impl Viewer {
                 return;
             }
         }
+        if *key == Key::Named(NamedKey::Space) {
+            self.lens.held = down && self.page == Page::Viewer;
+            return;
+        }
         let k = &mut self.keys;
         match key {
             Key::Named(NamedKey::ArrowLeft) => k.left = down,
@@ -983,7 +1014,14 @@ impl Viewer {
                     winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => self.scroll_gesture = false,
                     winit::event::TouchPhase::Moved => {}
                 }
-                if !over_ui && self.page == Page::Viewer {
+                if self.lens.held && self.page == Page::Viewer {
+                    // while the lens is held the wheel sets how much it magnifies (a trackpad's two fingers still pan)
+                    match delta {
+                        MouseScrollDelta::LineDelta(_, y) => self.lens.scroll(y),
+                        MouseScrollDelta::PixelDelta(p) if self.scroll_gesture => self.camera.pan_pixels(Vec2::new(p.x as f32, p.y as f32)),
+                        MouseScrollDelta::PixelDelta(p) => self.lens.scroll(p.y as f32 / 50.0),
+                    }
+                } else if !over_ui && self.page == Page::Viewer {
                     match delta {
                         MouseScrollDelta::LineDelta(_, y) => self.camera.scroll_lines(y),
                         MouseScrollDelta::PixelDelta(p) if self.scroll_gesture => self.camera.pan_pixels(Vec2::new(p.x as f32, p.y as f32)),
@@ -1026,7 +1064,10 @@ impl Viewer {
                     self.status = "that isn't a photo I can search with (jpg, png, webp, gif, bmp)".into();
                 }
             }
-            WindowEvent::Focused(false) => self.keys = Keys::default(),
+            WindowEvent::Focused(false) => {
+                self.keys = Keys::default();
+                self.lens.held = false;
+            }
             WindowEvent::Focused(true) => self.window.request_redraw(),
             WindowEvent::Occluded(hidden) => {
                 self.hidden = hidden;
@@ -1054,6 +1095,7 @@ impl Viewer {
             self.frame_times.remove(0);
         }
         self.camera.update(dt, self.cursor, self.keys);
+        self.lens.update(dt, self.cursor);
         self.frames += 1;
         self.poll_engine();
         self.runtime.tick();
@@ -1104,7 +1146,19 @@ impl Viewer {
             size_px,
             slide: self.map.as_ref().map_or(1.0, OpenMap::slide),
             copy_px: self.map.as_ref().map_or(0.0, |m| m.copy_side * self.camera.scale),
+            lens_at: [0.0; 2],
+            lens_radius: 0.0,
+            lens_pad: 0.0,
         };
+        // the lens's camera, and what it wants loaded: the world box under its circle at its sharpness
+        let lens = self.lens_view().zip(self.map.as_ref()).map(|(l, m)| {
+            let viewport = self.camera.viewport;
+            let (size_px, copy_px) = ((l.scale * m.photo_world).max(MIN_PX), m.copy_side * l.scale);
+            let reach = Vec2::splat(l.radius);
+            let request = stream::LensRequest { min: l.to_world(l.at - reach, viewport), max: l.to_world(l.at + reach, viewport), center: l.to_world(l.at, viewport), size_px, copy_px };
+            let uniform = CameraUniform { center: l.center.into(), scale: l.scale, size_px, copy_px, lens_at: l.at.into(), lens_radius: l.radius, ..cam };
+            (uniform, request)
+        });
         match &mut self.map {
             Some(m) if self.page == Page::Viewer => {
                 if m.flags_dirty {
@@ -1112,8 +1166,8 @@ impl Viewer {
                     m.flags_dirty = false;
                 }
                 let copies = (&m.order[..], &m.copies[..], cam.copy_px);
-                m.streamer.update(&self.gpu.queue, &m.data, view_min, view_max, self.camera.center, size_px, copies);
-                m.renderer.draw(&self.gpu.queue, &mut encoder, &view, cam, self.smooth);
+                m.streamer.update(&self.gpu.queue, &m.data, view_min, view_max, self.camera.center, size_px, copies, lens.map(|l| l.1));
+                m.renderer.draw(&self.gpu.queue, &mut encoder, &view, cam, self.smooth, lens.map(|l| l.0));
             }
             _ => gpu::clear(&mut encoder, &view),
         }
@@ -1262,7 +1316,7 @@ impl Viewer {
                 let at = self.camera.to_screen(Vec2::new(l.x, l.y)) / ppp;
                 let galley = painter.layout_no_wrap(l.name.clone(), egui::FontId::proportional(size), colour);
                 let rect = egui::Rect::from_center_size(egui::pos2(at.x, at.y), galley.size());
-                if !screen.intersects(rect) || taken.iter().any(|t| t.intersects(rect.expand(6.0))) {
+                if !screen.intersects(rect) || taken.iter().any(|t| t.intersects(rect.expand(6.0))) || self.under_lens(rect, ppp) {
                     continue;
                 }
                 taken.push(rect);
@@ -1407,6 +1461,26 @@ impl Viewer {
         }
     }
 
+    /// Does this rectangle (points) touch the lens? Words drawn over the map leave the lens clear.
+    fn under_lens(&self, rect: egui::Rect, ppp: f32) -> bool {
+        self.lens_view().is_some_and(|l| l.touches(Vec2::new(rect.min.x, rect.min.y) * ppp, Vec2::new(rect.max.x, rect.max.y) * ppp))
+    }
+
+    /// The lens's rim (its ground and photos are drawn with the map), and how much it magnifies while that is being changed.
+    fn draw_lens(&self, ctx: &egui::Context) {
+        let Some(l) = self.lens_view() else { return };
+        let ppp = ctx.pixels_per_point();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "lens".into()));
+        let (at, radius) = (egui::pos2(l.at.x / ppp, l.at.y / ppp), l.radius / ppp);
+        painter.circle_stroke(at, radius, egui::Stroke::new(1.5, egui::Color32::from_white_alpha((150.0 * l.shown) as u8)));
+        if let Some((text, alpha)) = self.lens.label() {
+            let galley = painter.layout_no_wrap(text, egui::FontId::proportional(14.0), egui::Color32::WHITE);
+            let rect = egui::Rect::from_center_size(at + egui::vec2(0.0, radius - 22.0), galley.size()).expand2(egui::vec2(8.0, 3.0));
+            painter.rect_filled(rect, 8.0, egui::Color32::from_black_alpha((170.0 * alpha * l.shown) as u8));
+            painter.galley(rect.min + egui::vec2(8.0, 3.0), galley, egui::Color32::WHITE.gamma_multiply(alpha * l.shown));
+        }
+    }
+
     /// A photo whose file can't be found (moved, deleted, or on a disk not plugged in) is darkened once it is big enough to want it,
     /// with "not found" on it: what shows is its small picture made when the map was, blown up.
     fn draw_missing(&self, ctx: &egui::Context) {
@@ -1425,6 +1499,9 @@ impl Viewer {
             let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
             let size = m.data.shape(i) * long;
             let rect = egui::Rect::from_center_size(egui::pos2(at.x, at.y), egui::vec2(size.x, size.y));
+            if self.under_lens(rect, ppp) {
+                return;
+            }
             painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(190));
             if size.x >= 70.0 {
                 painter.text(rect.center(), egui::Align2::CENTER_CENTER, "not found", egui::FontId::proportional((size.x / 8.0).clamp(11.0, 18.0)), egui::Color32::from_gray(200));
@@ -1489,7 +1566,7 @@ impl Viewer {
             let text_box = galley.rows.iter().fold(egui::Rect::NOTHING, |a, r| a.union(r.rect()));
             let origin = egui::pos2(at.x - text_box.center().x, at.y - h * 0.5 - 6.0 - text_box.max.y);
             let rect = text_box.translate(origin.to_vec2());
-            if !screen.intersects(rect) || taken.iter().any(|t| t.intersects(rect.expand(3.0))) {
+            if !screen.intersects(rect) || taken.iter().any(|t| t.intersects(rect.expand(3.0))) || self.under_lens(rect, ppp) {
                 continue;
             }
             taken.push(rect);
@@ -1526,6 +1603,7 @@ impl Viewer {
         self.draw_missing(&ctx);
         self.draw_photo_captions(&ctx);
         self.draw_beside(&ctx);
+        self.draw_lens(&ctx);
 
         let width = (ctx.content_rect().width() - 24.0).clamp(320.0, 760.0);
         egui::Area::new("top".into()).anchor(egui::Align2::CENTER_TOP, [0.0, 12.0]).show(&ctx, |ui| {
@@ -1740,6 +1818,7 @@ impl Viewer {
                                 (&["scroll", "Q", "E"][..], "zoom"),
                                 (&["drag", "W", "A", "S", "D"][..], "move"),
                                 (&["F"][..], "photos like the one under the mouse"),
+                                (&["Space"][..], "hold: a lens over the map (scroll: how much it magnifies)"),
                                 (&["right-click"][..], "a path of similar photos from one photo to another"),
                                 (&["N", "P"][..], "next / previous match"),
                                 (&["F11", "Alt", "Enter"][..], "fullscreen"),

@@ -77,16 +77,22 @@ pub struct CameraUniform {
     pub slide: f32,
     /// A match's copy beside the world (beside.rs): its longer side on screen.
     pub copy_px: f32,
+    /// The lens (lens.rs): its centre on screen and radius, px; a radius of 0 for the map's own camera (nothing clipped).
+    pub lens_at: [f32; 2],
+    pub lens_radius: f32,
+    pub lens_pad: f32,
 }
 
 pub struct MapRenderer {
     pipeline: wgpu::RenderPipeline,
     /// The same, drawing the matches' copies (map.wgsl's vs_copy).
     copy_pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
-    /// The same with the pixels taken as they are (nearest), not blended with their neighbours.
-    bind_group_nearest: wgpu::BindGroup,
+    /// The lens's ground (map.wgsl's vs_disc, fs_disc).
+    disc_pipeline: wgpu::RenderPipeline,
+    /// Per camera (the map's, the lens's) and sampler (smooth, nearest).
+    bind_groups: [[wgpu::BindGroup; 2]; 2],
     camera: wgpu::Buffer,
+    lens_camera: wgpu::Buffer,
     flags: wgpu::Buffer,
     /// Per photo: x, y and shape (where it is going, while the photos slide to another view).
     points: wgpu::Buffer,
@@ -124,12 +130,13 @@ impl MapRenderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let camera = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("camera"),
+        let camera_buffer = |label| device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
             size: size_of::<CameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let (camera, lens_camera) = (camera_buffer("camera"), camera_buffer("lens camera"));
 
         // pixels: one texture array of pages, owned by the streamer; slots sit at exact texel spots, so no mipmaps
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -172,7 +179,7 @@ impl MapRenderer {
                 entry(8, wgpu::ShaderStages::VERTEX, storage),
             ],
         });
-        let bind_group_with = |sampler: &wgpu::Sampler| device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group_with = |camera: &wgpu::Buffer, sampler: &wgpu::Sampler| device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("map"),
             layout: &layout,
             entries: &[
@@ -187,13 +194,13 @@ impl MapRenderer {
                 wgpu::BindGroupEntry { binding: 8, resource: copies.as_entire_binding() },
             ],
         });
-        let (bind_group, bind_group_nearest) = (bind_group_with(&sampler), bind_group_with(&nearest));
+        let bind_groups = [&camera, &lens_camera].map(|c| [&sampler, &nearest].map(|s| bind_group_with(c, s)));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("map"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |vertex: &str| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = |vertex: &str, fragment: &str| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(vertex),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -204,7 +211,7 @@ impl MapRenderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fragment),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: gpu.config.format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), // antialiased edges (map.wgsl)
@@ -218,8 +225,8 @@ impl MapRenderer {
             multiview_mask: None,
             cache: None,
         });
-        let (pipeline, copy_pipeline) = (pipeline("vs_main"), pipeline("vs_copy"));
-        Self { pipeline, copy_pipeline, bind_group, bind_group_nearest, camera, flags, points, from, copies, n_copies: 0, n: n as u32 }
+        let (pipeline, copy_pipeline, disc_pipeline) = (pipeline("vs_main", "fs_main"), pipeline("vs_copy", "fs_main"), pipeline("vs_disc", "fs_disc"));
+        Self { pipeline, copy_pipeline, disc_pipeline, bind_groups, camera, lens_camera, flags, points, from, copies, n_copies: 0, n: n as u32 }
     }
 
     /// The matches' copies beside the world: photo `photos[k]` at `at[k]`.
@@ -243,8 +250,8 @@ impl MapRenderer {
     }
 
     /// `smooth`: pixels blended with their neighbours when a photo is shown bigger or smaller than it is stored; else each screen
-    /// pixel takes the nearest one.
-    pub fn draw(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, cam: CameraUniform, smooth: bool) {
+    /// pixel takes the nearest one. `lens`: the lens's camera, if it shows: drawn over the map, clipped to its circle.
+    pub fn draw(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, cam: CameraUniform, smooth: bool, lens: Option<CameraUniform>) {
         queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&cam));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("map"),
@@ -259,8 +266,21 @@ impl MapRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        let sampler = if smooth { 0 } else { 1 };
+        self.draw_photos(&mut pass, &self.bind_groups[0][sampler]);
+        if let Some(lens) = lens {
+            queue.write_buffer(&self.lens_camera, 0, bytemuck::bytes_of(&lens));
+            pass.set_pipeline(&self.disc_pipeline);
+            pass.set_bind_group(0, &self.bind_groups[1][sampler], &[]);
+            pass.draw(0..6, 0..1);
+            self.draw_photos(&mut pass, &self.bind_groups[1][sampler]);
+        }
+    }
+
+    /// Every photo, then the matches' copies, with this bind group's camera.
+    fn draw_photos(&self, pass: &mut wgpu::RenderPass, bind_group: &wgpu::BindGroup) {
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, if smooth { &self.bind_group } else { &self.bind_group_nearest }, &[]);
+        pass.set_bind_group(0, bind_group, &[]);
         pass.draw(0..6, 0..self.n);
         if self.n_copies > 0 {
             pass.set_pipeline(&self.copy_pipeline);

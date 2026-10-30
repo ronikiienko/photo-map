@@ -60,6 +60,16 @@ struct Loaded {
     levels: Vec<Level>,
 }
 
+/// What the lens shows (lens.rs): the world box under it, its centre, and a photo's and a copy's longer side on screen in it.
+#[derive(Clone, Copy)]
+pub struct LensRequest {
+    pub min: Vec2,
+    pub max: Vec2,
+    pub center: Vec2,
+    pub size_px: f32,
+    pub copy_px: f32,
+}
+
 pub struct Streamer {
     texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -205,31 +215,39 @@ impl Streamer {
 
     /// Once per frame: take in finished loads, then request what the current view needs.
     /// `view_min`/`view_max`: the visible world box; `size_px`: a photo's longer side on screen. `copies`: the matches' copies
-    /// beside the world (beside.rs), which photo is where, and their longer side on screen.
-    pub fn update(&mut self, queue: &wgpu::Queue, data: &MapData, view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32, copies: (&[usize], &[Point], f32)) {
+    /// beside the world (beside.rs), which photo is where, and their longer side on screen. `lens`: what the lens shows, if it is
+    /// open; its photos come first.
+    pub fn update(&mut self, queue: &wgpu::Queue, data: &MapData, view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32, copies: (&[usize], &[Point], f32), lens: Option<LensRequest>) {
         self.frame += 1;
         let frame = self.frame;
         // the level matching an on-screen size, plus the next one up to blend towards
         let level = |px: f32| (px.max(1.0).log2().floor() as usize + 1).min(LEVELS - 1);
 
-        // the photos on screen (a photo and its copy may both be): the level each wants, and how far it is from the middle
-        let mut visible: Vec<(usize, usize, Vec2)> = Vec::new();
-        let want = level(size_px);
-        if want >= STREAMED {
-            data.grid.within(&data.points, view_min, view_max, |i| visible.push((i, want, Vec2::new(data.points[i].x, data.points[i].y))));
-        }
-        let (photos, at, copy_px) = copies;
-        let want = level(copy_px);
-        if want >= STREAMED {
-            for (&i, p) in photos.iter().zip(at) {
-                let p = Vec2::new(p.x, p.y);
-                if p.cmpge(view_min).all() && p.cmple(view_max).all() {
-                    visible.push((i, want, p));
+        // the photos on screen (a photo and its copy may both be, and the lens may show it bigger): the level each wants, and
+        // how soon (the lens's first, then nearest the middle)
+        let mut visible: Vec<(usize, usize, (u8, f32))> = Vec::new();
+        let mut look = |view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32, copy_px: f32, group: u8| {
+            let want = level(size_px);
+            if want >= STREAMED {
+                data.grid.within(&data.points, view_min, view_max, |i| visible.push((i, want, (group, Vec2::new(data.points[i].x, data.points[i].y).distance_squared(center)))));
+            }
+            let (photos, at, _) = copies;
+            let want = level(copy_px);
+            if want >= STREAMED {
+                for (&i, p) in photos.iter().zip(at) {
+                    let p = Vec2::new(p.x, p.y);
+                    if p.cmpge(view_min).all() && p.cmple(view_max).all() {
+                        visible.push((i, want, (group, p.distance_squared(center))));
+                    }
                 }
             }
+        };
+        if let Some(l) = lens {
+            look(l.min, l.max, l.center, l.size_px, l.copy_px, 0);
         }
-        let mut wanted: Vec<(f32, usize, usize, usize)> = Vec::new();
-        for (i, want, p) in visible {
+        look(view_min, view_max, center, size_px, copies.2, 1);
+        let mut wanted: Vec<((u8, f32), usize, usize, usize)> = Vec::new();
+        for (i, want, soon) in visible {
             let count = self.table_cpu[i * ENTRY] as usize;
             for l in STREAMED..count {
                 let slot = self.table_cpu[i * ENTRY + 4 + l] as usize;
@@ -238,11 +256,11 @@ impl Streamer {
             let need = want.min(self.max_level(i));
             let retry = self.missing[i] == 0 || frame >= self.missing[i] + RETRY_FRAMES;
             if need >= STREAMED && count <= need && !self.loading[i] && retry {
-                wanted.push((p.distance_squared(center), i, count, need));
+                wanted.push((soon, i, count, need));
             }
         }
         // a photo wanted twice (itself and its copy): once, at the bigger of the two
-        wanted.sort_by(|a, b| a.1.cmp(&b.1).then(b.3.cmp(&a.3)));
+        wanted.sort_by(|a, b| a.1.cmp(&b.1).then(b.3.cmp(&a.3)).then(a.0.0.cmp(&b.0.0)));
         wanted.dedup_by_key(|w| w.1);
 
         // finished loads, level by level from the bottom: each into a free or least-recently-seen slot
@@ -276,8 +294,8 @@ impl Streamer {
             }
         }
 
-        // nearest to the screen centre first; never more than the smallest streamed pool can hold
-        wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // the lens's first, then nearest the screen centre; never more than the smallest streamed pool can hold
+        wanted.sort_by(|a, b| a.0.0.cmp(&b.0.0).then(a.0.1.total_cmp(&b.0.1)));
         for &(_, id, from, to) in wanted.iter().take(self.pools[0].holder.len() * 3 / 4) {
             if self.in_flight >= MAX_IN_FLIGHT {
                 break;
