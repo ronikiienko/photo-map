@@ -239,8 +239,9 @@ struct Viewer {
     asked: Vec<Option<u64>>,
     answers: Vec<Option<Vec<f32>>>,
     logic: query::Logic,
-    /// A photo dropped on the window: searched for together with the text.
-    photo: Option<PathBuf>,
+    /// The photos searched for (dropped on the window, or from the photo menu), each with a small picture for the bar. Several are
+    /// averaged: what they share counts.
+    photos: Vec<(PathBuf, egui::TextureHandle)>,
     /// What the last search did, next to the box.
     status: String,
     /// The words of the Axes view and of the Groups view (as typed), and the view the Layout menu has chosen.
@@ -260,8 +261,6 @@ struct Viewer {
     smooth: bool,
     /// What the shown search was for (its words, or "this photo").
     shown: String,
-    /// The photo in the box, as a small picture.
-    photo_tex: Option<egui::TextureHandle>,
     /// The runtime libraries: what is installed and the install under way.
     runtime: manager::Manager,
     store: modelstore::ModelStore,
@@ -332,7 +331,7 @@ impl Viewer {
             asked: Vec::new(),
             answers: Vec::new(),
             logic: query::Logic::one(),
-            photo: None,
+            photos: Vec::new(),
             status: String::new(),
             axes: axes::Words::default(),
             axes_spread: axes::Spread::default(),
@@ -345,7 +344,6 @@ impl Viewer {
             wanted: 100.0,
             smooth: true,
             shown: String::new(),
-            photo_tex: None,
             last_frame: Instant::now(),
             frame_times: Vec::new(),
             frames: 0,
@@ -388,8 +386,7 @@ impl Viewer {
         self.status.clear();
         // the last map's search is over with it: its words, its photo, and what the box said it was
         self.search.clear();
-        self.photo = None;
-        self.photo_tex = None;
+        self.photos.clear();
         self.shown.clear();
         let vectors = search::Vectors::open(&path, n, data.manifest.dim());
         let tree = tree::read(&path, n);
@@ -662,16 +659,22 @@ impl Viewer {
         })
     }
 
-    /// Take a photo for the search: remember its path and a small picture of it to show in the bar. False if it can't be read.
-    fn set_photo(&mut self, path: PathBuf) -> bool {
+    /// Take a photo for the search, instead of the photos before it or (`add`) besides them: remember its path and a small picture
+    /// of it to show in the bar. False if it can't be read.
+    fn set_photo(&mut self, path: PathBuf, add: bool) -> bool {
         let Ok(img) = image::open(&path) else {
             self.status = "can't read that photo".into();
             return false;
         };
         let small = img.thumbnail(96, 96).to_rgba8();
         let color = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
-        self.photo_tex = Some(self.ui.ctx.load_texture("query photo", color, egui::TextureOptions::LINEAR));
-        self.photo = Some(path);
+        let tex = self.ui.ctx.load_texture("query photo", color, egui::TextureOptions::LINEAR);
+        if !add {
+            self.photos.clear();
+        }
+        if !self.photos.iter().any(|(p, _)| *p == path) {
+            self.photos.push((path, tex));
+        }
         self.search.clear(); // a search is words or a photo, not both: the photo replaces the words
         true
     }
@@ -682,13 +685,13 @@ impl Viewer {
         let text = self.search.trim().to_string();
         // a path to a photo typed or pasted in the box (from a file manager, or dragged on a terminal) is a photo search
         if let Some(path) = photo_path(&text) {
-            if self.set_photo(path) {
+            if self.set_photo(path, false) {
                 self.search.clear();
             }
         }
         let text = self.search.trim().to_string();
         let Some(m) = &mut self.map else { return };
-        if text.is_empty() && self.photo.is_none() {
+        if text.is_empty() && self.photos.is_empty() {
             m.flags.fill(0);
             m.flags_dirty = true;
             m.sims.clear();
@@ -707,15 +710,16 @@ impl Viewer {
             self.status = format!("search can't start: {why}");
         } else {
             let model = m.data.manifest.model().to_string();
-            let (queries, logic, shown) = match &self.photo {
-                Some(path) => (vec![search::Query::Photo(path.clone())], query::Logic::one(), "this photo".into()),
-                None => match query::Logic::parse(&text) {
+            let (queries, logic, shown) = match self.photos.len() {
+                0 => match query::Logic::parse(&text) {
                     Ok(logic) => (logic.terms.iter().map(|t| search::Query::Words(t.clone())).collect(), logic, text),
                     Err(e) => {
                         self.status = e;
                         return;
                     }
                 },
+                1 => (vec![search::Query::Photo(self.photos[0].0.clone())], query::Logic::one(), "this photo".into()),
+                n => (self.photos.iter().map(|(p, _)| search::Query::Photo(p.clone())).collect(), query::Logic::photos(n), format!("these {n} photos")),
             };
             self.asked = queries.into_iter().map(|q| Some(self.engine.ask(&model, q))).collect();
             self.answers = vec![None; self.asked.len()];
@@ -893,8 +897,7 @@ impl Viewer {
         let path = tree::route(tree, a, b);
         // the search's words and matches go
         self.search.clear();
-        self.photo = None;
-        self.photo_tex = None;
+        self.photos.clear();
         self.shown.clear();
         self.asked.clear();
         m.sims.clear();
@@ -914,10 +917,11 @@ impl Viewer {
         self.camera.fly_to(self.camera.fit(m.beside_box().0, m.beside_box().1));
     }
 
-    /// F over a photo: the same as dropping that photo's file on the window (it goes in the search box and is searched).
-    fn ask_like(&mut self, photo: usize) {
+    /// F over a photo: the same as dropping that photo's file on the window (it goes in the search box and is searched), instead of
+    /// the photos searched for or (`add`) besides them.
+    fn ask_like(&mut self, photo: usize, add: bool) {
         let Some(file) = self.map.as_ref().map(|m| m.data.path(photo)) else { return };
-        if self.set_photo(file) {
+        if self.set_photo(file, add) {
             self.ask();
         }
     }
@@ -988,7 +992,7 @@ impl Viewer {
         }
         if key == KeyCode::KeyF {
             if let (true, Some(i)) = (down, self.hovered) {
-                self.ask_like(i);
+                self.ask_like(i, false);
             }
             return;
         }
@@ -1096,9 +1100,10 @@ impl Viewer {
                 self.dropped.push(path);
                 self.window.request_redraw();
             }
+            // a photo dropped while photos are the search joins them (one event per file: several dropped at once all join)
             WindowEvent::DroppedFile(path) if self.page == Page::Viewer => {
                 if path.extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_TYPES.contains(&e.to_lowercase().as_str())) {
-                    if self.set_photo(path) {
+                    if self.set_photo(path, !self.photos.is_empty()) {
                         self.ask();
                     }
                 } else {
@@ -1270,8 +1275,7 @@ impl Viewer {
         let ctx = self.ui.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| self.build_ui(ui, &mut actions));
         if actions.clear_photo {
-            self.photo = None;
-            self.photo_tex = None;
+            self.photos.clear();
             self.ask();
             self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box"))); // ready to type
         }
@@ -1287,7 +1291,17 @@ impl Viewer {
             self.show_path(a, b);
         }
         if let Some(i) = actions.like {
-            self.ask_like(i);
+            self.ask_like(i, false);
+        }
+        if let Some(i) = actions.add_like {
+            self.ask_like(i, true);
+        }
+        if let Some(k) = actions.drop_photo {
+            let _ = self.photos.remove(k);
+            self.ask();
+            if self.photos.is_empty() {
+                self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box"))); // the last one: back to words
+            }
         }
         if actions.ask {
             self.ask();
@@ -1806,8 +1820,8 @@ impl Viewer {
                             ui.spinner();
                         }
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            if self.photo.is_some() {
-                                // a search is a photo or words, never both: while a photo is the search it takes the place of the box
+                            if !self.photos.is_empty() {
+                                // a search is photos or words, never both: while a photo is the search it takes the place of the box
                                 egui::Frame::new()
                                     .fill(egui::Color32::from_rgb(30, 33, 42))
                                     .stroke(egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.6)))
@@ -1816,12 +1830,20 @@ impl Viewer {
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width() - 2.0);
                                         ui.horizontal(|ui| {
-                                            if let Some(tex) = &self.photo_tex {
-                                                ui.add(egui::Image::new((tex.id(), egui::vec2(28.0 * tex.aspect_ratio(), 28.0))).corner_radius(4));
+                                            for (k, (_, tex)) in self.photos.iter().enumerate() {
+                                                let image = egui::Image::new((tex.id(), egui::vec2(28.0 * tex.aspect_ratio(), 28.0))).corner_radius(4);
+                                                let thumb = ui.add(image.sense(egui::Sense::click()));
+                                                // under the mouse: darkened, with a cross, as clicking takes it out
+                                                if thumb.hovered() {
+                                                    ui.painter().rect_filled(thumb.rect, 4.0, egui::Color32::from_black_alpha(150));
+                                                    ui.painter().text(thumb.rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(20.0), egui::Color32::WHITE);
+                                                }
+                                                if thumb.on_hover_text("take it out of the search").clicked() {
+                                                    actions.drop_photo = Some(k);
+                                                }
                                             }
-                                            ui.label("Photos like this");
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if ui.button("× Search with words instead").on_hover_text("stop searching by this photo, clear the matches and type words").clicked() {
+                                                if ui.button("×").on_hover_text("search with words instead: the photos and the matches go").clicked() {
                                                     actions.clear_photo = true;
                                                 }
                                             });
@@ -1872,13 +1894,23 @@ impl Viewer {
                     });
                 }
                 // while typing in the empty box: how to search
-                if ui.ctx().memory(|m| m.has_focus(egui::Id::new("search-box"))) && self.search.trim().is_empty() && self.photo.is_none() {
+                if ui.ctx().memory(|m| m.has_focus(egui::Id::new("search-box"))) && self.search.trim().is_empty() && self.photos.is_empty() {
                     ui.add_space(4.0);
                     ui.label(theme::muted(
                         "Describe what you want in a short phrase: \"woman on a bike in winter\". Short phrases work better than long sentences.\n\
                          The model doesn't understand \"without\" or \"no\": use NOT, in capitals (street at night NOT cars), and photos with that go lower. \
                          For \"this or that\", search twice.\n\
                          Good at: things, places, scenes, light, weather, mood, style. Bad at: counting, left and right, who someone is, negation inside a sentence.",
+                    ));
+                }
+                // one photo searched for: that more can join it, and when that helps
+                if self.photos.len() == 1 {
+                    ui.add_space(4.0);
+                    ui.label(theme::muted(
+                        "One photo brings everything in it: the background, the light, the colours. To find one thing (a place, an object, a style), \
+                         add more photos of it, the more different the better (other places, angles, light): drop them here, or right-click a photo and \
+                         Add to search. What they share counts, what differs counts less.\n\
+                         It doesn't recognise faces: a person is found by what they wear and where they are.",
                     ));
                 }
             });
@@ -1903,7 +1935,7 @@ impl Viewer {
                         ui.label(theme::muted(
                             "Every photo is turned into numbers that describe what it shows, and photos that look alike are placed close together. \
                              Zoom in and similar photos sit side by side; the names mark regions of the map. \
-                             Search compares your words, or a photo you drop in (one or the other), with every photo and highlights the best matches. \
+                             Search compares your words, or photos you drop in (words or photos, not both), with every photo and highlights the best matches. \
                              NOT in capitals pushes things down: \"street NOT cars\".",
                         ));
                         ui.add_space(8.0);
@@ -1968,6 +2000,12 @@ impl Viewer {
                     if theme::button(ui, egui::Button::new("Photos like this")).on_hover_text("search with this photo (F)").clicked() {
                         actions.like = Some(photo);
                     }
+                    let path = m.data.path(photo);
+                    if !self.photos.is_empty() && !self.photos.iter().any(|(p, _)| *p == path) {
+                        if theme::button(ui, egui::Button::new("Add to search")).on_hover_text("search for what this photo and the ones searched for share").clicked() {
+                            actions.add_like = Some(photo);
+                        }
+                    }
                     ui.separator();
                     let file = files::original(&m.data, photo);
                     let source = &m.data.photos[photo].source;
@@ -1986,7 +2024,7 @@ impl Viewer {
                 });
             });
         }
-        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.details.is_some() || actions.done {
+        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.add_like.is_some() || actions.details.is_some() || actions.done {
             self.menu = None;
         }
         if let (Some((photo, at)), Some(m)) = (actions.details, &self.map) {
@@ -2056,6 +2094,9 @@ struct UiActions {
     path_from: Option<usize>,
     path_to: Option<usize>,
     like: Option<usize>,
+    add_like: Option<usize>,
+    /// A photo taken out of the search (its place in `photos`).
+    drop_photo: Option<usize>,
     /// "Details": the photo and where the menu was.
     details: Option<(usize, egui::Pos2)>,
     /// A menu item that needs nothing more was chosen: the menu closes.
