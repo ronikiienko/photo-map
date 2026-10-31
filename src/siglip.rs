@@ -4,7 +4,9 @@
 //!
 //! A photo is squeezed into a square (its shape is not kept), scaled to -1..1; the photo encoder runs on TensorRT when it can (its
 //! libraries are in runtime/tensorrt/) and on the CUDA provider otherwise. The text goes in lower case, cut to 64 tokens with an
-//! end mark and padded to 64 by the tokenizer's own settings.
+//! end mark and padded to 64 by the tokenizer's own settings. The text encoder is fed the tokens' rows, read here from its token table
+//! in the publisher's file (mapped, so only the rows read are loaded), not token numbers: the table never goes on the card
+//! (patch.rs SIGLIP_TEXT_ROWS).
 
 use crate::embed::{Result, Runtime};
 use crate::models::Spec;
@@ -15,7 +17,7 @@ use ort::value::Tensor;
 use std::path::{Path, PathBuf};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-const TEXT_FILE: &str = "onnx/text_model_fp16.onnx";
+const TEXT_FILE: &str = crate::patch::SIGLIP_TEXT;
 const VISION_FILE: &str = "onnx/vision_model_fp16.onnx";
 
 /// How many tokens the text encoder takes (what it was trained with).
@@ -30,6 +32,8 @@ pub struct Siglip {
     /// Opened with the first photo (it costs video memory, and TensorRT builds its engine then).
     vision: Option<Session>,
     text: Session,
+    /// The token table the text encoder's rows come from.
+    rows: Rows,
     tokenizer: Tokenizer,
     dim: usize,
     size: u32,
@@ -39,6 +43,43 @@ pub struct Siglip {
     apple: Option<ort::ep::coreml::ComputeUnits>,
     root: PathBuf,
     pub on_gpu: bool,
+}
+
+/// A token table inside the publisher's text encoder file, mapped: a row is `width` numbers (float16) per token.
+struct Rows {
+    file: memmap2::Mmap,
+    at: std::ops::Range<usize>,
+    width: usize,
+}
+
+impl Rows {
+    /// The table that the patched network `patched` names, in the publisher's file `source`.
+    fn open(patched: &Path, source: &Path, width: usize) -> Result<Self> {
+        let model = crate::patch::load(patched)?;
+        let name = model.metadata_props.iter().find(|p| p.key == crate::patch::ROWS_TABLE).ok_or("the patched text encoder doesn't name its token table")?.value.clone();
+        let file = std::fs::File::open(source).map_err(|e| format!("reading {}: {e}", source.display()))?;
+        // SAFETY: the model's files are not changed while the program runs
+        let file = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("reading {}: {e}", source.display()))?;
+        let at = crate::patch::weight_ranges(&file)?.remove(&name).ok_or_else(|| format!("{} has no {name}", source.display()))?;
+        if at.len() % (width * 2) != 0 {
+            return Err(format!("the token table is {} bytes, not rows of {width} float16 numbers", at.len()));
+        }
+        Ok(Self { file, at, width })
+    }
+
+    /// The tokens' rows one after the other, as float32.
+    fn of(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        let row_bytes = self.width * 2;
+        let mut out = Vec::with_capacity(ids.len() * self.width);
+        for &id in ids {
+            let start = self.at.start + id as usize * row_bytes;
+            if start + row_bytes > self.at.end {
+                return Err(format!("token {id} is past the end of the token table"));
+            }
+            out.extend(self.file[start..start + row_bytes].chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()));
+        }
+        Ok(out)
+    }
 }
 
 fn err(what: &str) -> impl Fn(ort::Error) -> String + '_ {
@@ -85,7 +126,10 @@ impl Siglip {
             return Err(format!("{} is not downloaded (its files go in {})", spec.label, model_dir.display()));
         }
         let env = rt.env.clone();
-        let text = Session::builder(&env).and_then(|mut b| b.commit_from_file(model_dir.join(TEXT_FILE))).map_err(err("loading the text encoder"))?;
+        // the text encoder without its token table, fed rows read here (patch.rs)
+        let text_file = crate::patch::ensure(&model_dir, crate::patch::SIGLIP_TEXT_ROWS)?;
+        let rows = Rows::open(&text_file, &model_dir.join(TEXT_FILE), spec.dim)?;
+        let text = Session::builder(&env).and_then(|mut b| b.commit_from_file(&text_file)).map_err(err("loading the text encoder"))?;
         let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| format!("loading the tokenizer: {e}"))?;
         tokenizer.with_truncation(Some(TruncationParams { max_length: TOKENS, ..Default::default() })).map_err(|e| e.to_string())?;
         // padded to 64 as the model was trained, whatever the tokenizer file says
@@ -96,6 +140,7 @@ impl Siglip {
             env,
             vision: None,
             text,
+            rows,
             tokenizer,
             dim: spec.dim,
             size,
@@ -120,11 +165,12 @@ impl Siglip {
     /// A text's vector, unit length.
     pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
         let encoding = self.tokenizer.encode(text.to_lowercase(), true).map_err(|e| e.to_string())?;
-        let ids: Vec<i64> = encoding.get_ids().iter().map(|&i| i as i64).collect();
+        let ids = encoding.get_ids();
         if ids.len() != TOKENS {
             return Err(format!("the tokenizer made {} tokens, expected {TOKENS}", ids.len()));
         }
-        let outputs = self.text.run(ort::inputs!["input_ids" => Tensor::from_array(([1usize, TOKENS], ids)).map_err(err("tensor"))?]).map_err(err("running the text encoder"))?;
+        let rows = Tensor::from_array(([1usize, TOKENS, self.rows.width], self.rows.of(ids)?)).map_err(err("tensor"))?;
+        let outputs = self.text.run(ort::inputs![crate::patch::ROWS_INPUT => rows]).map_err(err("running the text encoder"))?;
         let (_, data) = (outputs.get("text_features").or_else(|| outputs.get("pooler_output"))).ok_or("the text encoder has no text_features or pooler_output")?.try_extract_tensor::<f32>().map_err(err("reading the result"))?;
         Ok(unit(data.to_vec()))
     }
@@ -230,6 +276,27 @@ impl Siglip {
 #[cfg(test)]
 mod tests {
     use crate::models::{self, Model, SIGLIP_BASE_512};
+
+    /// The text encoder fed rows from the mapped table (patch.rs SIGLIP_TEXT_ROWS) gives the vectors the publisher's network gives
+    /// (SigLIP 256 has to be downloaded; the patch is made in its folder): cargo test --release text_rows -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn text_rows_give_the_publishers_vectors() {
+        let root = crate::data_root();
+        let spec = models::spec(models::SIGLIP_BASE_256).unwrap();
+        let rt = crate::embed::Runtime::start(&root).unwrap();
+        let mut model = super::Siglip::load(&rt, &root, spec, spec.size).unwrap();
+        let mut publisher = ort::session::Session::builder(&rt.env).unwrap().commit_from_file(spec.dir(&root).join(super::TEXT_FILE)).unwrap();
+        for text in ["a dog on a beach", "street at night NOT cars", "собака без повідка", "東京の夜景", ""] {
+            let ours = model.embed_query(text).unwrap();
+            let ids: Vec<i64> = model.tokenizer.encode(text.to_lowercase(), true).unwrap().get_ids().iter().map(|&i| i as i64).collect();
+            let out = publisher.run(ort::inputs!["input_ids" => ort::value::Tensor::from_array(([1usize, super::TOKENS], ids)).unwrap()]).unwrap();
+            let theirs = super::unit(out["pooler_output"].try_extract_tensor::<f32>().unwrap().1.to_vec());
+            let worst = ours.iter().zip(&theirs).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            eprintln!("{text:?}: largest difference {worst:e}");
+            assert!(worst < 1e-3, "{text:?}");
+        }
+    }
 
     /// Models can be swapped in the hub and each works after its turn.
     #[test]

@@ -8,12 +8,17 @@
 //!   input divided by 16 first (and epsilon by 256: the same result).
 //! - On the processor (`SIGLIP_PROCESSOR`): the photo encoder in float32 (`to_float32`). ONNX Runtime's float16 arithmetic on a processor is slower: SigLIP 256 made 6.7 photos/s in float16
 //!   and 8.3 in float32 on a Ryzen 5 5600H (the same vectors). Search words stay float16.
+//! - SigLIP's text encoder without its token table (`SIGLIP_TEXT_ROWS`): the table (one row of numbers per token, 256k tokens:
+//!   375 MB of SigLIP Base's 565) would sit on the card whole for the few rows a search reads. The patched network takes the rows
+//!   instead (siglip.rs reads them from the publisher's file, mapped, not loaded); its other weights point into the publisher's
+//!   `.onnx` itself (`weight_ranges`), so nothing is copied.
 //! - SigLIP on CoreML (`SIGLIP_COREML`): the first layer's convolution gets its padding written out (zeros, which is what no padding
 //!   means): ONNX Runtime's CoreML provider refuses a convolution without it. And every matrix product by a weight becomes a `Gemm`
 //!   (`weights_as_gemm`): the provider writes a product's weight into CoreML's program as text, which CoreML parses at every load.
 
-use onnx_protobuf::{AttributeProto, Message, ModelProto, NodeProto, TensorProto, attribute_proto::AttributeType, tensor_proto::DataType};
+use onnx_protobuf::{AttributeProto, Message, ModelProto, NodeProto, StringStringEntryProto, TensorProto, attribute_proto::AttributeType, tensor_proto::DataType};
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, String>;
@@ -21,6 +26,13 @@ type Result<T> = std::result::Result<T, String>;
 pub const SIGLIP_COREML: &str = "onnx/vision_model_fp16.coreml.onnx";
 pub const SIGLIP_TENSORRT: &str = "onnx/vision_model_fp16.tensorrt.onnx";
 pub const SIGLIP_PROCESSOR: &str = "onnx/vision_model_fp16.processor.onnx";
+pub const SIGLIP_TEXT_ROWS: &str = "onnx/text_model_fp16.rows.onnx";
+/// The publisher's text encoder, which SIGLIP_TEXT_ROWS is made from and points into.
+pub const SIGLIP_TEXT: &str = "onnx/text_model_fp16.onnx";
+/// The input of SIGLIP_TEXT_ROWS: the tokens' rows, float32, batch x tokens x width.
+pub const ROWS_INPUT: &str = "rows";
+/// The metadata key of SIGLIP_TEXT_ROWS naming the table its rows come from (a weight of SIGLIP_TEXT).
+pub const ROWS_TABLE: &str = "rows_table";
 
 /// The patched network for `name` in a model's folder, made now if it is not there yet.
 pub fn ensure(dir: &Path, name: &str) -> Result<PathBuf> {
@@ -32,6 +44,15 @@ pub fn ensure(dir: &Path, name: &str) -> Result<PathBuf> {
         SIGLIP_COREML => save(&siglip_coreml(load(&dir.join("onnx/vision_model_fp16.onnx"))?)?, &path)?,
         SIGLIP_TENSORRT => save(&layer_norms(load(&dir.join("onnx/vision_model_fp16.onnx"))?)?, &path)?,
         SIGLIP_PROCESSOR => save(&to_float32(&dir.join("onnx"), load(&dir.join("onnx/vision_model_fp16.onnx"))?)?, &path)?,
+        SIGLIP_TEXT_ROWS => {
+            let source = dir.join(SIGLIP_TEXT);
+            let bytes = std::fs::read(&source).map_err(|e| format!("reading {}: {e}", source.display()))?;
+            let weights = weight_ranges(&bytes)?;
+            let model = ModelProto::parse_from_bytes(&bytes).map_err(|e| format!("reading {}: {e}", source.display()))?;
+            drop(bytes);
+            let location = source.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            save(&text_rows(model, &weights, &location)?, &path)?
+        }
         _ => return Err(format!("no patch is called {name}")),
     }
     Ok(path)
@@ -45,7 +66,7 @@ pub fn ensure_or(dir: &Path, name: &str, fallback: &str) -> PathBuf {
     })
 }
 
-fn load(path: &Path) -> Result<ModelProto> {
+pub fn load(path: &Path) -> Result<ModelProto> {
     let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     ModelProto::parse_from_bytes(&bytes).map_err(|e| format!("reading {}: {e}", path.display()))
 }
@@ -103,6 +124,108 @@ fn scalar(g: &onnx_protobuf::GraphProto, name: &str) -> Option<f32> {
         x if x == DataType::FLOAT as i32 => Some(if raw.len() >= 4 { f32::from_le_bytes(raw[..4].try_into().ok()?) } else { *t.float_data.first()? }),
         _ => None,
     }
+}
+
+/// Where each weight's numbers are inside an `.onnx` file: its name and the bytes of its raw_data. Found by walking the protobuf's
+/// fields (model 7: graph, graph 5: initializer, tensor 8: name, 9: raw_data) without reading the numbers themselves.
+pub fn weight_ranges(bytes: &[u8]) -> Result<HashMap<String, Range<usize>>> {
+    fn varint(b: &[u8], at: &mut usize) -> Option<u64> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
+            let x = *b.get(*at)?;
+            *at += 1;
+            v |= ((x & 0x7f) as u64) << shift;
+            if x < 0x80 {
+                return Some(v);
+            }
+        }
+        None
+    }
+    // a message's length-delimited fields: (field number, its bytes); numbers and fixed-size fields are skipped
+    fn fields(b: &[u8], range: Range<usize>) -> Option<Vec<(u64, Range<usize>)>> {
+        let mut at = range.start;
+        let mut out = Vec::new();
+        while at < range.end {
+            let tag = varint(b, &mut at)?;
+            match tag & 7 {
+                0 => drop(varint(b, &mut at)?),
+                1 => at += 8,
+                2 => {
+                    let len = varint(b, &mut at)? as usize;
+                    out.push((tag >> 3, at..at.checked_add(len)?));
+                    at += len;
+                }
+                5 => at += 4,
+                _ => return None,
+            }
+        }
+        (at == range.end).then_some(out)
+    }
+    let broken = || "not an ONNX file this program can read".to_string();
+    let model = fields(bytes, 0..bytes.len()).ok_or_else(broken)?;
+    let graph = model.into_iter().filter(|(f, _)| *f == 7).last().ok_or_else(broken)?.1;
+    let mut out = HashMap::new();
+    for (_, tensor) in fields(bytes, graph).ok_or_else(broken)?.into_iter().filter(|(f, _)| *f == 5) {
+        let parts = fields(bytes, tensor).ok_or_else(broken)?;
+        let name = parts.iter().find(|(f, _)| *f == 8).map(|(_, r)| String::from_utf8_lossy(&bytes[r.clone()]).into_owned());
+        if let (Some(name), Some((_, raw))) = (name, parts.into_iter().find(|(f, _)| *f == 9)) {
+            out.insert(name, raw);
+        }
+    }
+    Ok(out)
+}
+
+/// The text encoder fed the tokens' rows (float32, made the table's type inside) in place of token numbers: the lookup in the table
+/// goes, and so does the table; what read the token numbers' shape reads the rows' first two sizes. The other weights point at
+/// their bytes in `location` (`weights`: weight_ranges of that file). The table's name goes in the metadata (ROWS_TABLE).
+fn text_rows(mut model: ModelProto, weights: &HashMap<String, Range<usize>>, location: &str) -> Result<ModelProto> {
+    let not_it = || "no token lookup on the input: this is not the file the patch is for".to_string();
+    let g = model.graph.as_mut().ok_or("no graph")?;
+    let ids = g.input.iter().position(|v| v.name == "input_ids").ok_or_else(not_it)?;
+    let lookup = g
+        .node
+        .iter()
+        .position(|n| n.op_type == "Gather" && n.input.get(1).is_some_and(|i| *i == g.input[ids].name) && g.initializer.iter().any(|t| t.name == n.input[0] && t.dims.len() == 2))
+        .ok_or_else(not_it)?;
+    let lookup = g.node.remove(lookup);
+    let table = g.initializer.iter().find(|t| t.name == lookup.input[0]).ok_or_else(not_it)?;
+    let (table_name, table_type, width) = (table.name.clone(), table.data_type, table.dims[1]);
+    // the new input: batch x tokens (as the token numbers were) x width, float32
+    let mut rows = g.input[ids].clone();
+    rows.name = ROWS_INPUT.into();
+    let Some(onnx_protobuf::type_proto::Value::TensorType(t)) = rows.type_.as_mut().and_then(|t| t.value.as_mut()) else { return Err(not_it()) };
+    t.elem_type = DataType::FLOAT as i32;
+    let mut d = onnx_protobuf::tensor_shape_proto::Dimension::new();
+    d.set_dim_value(width);
+    t.shape.mut_or_insert_default().dim.push(d);
+    let ids_name = std::mem::replace(&mut g.input[ids], rows).name;
+    let mut nodes = vec![node("Cast", &[ROWS_INPUT], &[&lookup.output[0]], "rows_cast", vec![int("to", table_type as i64)])];
+    for n in std::mem::take(&mut g.node) {
+        if !n.input.contains(&ids_name) {
+            nodes.push(n);
+        } else if n.op_type == "Shape" {
+            let k = format!("{}_rows", n.name);
+            nodes.push(node("Shape", &[ROWS_INPUT], &[&format!("{k}_all")], &format!("{k}_all"), vec![]));
+            nodes.push(node("Slice", &[&format!("{k}_all"), &format!("{k}_from"), &format!("{k}_to")], &[&n.output[0]], &format!("{k}_slice"), vec![]));
+            g.initializer.extend([int64s(&format!("{k}_from"), &[0]), int64s(&format!("{k}_to"), &[2])]);
+        } else {
+            return Err(format!("the token numbers are read by a {} too: this is not the file the patch is for", n.op_type));
+        }
+    }
+    g.node = nodes;
+    g.initializer.retain(|t| t.name != table_name);
+    g.value_info.clear();
+    for t in &mut g.initializer {
+        let Some(r) = weights.get(&t.name).filter(|r| r.len() >= 1024 && r.len() == t.raw_data.len()) else { continue };
+        t.raw_data.clear();
+        t.data_location = onnx_protobuf::tensor_proto::DataLocation::EXTERNAL.into();
+        t.external_data = [("location", location.to_string()), ("offset", r.start.to_string()), ("length", r.len().to_string())]
+            .into_iter()
+            .map(|(k, v)| StringStringEntryProto { key: k.into(), value: v, ..Default::default() })
+            .collect();
+    }
+    model.metadata_props.push(StringStringEntryProto { key: ROWS_TABLE.into(), value: table_name, ..Default::default() });
+    Ok(model)
 }
 
 /// Every spelled-out layer norm (x - mean, squared, mean, + epsilon, square root, divide, times scale, plus shift) as one
@@ -348,6 +471,22 @@ fn to_float32(dir: &Path, mut model: ModelProto) -> Result<ModelProto> {
 mod tests {
     use super::*;
     use crate::models;
+
+    /// weight_ranges finds each weight's bytes in a written model.
+    #[test]
+    fn weight_ranges_find_the_numbers() {
+        let mut model = ModelProto::new();
+        let g = model.graph.mut_or_insert_default();
+        g.node.push(node("Add", &["a", "b"], &["c"], "add", vec![]));
+        g.initializer.push(TensorProto { name: "a".into(), data_type: DataType::FLOAT as i32, dims: vec![3], raw_data: vec![1; 12], ..Default::default() });
+        g.initializer.push(TensorProto { name: "b".into(), data_type: DataType::FLOAT as i32, dims: vec![300], raw_data: (0..1200).map(|i| i as u8).collect(), ..Default::default() });
+        model.metadata_props.push(StringStringEntryProto { key: "k".into(), value: "v".into(), ..Default::default() });
+        let bytes = model.write_to_bytes().unwrap();
+        let found = weight_ranges(&bytes).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(&bytes[found["a"].clone()], &[1u8; 12][..]);
+        assert_eq!(bytes[found["b"].clone()].to_vec(), (0..1200).map(|i| i as u8).collect::<Vec<u8>>());
+    }
 
     /// How fast the processor runs SigLIP 256's photo encoder in float16 and as the float32 copy (the model has to be
     /// downloaded; the copy is made in .cache/test/ and removed). cargo test --release processor_speed -- --ignored --nocapture
