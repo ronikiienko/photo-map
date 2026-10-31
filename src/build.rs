@@ -657,6 +657,9 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         return Ok(Flow::Paused);
     }
     let (model_id, dim, spec) = (ctx.job.model.clone(), ctx.dim(), ctx.spec);
+    if !todo.is_empty() {
+        ctx.hub.with(&model_id, |m| m.prepare_build())??;
+    }
 
     // photos an earlier map already has vectors for (the same file, unchanged): copied, not embedded
     ctx.progress(already, n, "looking for photos embedded before");
@@ -841,7 +844,7 @@ fn name_regions(ctx: &mut Ctx) -> Result<Flow, String> {
                 return Ok(Flow::Paused);
             }
             let (hub, model_id) = (ctx.hub.clone(), ctx.job.model.clone());
-            let mut embed = |text: &str| hub.with(&model_id, |m| m.embed_query(text))?;
+            let mut embed = |text: &str| hub.with(&model_id, |m| m.embed_phrase(text))?;
             let vocabulary = crate::naming::vectors(&ctx.root, &ctx.job.model, ctx.dim(), &phrases, &mut embed, &|done, total| ctx.progress(done, total, "learning the vocabulary (first map only)"), &|| ctx.paused())?;
             let Some(vocabulary) = vocabulary else { return Ok(Flow::Paused) };
             vocabulary

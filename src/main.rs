@@ -502,6 +502,9 @@ impl Viewer {
         // nothing is being made or searched: the model goes (it holds gigabytes on the Apple chip)
         if on_maps && self.queue.is_empty() && !self.runs.iter().any(|r| r.running()) {
             self.engine.hub.unload();
+        } else if !self.runs.iter().any(|r| r.running()) {
+            // a map is open and nothing is being made (paused for it, or done): the build's sessions leave the card, search stays
+            self.engine.hub.release_build();
         }
         if refresh || (self.page == Page::Maps && self.runs.iter().any(|r| r.running()) && self.last_refresh.elapsed().as_secs_f32() > 1.5) {
             self.library.refresh();
@@ -1736,8 +1739,8 @@ impl Viewer {
                         } else if self.map.is_some() && !searchable {
                             ui.label(theme::muted("map not searchable")).on_hover_text("it has no embeddings.bin of the right size");
                             theme::dot(ui, theme::MUTED);
-                        } else if let Some(gpu) = map_model.as_deref().and_then(|m| self.engine.ready(m)) {
-                            ui.label(theme::muted(if gpu { "search ready" } else { "search ready (CPU)" })).on_hover_text("The AI model that turns your words or photos into numbers is loaded. It runs on this computer, nothing is sent anywhere.");
+                        } else if map_model.as_deref().and_then(|m| self.engine.ready(m)).is_some() {
+                            ui.label(theme::muted("search ready")).on_hover_text("The AI model that turns your words or photos into numbers is loaded. It runs on this computer, nothing is sent anywhere.");
                             theme::dot(ui, theme::OK);
                         } else if self.map.is_some() {
                             ui.label(theme::muted("search starting"));

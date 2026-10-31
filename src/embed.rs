@@ -38,6 +38,11 @@ pub fn vision_builder(env: &Environment, apple: Option<ep::coreml::ComputeUnits>
     builder.with_execution_providers([coreml]).map_err(|e| e.into())
 }
 
+/// The CUDA provider, for the sessions a build runs on the card (a search's never start CUDA, which holds video memory of its own).
+pub fn cuda() -> ep::ExecutionProviderDispatch {
+    ep::CUDA::default().with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested).build() // allocate what is needed, not the next power of two (the card is shared with the map)
+}
+
 impl Runtime {
     /// Start ONNX Runtime from the libraries `runtime::Setup` finds, with the CUDA libraries loaded by full path (a missing one
     /// means no GPU).
@@ -53,11 +58,8 @@ impl Runtime {
             on_gpu = runtime::CUDA_LIBS.iter().all(|l| ort::util::preload_dylib(gpu.cuda.dir.join(l)).is_ok())
                 && runtime::CUDNN_LIBS.iter().all(|l| ort::util::preload_dylib(gpu.cudnn.dir.join(l)).is_ok());
         }
-        let mut env = ort::init_from(&onnx).map_err(|e| format!("loading ONNX Runtime: {e}"))?.with_name("photo-map");
-        if on_gpu {
-            env = env.with_execution_providers([ep::CUDA::default().with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested).build()]); // allocate what is needed, not the next power of two (the card is shared with the map)
-        }
-        let env = env.build().map_err(err("starting ONNX Runtime"))?;
+        // no provider for every session: searches run on the processor, only a build's sessions ask for the card (`cuda`)
+        let env = ort::init_from(&onnx).map_err(|e| format!("loading ONNX Runtime: {e}"))?.with_name("photo-map").build().map_err(err("starting ONNX Runtime"))?;
         let tensorrt = on_gpu
             && chosen.tensorrt(&setup)
             && setup.ort_tensorrt

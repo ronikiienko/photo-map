@@ -3,7 +3,8 @@
 //! onnx/text_model_fp16.onnx, tokenizer.json; outputs pooler_output). Our own earlier export (image_features, text_features) works too.
 //!
 //! A photo is squeezed into a square (its shape is not kept), scaled to -1..1; the photo encoder runs on TensorRT when it can (its
-//! libraries are in runtime/tensorrt/) and on the CUDA provider otherwise. The text goes in lower case, cut to 64 tokens with an
+//! libraries are in runtime/tensorrt/) and on the CUDA provider otherwise. A search runs on the processor (words in ~60 ms, a photo in
+//! ~150 ms on a Ryzen 5 5600H), so that browsing a map never starts CUDA and the card's memory stays the map's. The text goes in lower case, cut to 64 tokens with an
 //! end mark and padded to 64 by the tokenizer's own settings. The text encoder is fed the tokens' rows, read here from its token table
 //! in the publisher's file (mapped, so only the rows read are loaded), not token numbers: the table never goes on the card
 //! (patch.rs SIGLIP_TEXT_ROWS).
@@ -29,9 +30,15 @@ pub struct Siglip {
     id: &'static str,
     // the environment must outlive the sessions
     env: ort::environment::Environment,
-    /// Opened with the first photo (it costs video memory, and TensorRT builds its engine then).
+    /// A build's photo encoder, opened with the first photo (it costs video memory, and TensorRT builds its engine then).
     vision: Option<Session>,
+    /// A search's photo encoder, on the processor, when the build's is on the card: a search never starts CUDA.
+    vision_search: Option<Session>,
+    /// The text encoder on the processor: a search's words.
     text: Session,
+    /// The text encoder on the card, opened for a build's vocabulary (thousands of phrases).
+    text_build: Option<Session>,
+    text_file: PathBuf,
     /// The token table the text encoder's rows come from.
     rows: Rows,
     tokenizer: Tokenizer,
@@ -42,7 +49,10 @@ pub struct Siglip {
     tensorrt: bool,
     apple: Option<ort::ep::coreml::ComputeUnits>,
     root: PathBuf,
+    /// Does a build run on the card (or Apple's chip)?
     pub on_gpu: bool,
+    /// Can a build's sessions use CUDA?
+    cuda: bool,
 }
 
 /// A token table inside the publisher's text encoder file, mapped: a row is `width` numbers (float16) per token.
@@ -139,7 +149,10 @@ impl Siglip {
             id: spec.id,
             env,
             vision: None,
+            vision_search: None,
             text,
+            text_build: None,
+            text_file,
             rows,
             tokenizer,
             dim: spec.dim,
@@ -150,9 +163,10 @@ impl Siglip {
             apple: rt.apple,
             root: root.to_path_buf(),
             on_gpu: rt.on_gpu || rt.apple.is_some(),
+            cuda: rt.on_gpu,
         };
-        // CoreML and TensorRT prepare the network for the chip or card when it is opened (minutes the first time): here, where a map being made can still be paused
-        if model.apple.is_some() || model.tensorrt {
+        // CoreML prepares the network for the chip when it is opened (minutes the first time): here, where a map being made can still be paused
+        if model.apple.is_some() {
             model.open_vision()?;
         }
         Ok(model)
@@ -162,15 +176,28 @@ impl Siglip {
         self.id
     }
 
-    /// A text's vector, unit length.
+    /// A search's words: their vector, unit length (on the processor).
     pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
+        self.embed_text(text, false)
+    }
+
+    /// A build's phrase: its vector, unit length (on the card if a build runs there).
+    pub fn embed_phrase(&mut self, text: &str) -> Result<Vec<f32>> {
+        self.embed_text(text, self.cuda)
+    }
+
+    fn embed_text(&mut self, text: &str, on_card: bool) -> Result<Vec<f32>> {
+        if on_card && self.text_build.is_none() {
+            self.text_build = Some(Session::builder(&self.env).and_then(|b| b.with_execution_providers([crate::embed::cuda()]).map_err(|e| e.into())).and_then(|mut b| b.commit_from_file(&self.text_file)).map_err(err("loading the text encoder"))?);
+        }
         let encoding = self.tokenizer.encode(text.to_lowercase(), true).map_err(|e| e.to_string())?;
         let ids = encoding.get_ids();
         if ids.len() != TOKENS {
             return Err(format!("the tokenizer made {} tokens, expected {TOKENS}", ids.len()));
         }
         let rows = Tensor::from_array(([1usize, TOKENS, self.rows.width], self.rows.of(ids)?)).map_err(err("tensor"))?;
-        let outputs = self.text.run(ort::inputs![crate::patch::ROWS_INPUT => rows]).map_err(err("running the text encoder"))?;
+        let session = if on_card { self.text_build.as_mut().unwrap() } else { &mut self.text };
+        let outputs = session.run(ort::inputs![crate::patch::ROWS_INPUT => rows]).map_err(err("running the text encoder"))?;
         let (_, data) = (outputs.get("text_features").or_else(|| outputs.get("pooler_output"))).ok_or("the text encoder has no text_features or pooler_output")?.try_extract_tensor::<f32>().map_err(err("reading the result"))?;
         Ok(unit(data.to_vec()))
     }
@@ -180,12 +207,26 @@ impl Siglip {
         self.tokenizer.encode(text.to_lowercase(), true).is_ok_and(|e| !e.get_overflowing().is_empty())
     }
 
+    /// A search's photo: its vector, unit length (on the processor when a build would use CUDA).
     pub fn embed_image(&mut self, img: &RgbaImage) -> Result<Vec<f32>> {
         let pixels = prepare(img, self.size)?;
-        self.embed_prepared(vec![pixels]).pop().unwrap()
+        if !self.cuda {
+            return self.embed_prepared(vec![pixels]).pop().unwrap();
+        }
+        if self.vision_search.is_none() {
+            let file = crate::patch::ensure_or(&self.model_dir, crate::patch::SIGLIP_PROCESSOR, VISION_FILE);
+            self.vision_search = Some(Session::builder(&self.env).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?);
+        }
+        let side = self.size as usize;
+        let outputs = self.vision_search.as_mut().unwrap().run(ort::inputs!["pixel_values" => Tensor::from_array(([1, 3, side, side], pixels)).map_err(err("tensor"))?]).map_err(err("running the photo encoder"))?;
+        let (_, data) = (outputs.get("image_features").or_else(|| outputs.get("pooler_output"))).ok_or("the photo encoder has no image_features or pooler_output")?.try_extract_tensor::<f32>().map_err(err("reading the result"))?;
+        if data.len() != self.dim {
+            return Err(format!("the photo encoder made {} numbers for a photo", data.len()));
+        }
+        Ok(unit(data.to_vec()))
     }
 
-    /// Prepared photos (see `prepare`), a few at a time.
+    /// A build's photos, prepared (see `prepare`), a few at a time.
     pub fn embed_prepared(&mut self, photos: Vec<Vec<f32>>) -> Vec<Result<Vec<f32>>> {
         let n = photos.len();
         let mut out: Vec<Result<Vec<f32>>> = Vec::with_capacity(n);
@@ -220,13 +261,29 @@ impl Siglip {
         Ok(data.chunks_exact(self.dim).take(batch).map(|row| unit(row.to_vec())).collect())
     }
 
-    /// The photo encoder: on TensorRT if it can (its engine is built the first time, about a minute, and kept in .cache/trt/), else
-    /// on the CUDA provider.
+    /// Let go of a build's sessions on the card (a search doesn't use them). CoreML's stay: a search uses them, and they are slow to open.
+    pub fn release_build(&mut self) {
+        if self.cuda {
+            self.vision = None;
+            self.text_build = None;
+        }
+    }
+
+    /// Open a build's photo encoder now, if it isn't (TensorRT builds its engine then: minutes the first time).
+    pub fn prepare_build(&mut self) -> Result<()> {
+        if self.vision.is_none() {
+            self.open_vision()?;
+        }
+        Ok(())
+    }
+
+    /// A build's photo encoder: on TensorRT if it can (its engine is built the first time, about a minute, and kept in .cache/trt/),
+    /// else on the CUDA provider.
     fn open_vision(&mut self) -> Result<()> {
         // CoreML can't take the publisher's first layer as it is: it gets a patched copy
         let file = if self.apple.is_some() {
             crate::patch::ensure(&self.model_dir, crate::patch::SIGLIP_COREML)?
-        } else if !self.on_gpu {
+        } else if !self.cuda {
             // float32 is faster on the processor
             crate::patch::ensure_or(&self.model_dir, crate::patch::SIGLIP_PROCESSOR, VISION_FILE)
         } else {
@@ -246,7 +303,9 @@ impl Siglip {
             }
         }
         let cache = self.root.join(".cache/coreml").join(self.model_dir.file_name().unwrap_or_default());
-        self.vision = Some(crate::embed::vision_builder(&self.env, self.apple, &cache, &[("batch_size", BATCH as i64), ("num_channels", 3), ("height", self.size as i64), ("width", self.size as i64)]).and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?);
+        let builder = crate::embed::vision_builder(&self.env, self.apple, &cache, &[("batch_size", BATCH as i64), ("num_channels", 3), ("height", self.size as i64), ("width", self.size as i64)]);
+        let builder = if self.cuda { builder.and_then(|b| b.with_execution_providers([crate::embed::cuda()]).map_err(|e| e.into())) } else { builder };
+        self.vision = Some(builder.and_then(|mut b| b.commit_from_file(&file)).map_err(err("loading the photo encoder"))?);
         Ok(())
     }
 
@@ -265,9 +324,9 @@ impl Siglip {
             .with_profile_opt_shapes(shapes(BATCH))
             .with_profile_max_shapes(shapes(BATCH))
             .build();
-        // (the CUDA provider is already registered for every session by the environment, and takes what TensorRT leaves)
+        // the CUDA provider takes what TensorRT leaves
         Session::builder(&self.env)
-            .and_then(|b| b.with_execution_providers([trt]).map_err(|e| e.into()))
+            .and_then(|b| b.with_execution_providers([trt, crate::embed::cuda()]).map_err(|e| e.into()))
             .and_then(|mut b| b.commit_from_file(file))
             .map_err(err("loading the photo encoder on TensorRT"))
     }
@@ -397,3 +456,5 @@ mod tests {
         }
     }
 }
+
+

@@ -198,6 +198,15 @@ impl Hub {
         }
     }
 
+    /// Let go of what only a build uses (the sessions on the card), keeping what a search needs; skipped while the model is in use.
+    pub fn release_build(&self) {
+        if let Ok(mut slot) = self.slot.try_lock()
+            && let Some(model) = slot.as_mut()
+        {
+            model.release_build();
+        }
+    }
+
     pub fn state(&self) -> State {
         self.state.lock().unwrap().clone()
     }
