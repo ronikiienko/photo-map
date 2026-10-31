@@ -4,6 +4,22 @@
 //! word and an OR let one word crowd out the others, as the words' cosines don't share a scale; a plain phrase already means
 //! "and" ("woman on a bike in winter"). Several photos are averaged.
 
+/// Searches to try (the Examples menu beside the box), each with what it shows the model can do.
+pub const EXAMPLES: [(&str, &str); 12] = [
+    ("foggy forest", "weather and places together"),
+    ("street at night NOT cars", "NOT: photos with cars go lower"),
+    ("red car", "a colour that belongs to a thing"),
+    ("dog in the snow", "a thing in a setting"),
+    ("people laughing", "what people do and how they feel"),
+    ("food on a plate, close up", "how near the camera is"),
+    ("view from above", "where the photo was taken from"),
+    ("black and white photo", "style, not content"),
+    ("reflection in water", "light and what it does"),
+    ("cozy room with warm light", "mood"),
+    ("sign with text", "writing in the picture"),
+    ("mountains NOT snow", "NOT takes away what usually comes along"),
+];
+
 /// How much of a NOT term's cosine is taken away.
 const NOT_WEIGHT: f32 = 0.5;
 

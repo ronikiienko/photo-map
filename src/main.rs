@@ -1273,6 +1273,11 @@ impl Viewer {
                 self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box"))); // the last one: back to words
             }
         }
+        if let Some(text) = actions.example {
+            self.photos.clear();
+            self.search = text.to_string();
+            self.ask();
+        }
         if actions.ask {
             self.ask();
         }
@@ -1711,6 +1716,16 @@ impl Viewer {
                                 }
                             });
                         });
+                        // searches to try: one fills the box and runs
+                        egui::containers::menu::MenuButton::new("Examples").ui(ui, |ui| {
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                for (text, shows) in query::EXAMPLES {
+                                    if ui.selectable_label(false, text).on_hover_text(shows).clicked() {
+                                        actions.example = Some(text);
+                                    }
+                                }
+                            });
+                        });
                         // whether a search can run now
                         let searchable = self.map.as_ref().is_some_and(|m| m.vectors.is_some());
                         let map_model = self.map.as_ref().map(|m| m.data.manifest.model().to_string());
@@ -1990,6 +2005,8 @@ impl Viewer {
 #[derive(Default)]
 struct UiActions {
     ask: bool,
+    /// A search from the Examples menu.
+    example: Option<&'static str>,
     /// The Layout menu: show the photos the way it now says.
     arrange: bool,
     reblend: bool,
