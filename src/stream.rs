@@ -5,7 +5,7 @@
 //! worker threads decode the original file, fit each wanted level and BC7-compress it, and the main thread copies
 //! the blocks into a free or least-recently-seen slot. A photo's streamed levels are always contiguous from 64 px up, so
 //! evicting a level also drops the ones above it. The table's first entry is the loaded level count: 1 (just the colour),
-//! or the top streamed level + 1 (levels 1 ... 5 never exist). The table is re-uploaded whole whenever it changed.
+//! or the top streamed level + 1 (levels 1 ... 5 never exist). Only the entries that changed are uploaded again.
 
 use crate::data::{MapData, Point};
 use crate::photo;
@@ -78,7 +78,10 @@ pub struct Streamer {
     pub first_pages: wgpu::Buffer,
     layout: Layout,
     table_cpu: Vec<u32>,
-    dirty: bool,
+    /// The whole table still has to be uploaded (at the start).
+    upload_all: bool,
+    /// Photos whose entries changed since the last upload.
+    changed: Vec<u32>,
     pools: Vec<Pool>,
     loading: Vec<bool>,
     /// The frame a photo's file was found not to be there (0: it was, or it hasn't been asked for).
@@ -172,7 +175,7 @@ impl Streamer {
                 }
             });
         }
-        Self { texture, view, table, first_pages, layout, table_cpu, dirty: true, pools, loading: vec![false; n], missing: vec![0; n], in_flight: 0, jobs, results, frame: 1 }
+        Self { texture, view, table, first_pages, layout, table_cpu, upload_all: true, changed: Vec::new(), pools, loading: vec![false; n], missing: vec![0; n], in_flight: 0, jobs, results, frame: 1 }
     }
 
     pub fn in_flight(&self) -> usize {
@@ -186,6 +189,13 @@ impl Streamer {
             .enumerate()
             .map(|(k, p)| (slot_size(STREAMED + k), p.holder.iter().filter(|&&h| h != NONE).count(), p.holder.len()))
             .collect()
+    }
+
+    /// A photo's sharpest loaded picture's longer side, and the original's.
+    pub fn loaded_px(&self, id: usize) -> (u32, u32) {
+        let e = &self.table_cpu[id * ENTRY..(id + 1) * ENTRY];
+        let long = e[1].max(1);
+        (slot_size(e[0] as usize - 1).min(long), long)
     }
 
     /// The sharpest level worth having: the one whose slot size is closest to the original's longer side.
@@ -209,7 +219,7 @@ impl Streamer {
         }
         if from < count {
             self.table_cpu[id * ENTRY] = if from <= STREAMED { RESIDENT as u32 } else { from as u32 };
-            self.dirty = true;
+            self.changed.push(id as u32);
         }
     }
 
@@ -294,7 +304,7 @@ impl Streamer {
                 self.pools[pool].last_seen[slot] = frame;
                 self.table_cpu[id * ENTRY + 4 + lv.level] = slot as u32;
                 self.table_cpu[id * ENTRY] = lv.level as u32 + 1;
-                self.dirty = true;
+                self.changed.push(id as u32);
             }
         }
 
@@ -310,10 +320,27 @@ impl Streamer {
             }
         }
 
-        if self.dirty {
+        // the table: whole at the start, then only the changed entries, neighbours joined into one write
+        if self.upload_all {
             queue.write_buffer(&self.table, 0, bytemuck::cast_slice(&self.table_cpu));
-            self.dirty = false;
+            self.upload_all = false;
+            self.changed.clear();
         }
+        self.changed.sort_unstable();
+        self.changed.dedup();
+        let mut k = 0;
+        while k < self.changed.len() {
+            let first = self.changed[k] as usize;
+            let mut last = first;
+            while k + 1 < self.changed.len() && self.changed[k + 1] as usize == last + 1 {
+                k += 1;
+                last += 1;
+            }
+            let entries = &self.table_cpu[first * ENTRY..(last + 1) * ENTRY];
+            queue.write_buffer(&self.table, (first * ENTRY * 4) as u64, bytemuck::cast_slice(entries));
+            k += 1;
+        }
+        self.changed.clear();
     }
 }
 

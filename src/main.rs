@@ -1896,6 +1896,12 @@ impl Viewer {
         let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len().max(1) as f32;
         if let Some(m) = &self.map {
             egui::Area::new("fps".into()).anchor(egui::Align2::RIGHT_BOTTOM, [-14.0, -14.0]).show(&ctx, |ui| {
+                if let Some(i) = self.hovered.filter(|&i| i < m.data.n()) {
+                    let (loaded, original) = m.streamer.loaded_px(i);
+                    let on_screen = self.size_px() * m.data.size(i);
+                    let text = format!("loaded {loaded} px, on screen {on_screen:.0} px, original {original} px");
+                    ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(theme::MUTED)).extend());
+                }
                 let detail = format!(
                     "{:.1} ms a frame\nstreamed: {}\nloading: {}",
                     avg * 1000.0,
