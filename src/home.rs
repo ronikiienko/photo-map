@@ -28,7 +28,6 @@ pub enum Action {
     InstallRuntime,
     StopInstall,
     RemoveRuntime,
-    DismissOffer,
     /// Close the app and open it again (the runtime libraries it started with can't be changed while it runs).
     Restart,
 }
@@ -521,6 +520,11 @@ impl Home {
             if ui.button("Show in file manager").clicked() {
                 show_in_file_manager(&path);
             }
+            if sizes.photos == 0 && sizes.linked == 0 && sizes.elsewhere == 0 && sizes.unreachable == 0 {
+                ui.separator();
+                ui.label(RichText::new("Your photos are not copied").strong());
+                ui.label(theme::muted("The map keeps only where each photo is (its path), and takes no space for the photos themselves. If one is moved, renamed or deleted, or its disk is not plugged in, the map still shows its small picture, but zoomed in it says \"not found\"."));
+            }
             if sizes.linked > 0 {
                 ui.separator();
                 ui.label(RichText::new(format!("{} of photos are links, not copies", storage::human(sizes.linked))).strong());
@@ -589,7 +593,7 @@ impl Home {
             let name = lib.maps.iter().find(|m| m.path == path).map_or(String::new(), |m| m.name.clone());
             let mut close = false;
             let response = theme::modal(ctx, "delete", 380.0, Some("Delete this map?"), |ui| {
-                ui.label(format!("“{name}” will be deleted, with the copies of its photos inside it. The photos you made it from are not touched."));
+                ui.label(format!("“{name}” will be deleted, with everything inside it. The photos you made it from are not touched."));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Delete")).clicked() {
@@ -623,6 +627,7 @@ impl Home {
         let mut close = false;
         let mut create = None;
         let mut open_models = false;
+        let mut open_runtime = false;
         // the model asked for is one that is installed
         if !crate::models::spec(&nm.model).is_some_and(|s| store.installed(s)) {
             if let Some(first) = crate::models::ALL.iter().find(|s| store.installed(s)) {
@@ -631,10 +636,24 @@ impl Home {
         }
         // a click on the backdrop does not close this one (what you typed would be lost): Cancel or Esc does
         theme::modal(ctx, "new-map", 480.0, Some("New map"), |ui| {
-            // ONNX Runtime is not optional: nothing runs without it, so its offer is always shown (and can't be dismissed) until it is there
-            let runtime_missing = rt.setup.ort.is_none();
-            if runtime_missing || rt.nagging() || rt.installing() {
-                runtime_offer(ui, rt, !runtime_missing, actions);
+            // what the runtime lacks, with the way to the Runtime window that gets it (the form doesn't install anything itself)
+            let lacking = if rt.setup.ort.is_none() {
+                Some((RichText::new("ONNX Runtime has not been downloaded: no model can run without it.").color(Color32::from_rgb(235, 110, 100)), "Get it in the Runtime window"))
+            } else if rt.installing() {
+                Some((theme::muted("The runtime is being downloaded."), "See it in the Runtime window"))
+            } else if let Advice::Offer(offer) = rt.advice() {
+                Some((theme::muted(offer.why), "Get it in the Runtime window"))
+            } else {
+                None
+            };
+            if let Some((text, tip)) = lacking {
+                ui.horizontal(|ui| {
+                    ui.label(text);
+                    if ui.button("Runtime…").on_hover_text(tip).clicked() {
+                        open_runtime = true;
+                    }
+                });
+                ui.add_space(8.0);
             }
             ui.label("Photos");
             if nm.sources.is_empty() {
@@ -765,6 +784,9 @@ impl Home {
         });
         if open_models {
             self.models_open = true;
+        }
+        if open_runtime {
+            self.runtime_open = true;
         }
         if let Some(a) = create {
             actions.push(a);
@@ -911,7 +933,7 @@ impl Home {
                 ui.label(theme::muted(format!("{note}, so it is not used.")));
             }
             ui.add_space(8.0);
-            runtime_offer(ui, rt, false, actions);
+            runtime_offer(ui, rt, actions);
 
             ui.add_space(8.0);
             ui.label("Run the models on");
@@ -968,8 +990,8 @@ impl Home {
 }
 
 /// What the runtime could use that is not installed, as a box with the way to get it - or the install under way, or the note that
-/// a restart is needed. `dismissible`: with a way to say "not now" that is remembered.
-fn runtime_offer(ui: &mut Ui, rt: &Manager, dismissible: bool, actions: &mut Vec<Action>) {
+/// a restart is needed.
+fn runtime_offer(ui: &mut Ui, rt: &Manager, actions: &mut Vec<Action>) {
     if let Some(job) = &rt.job {
         let s = job.state();
         theme::card().show(ui, |ui| {
@@ -1016,9 +1038,6 @@ fn runtime_offer(ui: &mut Ui, rt: &Manager, dismissible: bool, actions: &mut Vec
                 ui.horizontal(|ui| {
                     if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new(offer.title).strong())).clicked() {
                         actions.push(Action::InstallRuntime);
-                    }
-                    if dismissible && ui.button("Not now").on_hover_text("Don't offer this here again; the Runtime window on the Maps page still has it").clicked() {
-                        actions.push(Action::DismissOffer);
                     }
                 });
             });

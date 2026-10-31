@@ -592,7 +592,6 @@ impl Viewer {
                     self.store.remove(&id);
                 }
             }
-            Action::DismissOffer => self.runtime.dismiss(),
             Action::Restart => self.restart = true,
         }
     }
@@ -1478,8 +1477,16 @@ impl Viewer {
         self.camera.fly_to((Vec2::new(l.x, l.y), scale));
     }
 
+    /// Zoom to a photo until it nearly fills the window.
+    fn go_to_photo(&mut self, i: usize) {
+        let Some(m) = &self.map else { return };
+        let p = m.data.points[i];
+        let fit = self.camera.viewport / (m.data.shape(i) * m.photo_world);
+        self.camera.fly_to((Vec2::new(p.x, p.y), 0.85 * fit.min_element()));
+    }
+
     /// A click on the map (a press that hardly moved): on a match's copy beside the world, it flies to the photo; on a region
-    /// name, it zooms to the region.
+    /// name, it zooms to the region; on a photo, to the photo.
     fn click_at(&mut self) {
         let Some(c) = self.cursor else { return };
         if let Some(k) = self.pick_copy(c) {
@@ -1489,6 +1496,8 @@ impl Viewer {
         let at = egui::pos2(c.x / ppp, c.y / ppp);
         if let Some(&(_, level, index)) = self.label_rects.iter().find(|(rect, _, _)| rect.contains(at)) {
             self.go_to_region(level, index);
+        } else if let Some(i) = self.pick(c) {
+            self.go_to_photo(i);
         }
     }
 
@@ -1720,8 +1729,8 @@ impl Viewer {
                                 if ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer()).changed() {
                                     actions.reblend = true;
                                 }
-                                ui.label(theme::muted("Always marks exactly this many photos, best first, from yellow (strong) to red (weak). It does not judge whether they are good matches."));
-                                ui.label(theme::muted("Too few: good matches beyond the count are missed. Too many: poor matches get marked too."));
+                                ui.label(theme::muted("Marks this many photos, best first, yellow to red. The model knows which fit better, not where fitting stops: only you can tell."));
+                                ui.label(theme::muted("All of them fit? Try more. Junk at the end? Lower it, or just stop looking there."));
                                 ui.add_space(8.0);
                                 ui.label(theme::muted("PHOTO PIXELS"));
                                 theme::segmented(ui, &mut self.smooth, &[(true, "Smooth", "pixels blended with their neighbours"), (false, "Nearest", "each pixel as it is: sharp, blocky up close")]);
@@ -1813,7 +1822,7 @@ impl Viewer {
                             ui.label(theme::muted("map not searchable")).on_hover_text("it has no embeddings.bin of the right size");
                             theme::dot(ui, theme::MUTED);
                         } else if let Some(gpu) = map_model.as_deref().and_then(|m| self.engine.ready(m)) {
-                            ui.label(theme::muted(if gpu { "search ready" } else { "search ready (CPU)" })).on_hover_text("The AI model that turns your words or photo into numbers is loaded. It runs on this computer, nothing is sent anywhere.");
+                            ui.label(theme::muted(if gpu { "search ready" } else { "search ready (CPU)" })).on_hover_text("The AI model that turns your words or photos into numbers is loaded. It runs on this computer, nothing is sent anywhere.");
                             theme::dot(ui, theme::OK);
                         } else if self.map.is_some() {
                             ui.label(theme::muted("search starting"));
@@ -1945,7 +1954,8 @@ impl Viewer {
                                 (&["drag", "W", "A", "S", "D"][..], "move"),
                                 (&["F"][..], "photos like the one under the mouse"),
                                 (&["Space"][..], "hold: a lens over the map (scroll: how much it magnifies)"),
-                                (&["right-click"][..], "a path of similar photos from one photo to another"),
+                                (&["click"][..], "zoom to a photo, a region's name or a match"),
+                                (&["right-click"][..], "a photo's menu: photos like it, a path to another photo, its file"),
                                 (&["N", "P"][..], "next / previous match"),
                                 (&["F11", "Alt", "Enter"][..], "fullscreen"),
                                 (&["Esc"][..], "back to your maps"),

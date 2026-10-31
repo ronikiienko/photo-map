@@ -4,7 +4,7 @@
 
 use crate::packs::{self, Pack};
 use crate::runtime::{Nvidia, Place, Setup, Source};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -61,14 +61,9 @@ pub struct Manager {
     /// An install finished: this copy of the program still runs on what it started with.
     pub restart: bool,
     pub failure: Option<String>,
-    dismissed: bool,
     /// What the models may run on (changes take effect when the program is restarted).
     pub backends: crate::backends::Choice,
     wake: Arc<dyn Fn() + Send + Sync>,
-}
-
-fn dismissed_file(root: &Path) -> PathBuf {
-    root.join(".cache/runtime-offer-dismissed")
 }
 
 impl Manager {
@@ -80,8 +75,7 @@ impl Manager {
         let root_for_choice = root.clone();
         let setup = Setup::detect(&root);
         let wrong = Setup::wrong_versions(&root);
-        let dismissed = dismissed_file(&root).exists();
-        Self { root, setup, nvidia: None, probe: Some(rx), wrong, job: None, restart: false, failure: None, dismissed, backends: crate::backends::Choice::load(&root_for_choice), wake: Arc::new(wake) }
+        Self { root, setup, nvidia: None, probe: Some(rx), wrong, job: None, restart: false, failure: None, backends: crate::backends::Choice::load(&root_for_choice), wake: Arc::new(wake) }
     }
 
     /// Look again at what is installed.
@@ -183,17 +177,6 @@ impl Manager {
         Advice::Offer(Offer { packs: missing, title, why })
     }
 
-    /// Whether the offer should be shown where it can be dismissed (the New map form).
-    pub fn nagging(&self) -> bool {
-        !self.dismissed
-    }
-
-    pub fn dismiss(&mut self) {
-        self.dismissed = true;
-        let _ = std::fs::create_dir_all(self.root.join(".cache"));
-        let _ = std::fs::write(dismissed_file(&self.root), b"");
-    }
-
     /// Fetch and install the packs of an offer, one after the other, on a thread.
     pub fn start(&mut self, offer: &Offer) {
         if self.job.is_some() {
@@ -274,7 +257,7 @@ mod tests {
     use crate::runtime::Gpu;
 
     fn manager(setup: Setup, nvidia: Option<Nvidia>) -> Manager {
-        Manager { root: PathBuf::from("/nonexistent"), setup, nvidia, probe: None, wrong: Vec::new(), job: None, restart: false, failure: None, dismissed: false, backends: crate::backends::Choice::load(Path::new("/nonexistent")), wake: Arc::new(|| {}) }
+        Manager { root: PathBuf::from("/nonexistent"), setup, nvidia, probe: None, wrong: Vec::new(), job: None, restart: false, failure: None, backends: crate::backends::Choice::load(std::path::Path::new("/nonexistent")), wake: Arc::new(|| {}) }
     }
 
     fn place(name: &str) -> Place {
