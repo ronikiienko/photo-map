@@ -74,6 +74,22 @@ pub fn slug(model: &str) -> String {
         .collect()
 }
 
+/// The cache of a model's phrase vectors in .cache/vocab/: the vectors, and the key of the vocabulary they were made from.
+fn cache_files(root: &Path, model: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (dir, name) = (root.join(".cache/vocab"), slug(model));
+    (dir.join(format!("curated2.{name}.f16")), dir.join(format!("curated2.{name}.key")))
+}
+
+/// The phrases' vectors from the cache, if they are there for this vocabulary (n x dim, row by row): no model needed.
+pub fn cached(root: &Path, model: &str, dim: usize, phrases: &[Phrase]) -> Option<Vec<f32>> {
+    let (bin, stamp) = cache_files(root, model);
+    if std::fs::read_to_string(&stamp).ok()? != key(phrases).to_string() {
+        return None;
+    }
+    let raw = std::fs::read(&bin).ok()?;
+    (raw.len() == phrases.len() * dim * 2).then(|| raw.chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect())
+}
+
 /// The phrases' vectors (n x dim, row by row), from the cache in .cache/vocab/ or made now with `embed` (told how far it is). The
 /// cache is per model: `model` is the id of the one `embed` is.
 pub fn vectors(
@@ -85,24 +101,11 @@ pub fn vectors(
     progress: &dyn Fn(usize, usize),
     paused: &dyn Fn() -> bool,
 ) -> Result<Option<Vec<f32>>, String> {
-    let dir = root.join(".cache/vocab");
-    let name = slug(model);
-    let (bin, stamp) = (
-        dir.join(format!("curated2.{name}.f16")),
-        dir.join(format!("curated2.{name}.key")),
-    );
-    let want = key(phrases).to_string();
-    if std::fs::read_to_string(&stamp).ok().as_deref() == Some(want.as_str()) {
-        if let Ok(raw) = std::fs::read(&bin) {
-            if raw.len() == phrases.len() * dim * 2 {
-                return Ok(Some(
-                    raw.chunks_exact(2)
-                        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-                        .collect(),
-                ));
-            }
-        }
+    if let Some(cached) = cached(root, model, dim, phrases) {
+        return Ok(Some(cached));
     }
+    let (bin, stamp) = cache_files(root, model);
+    let want = key(phrases).to_string();
     let mut all = Vec::with_capacity(phrases.len() * dim);
     for (i, p) in phrases.iter().enumerate() {
         if paused() {
@@ -118,7 +121,7 @@ pub fn vectors(
         all.extend(v);
         progress(i + 1, phrases.len());
     }
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(bin.parent().unwrap_or(root)).map_err(|e| e.to_string())?;
     let bytes: Vec<u8> = all
         .iter()
         .flat_map(|&x| half::f16::from_f32(x).to_le_bytes())
@@ -143,9 +146,9 @@ fn unit(v: &mut [f32]) {
 }
 
 /// Per level, the named regions (biggest first). `vectors`: n x `dim`; `xy`: x, y per photo; `levels`: a region number per photo per level.
-pub fn name_levels(
+pub fn name_levels<R: crate::cells::Rows>(
     dim: usize,
-    vectors: &[f32],
+    vectors: &R,
     xy: &[f32],
     levels: &[Vec<u32>],
     phrases: &[Phrase],
@@ -164,7 +167,10 @@ pub fn name_levels(
     let bonus: Vec<f32> = phrases.iter().map(|p| COMMON * p.common.log10()).collect();
     // the map's average photo
     let mut map_mean = vec![0f32; dim];
-    for row in vectors.chunks_exact(dim) {
+    let mut row = vec![0f32; dim];
+    for i in 0..n {
+        vectors.row_into(i, &mut row);
+        let row = &row;
         map_mean
             .iter_mut()
             .zip(row)
@@ -187,11 +193,12 @@ pub fn name_levels(
                     .par_iter()
                     .filter(|m| m.len() >= MIN_PHOTOS)
                     .map(|m| {
-                        let mut region = vec![0f32; dim];
+                        let (mut region, mut row) = (vec![0f32; dim], vec![0f32; dim]);
                         for &i in m {
+                            vectors.row_into(i as usize, &mut row);
                             region
                                 .iter_mut()
-                                .zip(&vectors[i as usize * dim..(i as usize + 1) * dim])
+                                .zip(&row)
                                 .for_each(|(r, x)| *r += x / m.len() as f32);
                         }
                         region.iter_mut().zip(&map_mean).for_each(|(r, a)| *r -= a);

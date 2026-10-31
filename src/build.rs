@@ -609,18 +609,26 @@ fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
             Ok(()) => {}
         }
     }
-    let photos: Vec<serde_json::Value> = found
+    // photos.json's entries (keys in this order, as the file has always had them), borrowing the paths rather than copying them
+    #[derive(Serialize)]
+    struct Entry<'a> {
+        file: String,
+        height: u32,
+        meta: serde_json::Map<String, serde_json::Value>,
+        source: std::borrow::Cow<'a, str>,
+        title: std::borrow::Cow<'a, str>,
+        width: u32,
+    }
+    let photos: Vec<Entry> = found
         .iter()
         .enumerate()
-        .map(|(i, f)| {
-            serde_json::json!({
-                "file": if copy_photos { original_name(i, &f.src) } else { String::new() },
-                "source": f.src.to_string_lossy(),
-                "width": f.width,
-                "height": f.height,
-                "title": f.src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-                "meta": {},
-            })
+        .map(|(i, f)| Entry {
+            file: if copy_photos { original_name(i, &f.src) } else { String::new() },
+            height: f.height,
+            meta: serde_json::Map::new(),
+            source: f.src.to_string_lossy(),
+            title: f.src.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default(),
+            width: f.width,
         })
         .collect();
     write_atomic(&ctx.dir.join("photos.json"), &serde_json::to_vec(&photos).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -644,8 +652,8 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let already = n - todo.iter().map(|&k| shard_len(n, k)).sum::<usize>();
     ctx.progress(already, n, "loading the model (the first time it is prepared for this computer: up to a few minutes)");
 
-    // the model is loaded by the search engine's thread; wait for it
-    if !ctx.wait_for_model()? {
+    // the model is loaded by the search engine's thread; wait for it (not if every photo has its vector already)
+    if !todo.is_empty() && !ctx.wait_for_model()? {
         return Ok(Flow::Paused);
     }
     let (model_id, dim, spec) = (ctx.job.model.clone(), ctx.dim(), ctx.spec);
@@ -667,8 +675,10 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     ctx.progress(already + reused_count, n, if reused_count > 0 { format!("{reused_count} photos were embedded in earlier maps; embedding the rest") } else { "reading the photos and embedding them".to_string() });
 
     // CPU side ahead of the GPU: the next shard's photos are decoded and cut into patches while this one is embedded
+    drop(found);
     let photos: Vec<crate::data::Photo> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let files: Vec<PathBuf> = photos.iter().map(|p| p.path(&ctx.dir)).collect();
+    let files: Arc<Vec<PathBuf>> = Arc::new(photos.iter().map(|p| p.path(&ctx.dir)).collect());
+    drop(photos);
     let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<Option<(Prepared, image::RgbaImage)>>)>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let producer = {
@@ -752,21 +762,15 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         return Err(format!("none of the {processed} photos could be read (the first: {})", files.iter().zip(reused.iter()).find(|(_, r)| !**r).map_or(String::new(), |(f, _)| f.display().to_string())));
     }
 
-    // all the vectors in one file; a photo it couldn't read has the average vector (it lands in the middle of the map)
-    let mut all = Vec::with_capacity(n * dim * 2);
+    // all the vectors in one file, shard after shard (not gathered in memory first)
+    let (path, tmp) = (ctx.dir.join("embeddings.bin"), ctx.dir.join("embeddings.tmp"));
+    let mut out = io::BufWriter::new(fs::File::create(&tmp).map_err(|e| e.to_string())?);
     for k in 0..shards {
-        all.extend(fs::read(shard_path(&ctx.dir, k)).map_err(|e| e.to_string())?);
+        io::copy(&mut fs::File::open(shard_path(&ctx.dir, k)).map_err(|e| e.to_string())?, &mut out).map_err(|e| e.to_string())?;
     }
-    write_atomic(&ctx.dir.join("embeddings.bin"), &all).map_err(|e| e.to_string())?;
+    out.into_inner().map_err(|e| e.to_string())?;
+    fs::rename(tmp, path).map_err(|e| e.to_string())?;
     Ok(Flow::Done)
-}
-
-fn read_vectors(dir: &Path, n: usize, dim: usize) -> Result<Vec<f32>, String> {
-    let raw = fs::read(dir.join("embeddings.bin")).map_err(|e| format!("embeddings.bin: {e}"))?;
-    if raw.len() != n * dim * 2 {
-        return Err("embeddings.bin is not the size of the photos".into());
-    }
-    Ok(raw.chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect())
 }
 
 fn read_layout(dir: &Path, n: usize) -> Result<Vec<f32>, String> {
@@ -778,9 +782,8 @@ fn read_layout(dir: &Path, n: usize) -> Result<Vec<f32>, String> {
 }
 
 fn lay_out(ctx: &mut Ctx) -> Result<Flow, String> {
-    let n = ctx.job.photos;
     ctx.progress(0, 0, "preparing the vectors");
-    let vectors = ndarray::Array2::from_shape_vec((n, ctx.dim()), read_vectors(&ctx.dir, n, ctx.dim())?).map_err(|e| e.to_string())?;
+    let vectors = crate::cells::HalfRows::open(&ctx.dir.join("embeddings.bin"), ctx.job.photos, ctx.dim())?;
     let xy = crate::layout::layout(vectors, &|what, done, total| ctx.progress(done, total, what), &|| ctx.paused())?;
     let Some(xy) = xy else { return Ok(Flow::Paused) };
     // moved apart so that no photo covers another, at the size the viewer will draw them
@@ -795,9 +798,9 @@ fn lay_out(ctx: &mut Ctx) -> Result<Flow, String> {
 
 /// The tree that paths between photos follow (tree.rs).
 fn make_tree(ctx: &mut Ctx) -> Result<Flow, String> {
-    let n = ctx.job.photos;
     ctx.progress(0, 0, "preparing the vectors");
-    let vectors = ndarray::Array2::from_shape_vec((n, ctx.dim()), read_vectors(&ctx.dir, n, ctx.dim())?).map_err(|e| e.to_string())?;
+    // f16, from the file where it is: an f32 copy would be twice the memory, for the same numbers
+    let vectors = crate::cells::HalfRows::open(&ctx.dir.join("embeddings.bin"), ctx.job.photos, ctx.dim())?;
     let Some(parent) = crate::tree::build(&vectors, &|what, done, total| ctx.progress(done, total, what), &|| ctx.paused()) else { return Ok(Flow::Paused) };
     crate::tree::write(&ctx.dir, &parent).map_err(|e| e.to_string())?;
     Ok(Flow::Done)
@@ -829,18 +832,24 @@ fn name_regions(ctx: &mut Ctx) -> Result<Flow, String> {
     let levels: Vec<Vec<u32>> = (0..count).map(|l| words[2 + l * n..2 + (l + 1) * n].to_vec()).collect();
     let phrases = crate::naming::phrases();
 
-    // the vocabulary's vectors: cached after the first map; made with the shared model otherwise
+    // the vocabulary's vectors: cached after the first map (no model needed then); made with the shared model otherwise
     ctx.progress(0, phrases.len(), "reading the vocabulary");
-    if !ctx.wait_for_model()? {
-        return Ok(Flow::Paused);
-    }
-    let (hub, model_id) = (ctx.hub.clone(), ctx.job.model.clone());
-    let mut embed = |text: &str| hub.with(&model_id, |m| m.embed_query(text))?;
-    let vocabulary = crate::naming::vectors(&ctx.root, &ctx.job.model, ctx.dim(), &phrases, &mut embed, &|done, total| ctx.progress(done, total, "learning the vocabulary (first map only)"), &|| ctx.paused())?;
-    let Some(vocabulary) = vocabulary else { return Ok(Flow::Paused) };
+    let vocabulary = match crate::naming::cached(&ctx.root, &ctx.job.model, ctx.dim(), &phrases) {
+        Some(cached) => cached,
+        None => {
+            if !ctx.wait_for_model()? {
+                return Ok(Flow::Paused);
+            }
+            let (hub, model_id) = (ctx.hub.clone(), ctx.job.model.clone());
+            let mut embed = |text: &str| hub.with(&model_id, |m| m.embed_query(text))?;
+            let vocabulary = crate::naming::vectors(&ctx.root, &ctx.job.model, ctx.dim(), &phrases, &mut embed, &|done, total| ctx.progress(done, total, "learning the vocabulary (first map only)"), &|| ctx.paused())?;
+            let Some(vocabulary) = vocabulary else { return Ok(Flow::Paused) };
+            vocabulary
+        }
+    };
 
     ctx.progress(0, 0, "naming the regions");
-    let vectors = read_vectors(&ctx.dir, n, ctx.dim())?;
+    let vectors = crate::cells::HalfRows::open(&ctx.dir.join("embeddings.bin"), n, ctx.dim())?;
     let xy = read_layout(&ctx.dir, n)?;
     let named = crate::naming::name_levels(ctx.dim(), &vectors, &xy, &levels, &phrases, &vocabulary);
     let json = serde_json::to_vec(&serde_json::json!({ "levels": named })).map_err(|e| e.to_string())?;
@@ -1128,6 +1137,56 @@ mod tests {
         let data = crate::data::MapData::load(&done, &crate::data::Progress::default()).unwrap();
         assert_eq!(data.n(), count);
         fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// Goes on with a build (BUILD: its .building folder, run from the stage in its job.json) to the end, and prints each stage's time
+    /// and the most memory the process held during it: for seeing how a big map's build scales. Linux (it reads /proc/self/status).
+    /// A build whose photos are all embedded doesn't load the model (nor touch the graphics card) if the vocabulary is cached.
+    /// BUILD=... cargo test --release stages_of_a_real_build -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn stages_of_a_real_build() {
+        let dir = PathBuf::from(std::env::var("BUILD").expect("BUILD: a map's .building folder"));
+        // the process's own memory (not the files it maps: the system can drop those whenever it needs the room)
+        let rss = || -> usize {
+            let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+            status.lines().find_map(|l| l.strip_prefix("RssAnon:")).and_then(|v| v.trim().trim_end_matches(" kB").parse().ok()).unwrap_or(0) / 1024
+        };
+        // what freed memory the allocator still holds is given back between stages, so that each stage's peak is its own
+        let trim = || unsafe { libc::malloc_trim(0) };
+        // no model is loaded unless a stage needs it (photos still to embed, a vocabulary not yet learned)
+        let hub = models::Hub::start(crate::data_root(), || {});
+        trim();
+        let base = rss();
+        eprintln!("before the build: {base} MB; below, the most above that during each stage");
+        let run = Run::start(dir, crate::data_root(), hub, || {}).expect("a job in BUILD");
+        let (mut stage, mut started, mut peak) = (run.state().stage, Instant::now(), 0);
+        // and the steps inside a stage, by what it says it is doing
+        let (mut step, mut step_started, mut step_peak) = (String::new(), Instant::now(), 0);
+        let report = |stage: Stage, started: Instant, peak: usize| eprintln!("{:<32} {:7.1}s  {:6} MB", stage.label(), started.elapsed().as_secs_f32(), peak.saturating_sub(base));
+        let report_step = |step: &str, started: Instant, peak: usize| eprintln!("    {:<44} {:7.1}s  {:6} MB", step, started.elapsed().as_secs_f32(), peak.saturating_sub(base));
+        while run.running() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let state = run.state();
+            let now_step: String = state.message.chars().take(44).collect();
+            if now_step != step || state.stage != stage {
+                if !step.is_empty() {
+                    report_step(&step, step_started, step_peak);
+                }
+                (step, step_started, step_peak) = (now_step, Instant::now(), 0);
+            }
+            if state.stage != stage {
+                report(stage, started, peak);
+                trim();
+                (stage, started, peak) = (state.stage, Instant::now(), 0);
+            }
+            let now = rss();
+            peak = peak.max(now);
+            step_peak = step_peak.max(now);
+        }
+        report_step(&step, step_started, step_peak);
+        report(stage, started, peak);
+        assert!(run.state().error.is_none(), "{:?}", run.state().error);
     }
 
     /// The same photos made into a map with each model: the second model's map is made with its own vectors (nothing copied from the

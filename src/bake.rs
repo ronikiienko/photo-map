@@ -25,88 +25,103 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     let started = Instant::now();
     let step = |msg: String| eprintln!("[{:5.0}s] {msg}", started.elapsed().as_secs_f32());
     step(format!("{}: baking the always-loaded levels of {n} photos", bundle.display()));
+    progress.stage("preparing small pictures (reading every photo, then compressing)", n);
 
-    progress.stage("preparing small pictures (step 1 of 2, reading every photo)", n);
-    // 1. every photo fitted to 32 px (longer side) in the corner of a 32 x 32 tile
-    let done = AtomicUsize::new(0);
-    // `content`: how much of each tile is the photo (width, height); the rest of the tile is padding, which no average may use
-    let mut tiles = vec![0u8; n * TOP * TOP * 4];
-    let mut content = vec![(0usize, 0usize); n];
-    tiles.par_chunks_mut(TOP * TOP * 4).zip(content.par_iter_mut()).enumerate().for_each(|(i, (tile, size))| {
-        if let Some(img) = photo::load_for(&photos[i].path(bundle), |_, _| TOP as u32) {
-            let img = photo::fit(&img, TOP as u32, true);
-            *size = (img.width() as usize, img.height() as usize);
-            for (y, row) in img.as_raw().chunks(img.width() as usize * 4).enumerate() {
-                tile[y * TOP * 4..y * TOP * 4 + row.len()].copy_from_slice(row);
-            }
-        }
-        let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-        if d % 64 == 0 {
-            progress.set_done(d);
-        }
-        if d % 10_000 == 0 {
-            step(format!("decoded {d} / {n}"));
-        }
-    });
-
-    // 2. from 32 px down: pack each level's tiles onto pages and compress; halve the tiles for the next level
-    let mut levels: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
     // what the encoder makes of a block of zeros (transparent black), the same wherever it is
     let empty = {
         let mut block = [0u8; 16];
         block.copy_from_slice(&crate::bc7::compress(&[0u8; 4 * 4 * 4], 4, 4));
         block
     };
-    for level in (0..LEVELS).rev() {
-        progress.stage("preparing small pictures (step 2 of 2, compressing them)", LEVELS);
-        progress.set_done(LEVELS - 1 - level);
-        let s = 1 << level;
-        let per_row = PAGE / s;
-        let per_page = per_row * per_row;
-        let pages = n.div_ceil(per_page);
-        let mut out = Vec::with_capacity(pages * PAGE * PAGE);
-        for page in 0..pages {
-            let mut px = vec![0u8; PAGE * PAGE * 4];
-            let first = page * per_page;
-            for i in first..(first + per_page).min(n) {
-                let local = i - first;
+    // one page compressed: `px` holds its rows from the top, as far as photos reach (rounded up to whole strips); the photos fill
+    // the first `used_rows` rows, the rest is zeros, which compress to one block, repeated
+    let compress = |px: &[u8], used_rows: usize| -> Vec<u8> {
+        let mut blocks = vec![0u8; PAGE * PAGE];
+        blocks.par_chunks_mut(PAGE / 4 * STRIP / 4 * 16).enumerate().for_each(|(strip, dst)| {
+            if strip * STRIP >= used_rows {
+                for block in dst.chunks_exact_mut(16) {
+                    block.copy_from_slice(&empty);
+                }
+                return;
+            }
+            dst.copy_from_slice(&crate::bc7::compress(&px[strip * PAGE * STRIP * 4..(strip + 1) * PAGE * STRIP * 4], PAGE as u32, STRIP as u32));
+        });
+        blocks
+    };
+
+    // A batch is a page of the biggest level: its photos are read and fitted to 32 px, that page is compressed, and their halved
+    // tiles go on to the pages of the smaller levels (4x as many photos a page each time), which are compressed when full. So
+    // only a batch of tiles and a page per level are held, whatever the number of photos. Each level goes to a file of its own,
+    // put together (level 0 first) at the end.
+    let batch = (PAGE / TOP) * (PAGE / TOP);
+    let level_file = |level: usize| bundle.join(format!("pages_bc7.{level}.tmp"));
+    let mut files = (0..LEVELS).map(|l| std::fs::File::create(level_file(l)).map(io::BufWriter::new)).collect::<io::Result<Vec<_>>>()?;
+    let mut pages: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
+    let done = AtomicUsize::new(0);
+    for first in (0..n).step_by(batch) {
+        let end = (first + batch).min(n);
+        // 1. every photo of the batch fitted to 32 px (longer side) in the corner of a 32 x 32 tile
+        // `content`: how much of each tile is the photo (width, height); the rest of the tile is padding, which no average may use
+        let mut tiles = vec![0u8; (end - first) * TOP * TOP * 4];
+        let mut content = vec![(0usize, 0usize); end - first];
+        tiles.par_chunks_mut(TOP * TOP * 4).zip(content.par_iter_mut()).enumerate().for_each(|(k, (tile, size))| {
+            if let Some(img) = photo::load_for(&photos[first + k].path(bundle), |_, _| TOP as u32) {
+                let img = photo::fit(&img, TOP as u32, true);
+                *size = (img.width() as usize, img.height() as usize);
+                for (y, row) in img.as_raw().chunks(img.width() as usize * 4).enumerate() {
+                    tile[y * TOP * 4..y * TOP * 4 + row.len()].copy_from_slice(row);
+                }
+            }
+            let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+            if d % 64 == 0 {
+                progress.set_done(d);
+            }
+            if d % 10_000 == 0 {
+                step(format!("decoded {d} / {n}"));
+            }
+        });
+
+        // 2. from 32 px down: the tiles onto their level's page, a page compressed when it is full (or has the last photo); the
+        // tiles halved for the next level
+        for level in (0..LEVELS).rev() {
+            let s = 1 << level;
+            let per_row = PAGE / s;
+            let per_page = per_row * per_row;
+            let page_first = first / per_page * per_page;
+            let px = &mut pages[level];
+            let rows = |photos: usize| photos.div_ceil(per_row) * s;
+            let reach = rows(end - page_first).div_ceil(STRIP) * STRIP;
+            px.resize(reach * PAGE * 4, 0);
+            for i in first..end {
+                let (local, k) = (i - page_first, i - first);
                 let (dx, dy) = ((local % per_row) * s, (local / per_row) * s);
                 for row in 0..s {
-                    let a = (i * s * s + row * s) * 4;
+                    let a = (k * s * s + row * s) * 4;
                     let b = ((dy + row) * PAGE + dx) * 4;
                     px[b..b + s * 4].copy_from_slice(&tiles[a..a + s * 4]);
                 }
             }
-            // the photos fill the first rows of slots of a page; the rest is zeros, which compress to one block, repeated
-            let used_rows = (n - first).min(per_page).div_ceil(per_row) * s;
-            let mut blocks = vec![0u8; PAGE * PAGE];
-            px.par_chunks(PAGE * STRIP * 4).zip(blocks.par_chunks_mut(PAGE / 4 * STRIP / 4 * 16)).enumerate().for_each(|(strip, (src, dst))| {
-                if strip * STRIP >= used_rows {
-                    for block in dst.chunks_exact_mut(16) {
-                        block.copy_from_slice(&empty);
-                    }
-                    return;
-                }
-                dst.copy_from_slice(&crate::bc7::compress(src, PAGE as u32, STRIP as u32));
-            });
-            out.extend_from_slice(&blocks);
-        }
-        levels[level] = out;
-        step(format!("level {level} ({s} px): {pages} page(s)"));
-        if level > 0 {
-            // average 2 x 2 pixels: tiles of s px -> s/2 px, using only the photo's own pixels
-            let h = s / 2;
-            let mut next = vec![0u8; n * h * h * 4];
-            next.par_chunks_mut(h * h * 4).zip(content.par_iter_mut()).enumerate().for_each(|(i, (t, size))| {
-                *size = halve(&tiles[i * s * s * 4..(i + 1) * s * s * 4], s, *size, t);
-            });
-            tiles = next;
+            if end % per_page == 0 || end == n {
+                files[level].write_all(&compress(px, rows(end - page_first)))?;
+                px.clear();
+            }
+            if level > 0 {
+                // average 2 x 2 pixels: tiles of s px -> s/2 px, using only the photo's own pixels
+                let h = s / 2;
+                let mut next = vec![0u8; (end - first) * h * h * 4];
+                next.par_chunks_mut(h * h * 4).zip(content.par_iter_mut()).enumerate().for_each(|(k, (t, size))| {
+                    *size = halve(&tiles[k * s * s * 4..(k + 1) * s * s * 4], s, *size, t);
+                });
+                tiles = next;
+            }
         }
     }
     let tmp = bundle.join("pages_bc7.tmp");
     let mut file = io::BufWriter::new(std::fs::File::create(&tmp)?);
-    for l in &levels {
-        file.write_all(l)?;
+    for (level, part) in files.into_iter().enumerate() {
+        drop(part.into_inner().map_err(|e| e.into_error())?);
+        io::copy(&mut std::fs::File::open(level_file(level))?, &mut file)?;
+        std::fs::remove_file(level_file(level))?;
     }
     file.flush()?;
     drop(file);

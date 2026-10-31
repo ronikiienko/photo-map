@@ -1,7 +1,7 @@
 //! Laying out a map: where each photo goes so that similar photos are close. PCA to 50 dimensions, each photo's 10 nearest
 //! neighbours (by cosine, among the photos of its nearest cells: crate::cells), then UMAP down to 2 (umap-rs), scaled to 0 ... WORLD on both axes - what src/photomap.py did.
 
-use crate::cells::Cells;
+use crate::cells::{gather, Cells, Rows};
 use crate::data::WORLD;
 use ndarray::{Array2, Axis};
 use rayon::prelude::*;
@@ -12,6 +12,8 @@ const NEIGHBOURS: usize = 11; // a photo itself and its 10 nearest
 /// How many of its nearest cells each photo is compared with.
 const PROBE: usize = 32;
 const MIN_DIST: f32 = 0.05;
+/// Photos centred and multiplied at once.
+const BLOCK: usize = 4096;
 
 /// A small deterministic random generator (xorshift): the layout is the same every time for the same photos.
 struct Rng(u64);
@@ -36,13 +38,14 @@ fn normalise_rows(m: &mut Array2<f32>) {
 
 /// `vectors`: n x dim (unit length; a zero row is a photo that couldn't be read). `progress(text, done, total)` is told how far each
 /// part is; `paused()` is asked often: true stops it (None). The x, y of every photo, 0 ... WORLD.
-pub fn layout(vectors: Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Result<Option<Vec<f32>>, String> {
-    let n = vectors.nrows();
+pub fn layout<R: Rows>(vectors: R, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Result<Option<Vec<f32>>, String> {
+    let n = vectors.count();
     if n < 3 {
         // too few photos for a manifold: along a line
         return Ok(Some((0..n).flat_map(|i| [WORLD * (i as f32 + 0.5) / n as f32, WORLD / 2.0]).collect()));
     }
-    let Some((pcs, init)) = principal(vectors, progress, paused) else { return Ok(None) };
+    let Some((pcs, init)) = principal(&vectors, progress, paused) else { return Ok(None) };
+    drop(vectors);
 
     // 3. each photo's nearest neighbours by cosine
     let k = NEIGHBOURS.min(n - 1).max(2);
@@ -77,34 +80,49 @@ pub fn layout(vectors: Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Syn
 
 /// Steps 1 and 2 of `layout`: the photos in their COMPONENTS main directions (unit length), and the first two of them (not
 /// scaled to unit length: where the arranging starts). None if `paused()` said so.
-fn principal(vectors: Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Option<(Array2<f32>, Array2<f32>)> {
-    let n = vectors.nrows();
-    let dim = vectors.ncols();
+fn principal<R: Rows>(vectors: &R, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Option<(Array2<f32>, Array2<f32>)> {
+    let n = vectors.count();
+    let dim = vectors.dim();
 
-    // 1. centre (a photo it couldn't read counts as the average), unit length
+    // 1. centre (a photo it couldn't read counts as the average), unit length: block by block when needed, never all of them in
+    //    f32 at once (the vectors are read a few times instead; f16 to f32 is quick)
     progress("preparing the vectors", 0, 1);
-    let readable: Vec<bool> = vectors.axis_iter(Axis(0)).map(|r| r.iter().map(|x| x * x).sum::<f32>() > 0.25).collect();
+    let mut row = vec![0f32; dim];
+    let readable: Vec<bool> = (0..n)
+        .map(|i| {
+            vectors.row_into(i, &mut row);
+            row.iter().map(|x| x * x).sum::<f32>() > 0.25
+        })
+        .collect();
     let count = readable.iter().filter(|&&r| r).count().max(1);
     let mut mean = vec![0f32; dim];
-    for (row, _) in vectors.axis_iter(Axis(0)).zip(&readable).filter(|(_, ok)| **ok) {
-        for (m, x) in mean.iter_mut().zip(row.iter()) {
+    for i in (0..n).filter(|&i| readable[i]) {
+        vectors.row_into(i, &mut row);
+        for (m, x) in mean.iter_mut().zip(&row) {
             *m += x / count as f32;
         }
     }
-    let mut x = vectors;
-    for (mut row, &ok) in x.axis_iter_mut(Axis(0)).zip(&readable) {
-        for (v, m) in row.iter_mut().zip(&mean) {
-            *v = if ok { *v - m } else { 0.0 };
+    let block = |b: usize| -> Array2<f32> {
+        let rows = b * BLOCK..((b + 1) * BLOCK).min(n);
+        let mut x = gather(vectors, rows.clone());
+        for (mut row, i) in x.axis_iter_mut(Axis(0)).zip(rows) {
+            for (v, m) in row.iter_mut().zip(&mean) {
+                *v = if readable[i] { *v - m } else { 0.0 };
+            }
         }
-    }
-    normalise_rows(&mut x);
+        normalise_rows(&mut x);
+        x
+    };
+    let blocks = n.div_ceil(BLOCK);
 
     // 2. the top directions of the photos' spread (subspace iteration on the covariance), the photos in them
     let p = COMPONENTS.min(dim - 1).min(n - 1);
-    let cov = x
-        .axis_chunks_iter(Axis(0), 4096)
+    let cov = (0..blocks)
         .into_par_iter()
-        .map(|chunk| chunk.t().dot(&chunk))
+        .map(|b| {
+            let x = block(b);
+            x.t().dot(&x)
+        })
         .reduce(|| Array2::zeros((dim, dim)), |a, b| a + b);
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let mut q = Array2::from_shape_fn((dim, p), |_| rng.next());
@@ -126,10 +144,10 @@ fn principal(vectors: Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Sync
             q.column_mut(j).mapv_inplace(|v| v / norm);
         }
     }
-    let mut pcs = x.dot(&q);
+    let mut pcs = Array2::<f32>::zeros((n, p));
+    pcs.axis_chunks_iter_mut(Axis(0), BLOCK).into_par_iter().enumerate().for_each(|(b, mut out)| out.assign(&block(b).dot(&q)));
     let init = pcs.slice(ndarray::s![.., ..2]).to_owned();
     normalise_rows(&mut pcs);
-    drop(x);
     Some((pcs, init))
 }
 
@@ -224,7 +242,7 @@ fn neighbours(pcs: &Array2<f32>, k: usize, progress: &(dyn Fn(&str, usize, usize
     // each photo on its own: its nearest outside itself
     let alone: Vec<u32> = (0..n as u32).collect();
     let all: Vec<usize> = (0..n).collect();
-    let lists = cells.nearest_outside(pcs, PROBE, k - 1, &all, &alone, "finding each photo's neighbours", progress, paused)?;
+    let lists = cells.nearest_outside(PROBE, k - 1, &all, &alone, "finding each photo's neighbours", progress, paused)?;
     let mut indices = Array2::<u32>::zeros((n, k));
     let mut dists = Array2::<f32>::zeros((n, k));
     for (i, list) in lists.iter().enumerate() {
@@ -324,7 +342,7 @@ mod compare {
         .unwrap();
         eprintln!("layout took {:.1}s", started.elapsed().as_secs_f32());
         // the neighbours found against the true ones (comparing with all), for photos spread through the map
-        let (pcs, _) = principal(vectors.clone(), &|_, _, _| {}, &|| false).unwrap();
+        let (pcs, _) = principal(&vectors, &|_, _, _| {}, &|| false).unwrap();
         let found = std::time::Instant::now();
         let (idx, _) = neighbours(&pcs, NEIGHBOURS, &|_, _, _| {}, &|| false).unwrap();
         let took = found.elapsed().as_secs_f32();

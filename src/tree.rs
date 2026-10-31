@@ -12,8 +12,7 @@
 //! Wikivoyage (88,000 photos) 99.3% of the links are those of comparing all with all, 97% of paths between random photos are
 //! the same, the rest's biggest step at most 0.03 longer; 9 s instead of 47.
 
-use crate::cells::Cells;
-use ndarray::Array2;
+use crate::cells::{Cells, Rows};
 use rayon::prelude::*;
 use std::path::Path;
 
@@ -38,13 +37,13 @@ fn shorter(a: Link, b: Link) -> bool {
 
 /// Each photo's parent in the tree (photo 0, the root, has itself), from the photos' vectors (n x dim, unit length).
 /// `progress(text, done, total)`; None if `paused()` said so.
-pub fn build(v: &Array2<f32>, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Option<Vec<u32>> {
+pub fn build<R: Rows>(v: &R, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Option<Vec<u32>> {
     grow(v, PROBE, progress, paused)
 }
 
 /// `build`, each photo compared with the photos of its `probe` nearest cells.
-fn grow(v: &Array2<f32>, probe: usize, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Option<Vec<u32>> {
-    let n = v.nrows();
+fn grow<R: Rows>(v: &R, probe: usize, progress: &(dyn Fn(&str, usize, usize) + Sync), paused: &(dyn Fn() -> bool + Sync)) -> Option<Vec<u32>> {
+    let n = v.count();
     if n == 0 {
         return Some(Vec::new());
     }
@@ -54,7 +53,7 @@ fn grow(v: &Array2<f32>, probe: usize, progress: &(dyn Fn(&str, usize, usize) + 
     let mut group: Vec<u32> = (0..n as u32).collect();
     let all: Vec<usize> = (0..n).collect();
     let mut lists = vec![Vec::new(); n];
-    for (i, list) in all.iter().zip(cells.nearest_outside(v, probe, NEAREST, &all, &group, "finding each photo's nearest photos", progress, paused)?) {
+    for (i, list) in all.iter().zip(cells.nearest_outside(probe, NEAREST, &all, &group, "finding each photo's nearest photos", progress, paused)?) {
         lists[*i] = list;
     }
     let mut links: Vec<(u32, u32)> = Vec::with_capacity(n - 1);
@@ -87,7 +86,7 @@ fn grow(v: &Array2<f32>, probe: usize, progress: &(dyn Fn(&str, usize, usize) + 
             .filter(|&i| lists[i].last().is_none_or(|&(d, _)| best[group[i] as usize].is_none_or(|b| d < b.0)))
             .collect();
         if !again.is_empty() {
-            let fresh = cells.nearest_outside(v, probe, NEAREST, &again, &group, "joining the photos into a tree", &|_, _, _| {}, paused)?;
+            let fresh = cells.nearest_outside(probe, NEAREST, &again, &group, "joining the photos into a tree", &|_, _, _| {}, paused)?;
             for (&i, list) in again.iter().zip(fresh) {
                 if let Some(f) = first(&list, i) {
                     offer(&mut best, i, f);
@@ -186,7 +185,7 @@ pub fn route(parent: &[u32], a: usize, b: usize) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::Axis;
+    use ndarray::{Array2, Axis};
 
     fn unit(rows: Vec<Vec<f32>>) -> Array2<f32> {
         let dim = rows[0].len();
@@ -259,6 +258,7 @@ mod tests {
 #[cfg(test)]
 mod timing {
     use super::*;
+    use ndarray::Array2;
 
     /// (Run by hand: MAP=maps/<name>.photomap cargo test --release tree_of_a_real_map -- --ignored --nocapture; WRITE=1 also
     /// saves the tree in the map.) How long a real map's tree takes, and how long paths between random photos are.
