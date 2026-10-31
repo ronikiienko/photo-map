@@ -258,7 +258,7 @@ struct Viewer {
     wanted: f32,
     /// Photos drawn with their pixels blended (smooth) or each pixel as it is (nearest).
     smooth: bool,
-    /// What the shown search was for (words and/or a photo's name).
+    /// What the shown search was for (its words, or "this photo").
     shown: String,
     /// The photo in the box, as a small picture.
     photo_tex: Option<egui::TextureHandle>,
@@ -708,7 +708,7 @@ impl Viewer {
         } else {
             let model = m.data.manifest.model().to_string();
             let (queries, logic, shown) = match &self.photo {
-                Some(path) => (vec![search::Query::Photo(path.clone())], query::Logic::one(), path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                Some(path) => (vec![search::Query::Photo(path.clone())], query::Logic::one(), "this photo".into()),
                 None => match query::Logic::parse(&text) {
                     Ok(logic) => (logic.terms.iter().map(|t| search::Query::Words(t.clone())).collect(), logic, text),
                     Err(e) => {
@@ -1806,9 +1806,8 @@ impl Viewer {
                             ui.spinner();
                         }
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            if let Some(photo) = &self.photo {
+                            if self.photo.is_some() {
                                 // a search is a photo or words, never both: while a photo is the search it takes the place of the box
-                                let name = photo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                                 egui::Frame::new()
                                     .fill(egui::Color32::from_rgb(30, 33, 42))
                                     .stroke(egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.6)))
@@ -1820,7 +1819,7 @@ impl Viewer {
                                             if let Some(tex) = &self.photo_tex {
                                                 ui.add(egui::Image::new((tex.id(), egui::vec2(28.0 * tex.aspect_ratio(), 28.0))).corner_radius(4));
                                             }
-                                            ui.label(format!("Photos like {name}"));
+                                            ui.label("Photos like this");
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if ui.button("× Search with words instead").on_hover_text("stop searching by this photo, clear the matches and type words").clicked() {
                                                     actions.clear_photo = true;
