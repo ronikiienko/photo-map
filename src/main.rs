@@ -33,6 +33,7 @@ mod regions;
 mod reuse;
 mod photo;
 mod places;
+mod query;
 mod search;
 mod siglip;
 mod storage;
@@ -233,8 +234,11 @@ struct Viewer {
     search: String,
     /// The text model, on a thread of its own.
     engine: search::Engine,
-    /// The query it is working on.
-    asked: Option<u64>,
+    /// The search being worked on: its terms' query numbers (None once answered), their cosines, and how those combine
+    /// (AND, OR, NOT: query.rs).
+    asked: Vec<Option<u64>>,
+    answers: Vec<Option<Vec<f32>>>,
+    logic: query::Logic,
     /// A photo dropped on the window: searched for together with the text.
     photo: Option<PathBuf>,
     /// What the last search did, next to the box.
@@ -325,7 +329,9 @@ impl Viewer {
             label_rects: Vec::new(),
             search: String::new(),
             engine,
-            asked: None,
+            asked: Vec::new(),
+            answers: Vec::new(),
+            logic: query::Logic::one(),
             photo: None,
             status: String::new(),
             axes: axes::Words::default(),
@@ -388,7 +394,7 @@ impl Viewer {
         let vectors = search::Vectors::open(&path, n, data.manifest.dim());
         let tree = tree::read(&path, n);
         let in_process = vectors.is_some();
-        self.asked = None;
+        self.asked.clear();
         self.view_choice = View::Map; // a map opens as itself; the words are kept for the next one
         self.layout_asked.clear();
         self.engine.want(data.manifest.model()); // load the map's model now, so that the first search is quick
@@ -701,11 +707,19 @@ impl Viewer {
             self.status = format!("search can't start: {why}");
         } else {
             let model = m.data.manifest.model().to_string();
-            let (query, shown) = match &self.photo {
-                Some(path) => (search::Query::Photo(path.clone()), path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-                None => (search::Query::Words(text.clone()), text),
+            let (queries, logic, shown) = match &self.photo {
+                Some(path) => (vec![search::Query::Photo(path.clone())], query::Logic::one(), path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                None => match query::Logic::parse(&text) {
+                    Ok(logic) => (logic.terms.iter().map(|t| search::Query::Words(t.clone())).collect(), logic, text),
+                    Err(e) => {
+                        self.status = e;
+                        return;
+                    }
+                },
             };
-            self.asked = Some(self.engine.ask(&model, query));
+            self.asked = queries.into_iter().map(|q| Some(self.engine.ask(&model, q))).collect();
+            self.answers = vec![None; self.asked.len()];
+            self.logic = logic;
             self.shown = shown;
             self.status = if self.engine.ready(&model).is_some() { "searching…".into() } else { "loading the search model, it will run when ready…".into() };
         }
@@ -810,14 +824,19 @@ impl Viewer {
                 }
                 continue;
             }
-            if self.asked != Some(id) {
+            let Some(k) = self.asked.iter().position(|&a| a == Some(id)) else {
                 continue; // an older query, or the map changed
-            }
-            self.asked = None;
+            };
+            self.asked[k] = None;
             let Some(m) = &mut self.map else { continue };
             match (vector, &m.vectors) {
                 (Ok(v), Some(vectors)) => {
-                    m.sims = vectors.cosines(&v);
+                    self.answers[k] = Some(vectors.cosines(&v));
+                    if self.asked.iter().any(Option::is_some) {
+                        continue; // the other terms are still on their way
+                    }
+                    let cos: Vec<Vec<f32>> = std::mem::take(&mut self.answers).into_iter().flatten().collect();
+                    m.sims = self.logic.combine(&cos);
                     if let Some((min, max)) = self.apply_search() {
                         self.camera.fly_to(self.camera.fit(min, max));
                     }
@@ -825,7 +844,10 @@ impl Viewer {
                         self.status = format!("{} - {note}", self.status);
                     }
                 }
-                (Err(e), _) => self.status = format!("couldn't search: {e}"),
+                (Err(e), _) => {
+                    self.asked.clear(); // the other terms are no use without this one
+                    self.status = format!("couldn't search: {e}");
+                }
                 _ => {}
             }
         }
@@ -874,7 +896,7 @@ impl Viewer {
         self.photo = None;
         self.photo_tex = None;
         self.shown.clear();
-        self.asked = None;
+        self.asked.clear();
         m.sims.clear();
         m.flags.fill(0);
         for &i in &path {
@@ -1746,6 +1768,7 @@ impl Viewer {
                                     }
                                 } else {
                                     ui.label(theme::muted("Each photo joins the word it is most like. In each group the strongest matches are in the middle, the weakest at the edge."));
+                                    ui.label(theme::muted("The model can tell which word fits a photo better, but not where a word stops fitting at all. So a photo that fits none of them still lands in some group, at its edge."));
                                     ui.add_space(6.0);
                                     presets(ui, |ui| {
                                         for (name, words) in groups::PRESETS {
@@ -1756,7 +1779,7 @@ impl Viewer {
                                         }
                                     });
                                     ui.add_space(4.0);
-                                    ui.add(egui::TextEdit::multiline(&mut self.groups_text).hint_text("beach, mountain, city, forest").desired_rows(3).desired_width(f32::INFINITY));
+                                    ui.add(egui::TextEdit::multiline(&mut self.groups_text).hint_text("mountain, city, forest, river").desired_rows(3).desired_width(f32::INFINITY));
                                     ui.label(theme::muted("Separate the words with commas or new lines."));
                                     ui.add_space(6.0);
                                     if theme::button(ui, egui::Button::new("Arrange")).on_hover_text("sort the photos into these groups").clicked() {
@@ -1768,7 +1791,7 @@ impl Viewer {
                         // whether a search can run now
                         let searchable = self.map.as_ref().is_some_and(|m| m.vectors.is_some());
                         let map_model = self.map.as_ref().map(|m| m.data.manifest.model().to_string());
-                        let hint = map_model.as_deref().and_then(models::spec).map_or("Search the map: describe what you look for, or drop in a photo", |s| s.query_hint);
+                        let hint = map_model.as_deref().and_then(models::spec).map_or("cat OR dog, tree AND snow NOT people, or drop in a photo", |s| s.query_hint);
                         if let Some(why) = self.engine.failed() {
                             ui.label(theme::muted("search off")).on_hover_text(why);
                             theme::dot(ui, theme::MUTED);
@@ -1849,6 +1872,15 @@ impl Viewer {
                         }
                     });
                 }
+                // while typing in the empty box: how to search
+                if ui.ctx().memory(|m| m.has_focus(egui::Id::new("search-box"))) && self.search.trim().is_empty() && self.photo.is_none() {
+                    ui.add_space(4.0);
+                    ui.label(theme::muted(
+                        "AND: both things in one photo (tree AND snow). OR: either one (cat OR dog). NOT: photos with this go lower (street at night NOT cars). Write them in capitals.\n\
+                         Keep a description with its thing: \"red car\", not \"red AND car\" (that is anything red and any car). Short phrases work better than long sentences, and the model doesn't understand \"without\" or \"no\": use NOT.\n\
+                         Good at: things, places, scenes, light, weather, mood, style. Bad at: counting, left and right, who someone is, negation inside a sentence.",
+                    ));
+                }
             });
         });
 
@@ -1871,7 +1903,8 @@ impl Viewer {
                         ui.label(theme::muted(
                             "Every photo is turned into numbers that describe what it shows, and photos that look alike are placed close together. \
                              Zoom in and similar photos sit side by side; the names mark regions of the map. \
-                             Search compares your words, or a photo you drop in (one or the other), with every photo and highlights the best matches.",
+                             Search compares your words, or a photo you drop in (one or the other), with every photo and highlights the best matches. \
+                             Words can be joined with AND, OR and NOT, in capitals: \"street NOT cars\", \"cat OR dog\".",
                         ));
                         ui.add_space(8.0);
                         egui::Grid::new("keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
