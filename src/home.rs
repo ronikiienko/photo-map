@@ -1,6 +1,7 @@
 //! The Maps page: the maps you can open, the ones being made, and the way to start a new one.
 
 use crate::build::{self, Stage, State};
+use crate::examples::{self, Examples};
 use crate::library::Library;
 use crate::manager::{self, Advice, Manager};
 use crate::modelstore::{self, ModelStore};
@@ -20,6 +21,9 @@ pub enum Action {
     StopModelFetch,
     RemoveModel(String),
     CountModels,
+    GetExample(String),
+    StopExample,
+    RemoveExample(String),
     Continue(PathBuf),
     Discard(PathBuf),
     Delete(PathBuf),
@@ -111,6 +115,9 @@ pub struct Home {
     confirm_remove: bool,
     /// The window on the models is open, and the model asked about removing.
     models_open: bool,
+    examples_open: bool,
+    /// An example whose photos Remove was pressed for, waiting to be confirmed.
+    confirm_remove_example: Option<&'static str>,
     confirm_remove_model: Option<String>,
 }
 
@@ -118,7 +125,7 @@ const COVER: f32 = 200.0;
 
 impl Home {
     pub fn new() -> Self {
-        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: false, models_open: false, confirm_remove_model: None }
+        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: false, models_open: false, confirm_remove_model: None, examples_open: false, confirm_remove_example: None }
     }
 
     pub fn open_new_map(&mut self) {
@@ -149,7 +156,7 @@ impl Home {
         self.sizes.remove(map);
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager, store: &ModelStore) -> Vec<Action> {
+    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager, store: &ModelStore, examples: &Examples) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::Area::new("maps-background".into()).anchor(Align2::LEFT_TOP, [0.0, 0.0]).order(egui::Order::Background).show(ctx, |ui| {
             let screen = ctx.content_rect();
@@ -179,7 +186,7 @@ impl Home {
                 });
             });
         }
-        self.dialogs(ctx, builds, lib, rt, store, &mut actions);
+        self.dialogs(ctx, builds, lib, rt, store, examples, &mut actions);
         actions
     }
 
@@ -189,6 +196,9 @@ impl Home {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("+  New map").strong()).min_size(vec2(112.0, 34.0))).clicked() {
                     self.open_new_map();
+                }
+                if ui.button("Example photos").on_hover_text("Photos to try a map with, if you have none at hand").clicked() {
+                    self.examples_open = true;
                 }
                 if ui.button("Models").on_hover_text("The models maps are made and searched with: get or remove them").clicked() {
                     self.models_open = true;
@@ -229,6 +239,10 @@ impl Home {
                         ui.add_space(12.0);
                         if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("Make your first map").strong()).min_size(vec2(180.0, 34.0))).clicked() {
                             self.open_new_map();
+                        }
+                        ui.add_space(4.0);
+                        if ui.button("No photos at hand? Get example photos").clicked() {
+                            self.examples_open = true;
                         }
                     });
                 });
@@ -568,7 +582,7 @@ impl Home {
         }
     }
 
-    fn dialogs(&mut self, ctx: &egui::Context, builds: &[BuildView], lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
+    fn dialogs(&mut self, ctx: &egui::Context, builds: &[BuildView], lib: &Library, rt: &Manager, store: &ModelStore, examples: &Examples, actions: &mut Vec<Action>) {
         if let Some(dir) = self.confirm_discard.clone() {
             let name = builds.iter().find(|b| b.dir == dir).map_or(String::new(), |b| b.name.clone());
             let mut close = false;
@@ -613,6 +627,7 @@ impl Home {
         self.new_map_dialog(ctx, lib, rt, store, actions);
         self.runtime_window(ctx, rt, actions);
         self.models_window(ctx, rt, store, actions);
+        self.examples_window(ctx, examples, actions);
     }
 
     fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
@@ -797,6 +812,85 @@ impl Home {
         }
         if close {
             self.new_map = None;
+        }
+    }
+
+    /// The window on the example photos: each to download, and once it is here, to make a map from or to remove.
+    fn examples_window(&mut self, ctx: &egui::Context, examples: &Examples, actions: &mut Vec<Action>) {
+        if !self.examples_open {
+            return;
+        }
+        let mut close = false;
+        let mut make = None;
+        let response = theme::modal(ctx, "examples", 520.0, Some("Example photos"), |ui| {
+            ui.label(theme::muted("Photos to try the app with. They are downloaded into the app's folder; no map is made until you make one."));
+            ui.add_space(8.0);
+            for ex in examples::ALL.iter() {
+                let here = examples.installed(ex);
+                theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(ex.label).strong());
+                        ui.label(theme::muted(format!("{} photos, {}", thousands(ex.photos), bytes_text(ex.size))));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if let Some(job) = examples.job.as_ref().filter(|j| j.id == ex.id) {
+                                if ui.button("Stop").clicked() {
+                                    actions.push(Action::StopExample);
+                                }
+                                ui.add(egui::ProgressBar::new(job.state().0).desired_width(120.0).desired_height(8.0).fill(theme::ACCENT));
+                            } else if here {
+                                if ui.button("Remove").clicked() {
+                                    self.confirm_remove_example = Some(ex.id);
+                                }
+                                if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("Make a map").strong())).clicked() {
+                                    make = Some(examples.dir(ex));
+                                }
+                            } else if ui.add_enabled(examples.job.is_none(), egui::Button::new("Get")).clicked() {
+                                actions.push(Action::GetExample(ex.id.to_string()));
+                            }
+                        });
+                    });
+                    ui.label(theme::muted(ex.about));
+                    if here {
+                        ui.horizontal(|ui| {
+                            ui.label(theme::muted(examples.dir(ex).display().to_string()));
+                            if ui.small_button("Show").clicked() {
+                                show_in_file_manager(&examples.dir(ex));
+                            }
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            if let Some(id) = self.confirm_remove_example {
+                ui.add_space(4.0);
+                ui.label("Remove these photos? Maps made from them stay, but show them as not found.");
+                ui.horizontal(|ui| {
+                    if theme::tinted(ui, theme::DANGER, true, egui::Button::new("Remove")).clicked() {
+                        actions.push(Action::RemoveExample(id.to_string()));
+                        self.confirm_remove_example = None;
+                    }
+                    if ui.button("Keep them").clicked() {
+                        self.confirm_remove_example = None;
+                    }
+                });
+            }
+            if let Some(e) = &examples.failure {
+                ui.add_space(8.0);
+                ui.label(RichText::new(e).color(Color32::from_rgb(235, 110, 100)));
+            }
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+        if close || make.is_some() || response.should_close() {
+            self.examples_open = false;
+            self.confirm_remove_example = None;
+        }
+        // the New map form, with the photos in it
+        if let Some(dir) = make {
+            self.dropped(vec![dir]);
         }
     }
 

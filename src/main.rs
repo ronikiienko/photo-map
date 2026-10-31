@@ -11,6 +11,7 @@ mod camera;
 mod cells;
 mod data;
 mod embed;
+mod examples;
 mod files;
 mod gpu;
 mod groups;
@@ -257,6 +258,8 @@ struct Viewer {
     /// The runtime libraries: what is installed and the install under way.
     runtime: manager::Manager,
     store: modelstore::ModelStore,
+    /// Example photos to make a map from: what is downloaded and the download under way.
+    examples: examples::Examples,
     /// The Restart button was pressed: the app closes and opens again.
     restart: bool,
     last_frame: Instant,
@@ -281,6 +284,10 @@ impl Viewer {
             let window = window.clone();
             modelstore::ModelStore::new(library.root(), move || window.request_redraw())
         };
+        let examples = {
+            let window = window.clone();
+            examples::Examples::new(library.root(), move || window.request_redraw())
+        };
         let state = egui_winit::State::new(ctx.clone(), ctx.viewport_id(), &window, None, None, None);
         let renderer = egui_wgpu::Renderer::new(&gpu.device, gpu.config.format, Default::default());
         let size = window.inner_size();
@@ -299,6 +306,7 @@ impl Viewer {
             library,
             runtime,
             store,
+            examples,
             restart: false,
             opening: None,
             camera,
@@ -582,6 +590,9 @@ impl Viewer {
                     self.store.remove(&id);
                 }
             }
+            Action::GetExample(id) => self.examples.get(&id),
+            Action::StopExample => self.examples.stop(),
+            Action::RemoveExample(id) => self.examples.remove(&id),
             Action::Restart => self.restart = true,
         }
     }
@@ -1105,6 +1116,7 @@ impl Viewer {
         self.poll_engine();
         self.runtime.tick();
         self.store.tick();
+        self.examples.tick();
         self.pump_builds();
         if self.opening.as_ref().is_some_and(|(_, job, _)| job.is_finished()) {
             let (path, job, _) = self.opening.take().unwrap();
@@ -1604,7 +1616,7 @@ impl Viewer {
             let views = self.build_views();
             let notice = self.notice.clone();
             let ready_msg = notice.as_ref().filter(|(_, good)| *good).map(|(m, _)| m.as_str());
-            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg, &self.runtime, &self.store);
+            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg, &self.runtime, &self.store, &self.examples);
             if let Some((text, false)) = &notice {
                 egui::Area::new("notice".into()).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0]).show(&ctx, |ui| {
                     theme::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(235, 110, 100))));

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 
-/// A model being fetched.
+/// A download on a thread of its own (a model's files, or example photos: examples.rs).
 pub struct Job {
     pub id: &'static str,
     state: Mutex<(f32, Option<Result<(), String>>)>,
@@ -21,10 +21,36 @@ pub struct Job {
 }
 
 impl Job {
+    /// Run `work` on a thread; it is handed the stop flag and where to say how far it is (0 to 1).
+    pub fn start(id: &'static str, wake: Arc<dyn Fn() + Send + Sync>, work: impl FnOnce(&AtomicBool, &dyn Fn(f32)) -> Result<(), String> + Send + 'static) -> Arc<Job> {
+        let job = Arc::new(Job { id, state: Mutex::new((0.0, None)), stop: AtomicBool::new(false) });
+        let j = job.clone();
+        std::thread::spawn(move || {
+            let result = work(&j.stop, &|fraction| {
+                j.state.lock().unwrap().0 = fraction;
+                wake();
+            });
+            j.state.lock().unwrap().1 = Some(result);
+            wake();
+        });
+        job
+    }
+
     /// How far it is (0 to 1), and how it ended (None while it runs).
     pub fn state(&self) -> (f32, Option<Result<(), String>>) {
         self.state.lock().unwrap().clone()
     }
+
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A file to download: where from, and its size and SHA-256 to check it against.
+pub struct Remote<'a> {
+    pub url: &'a str,
+    pub size: u64,
+    pub sha256: &'a str,
 }
 
 /// What a model takes on disk, in bytes.
@@ -62,9 +88,14 @@ pub fn size_mb(spec: &Spec) -> u32 {
 /// A piece of a file asked for at once (with its own retries).
 const PIECE: u64 = 16 << 20;
 
-/// Download one file of a model into `dir`, unless it is there already. `progress` gets the bytes of this file done so far.
-pub fn fetch(agent: &ureq::Agent, spec: &Spec, file: &File, dir: &Path, stop: &AtomicBool, progress: &dyn Fn(u64)) -> Result<(), String> {
-    let target = dir.join(file.path);
+/// The download of a model's file from its Hugging Face repository.
+fn remote<'a>(file: &File, url: &'a str) -> Remote<'a> {
+    Remote { url, size: file.size, sha256: file.sha256 }
+}
+
+/// Download a file to `target`, unless it is there already. `progress` gets the bytes done so far.
+pub fn fetch(agent: &ureq::Agent, file: &Remote, target: &Path, stop: &AtomicBool, progress: &dyn Fn(u64)) -> Result<(), String> {
+    let target = target.to_path_buf();
     if std::fs::metadata(&target).is_ok_and(|m| m.len() == file.size) {
         progress(file.size);
         return Ok(());
@@ -89,7 +120,7 @@ pub fn fetch(agent: &ureq::Agent, spec: &Spec, file: &File, dir: &Path, stop: &A
     out.set_len(have).map_err(|e| e.to_string())?;
     std::io::Seek::seek(&mut out, std::io::SeekFrom::Start(have)).map_err(|e| e.to_string())?;
     progress(have);
-    let url = format!("https://huggingface.co/{}/resolve/{}/{}", spec.repo, spec.revision, file.path);
+    let url = file.url;
     while have < file.size {
         if stop.load(Ordering::Relaxed) {
             return Err("stopped".into());
@@ -101,7 +132,7 @@ pub fn fetch(agent: &ureq::Agent, spec: &Spec, file: &File, dir: &Path, stop: &A
             if attempt > 0 {
                 std::thread::sleep(std::time::Duration::from_secs(2 * attempt));
             }
-            let piece = agent.get(&url).header("Range", format!("bytes={have}-{end}")).call().map_err(|e| e.to_string()).and_then(|r| {
+            let piece = agent.get(url).header("Range", format!("bytes={have}-{end}")).call().map_err(|e| e.to_string()).and_then(|r| {
                 if r.status() != 206 {
                     return Err(format!("the server answered {} to a request for part of the file", r.status()));
                 }
@@ -140,7 +171,8 @@ fn download(root: &Path, spec: &Spec, stop: &AtomicBool, progress: &dyn Fn(f32))
     let total = spec.download_size().max(1) as f64;
     let mut before = 0u64;
     for file in spec.files {
-        fetch(&agent, spec, file, &dir, stop, &|done| progress(((before + done) as f64 / total) as f32))?;
+        let url = format!("https://huggingface.co/{}/resolve/{}/{}", spec.repo, spec.revision, file.path);
+        fetch(&agent, &remote(file, &url), &dir.join(file.path), stop, &|done| progress(((before + done) as f64 / total) as f32))?;
         before += file.size;
     }
     Ok(())
@@ -217,23 +249,14 @@ impl ModelStore {
         if self.job.is_some() || self.installed(spec) {
             return;
         }
-        let job = Arc::new(Job { id: spec.id, state: Mutex::new((0.0, None)), stop: AtomicBool::new(false) });
-        self.job = Some(job.clone());
         self.failure = None;
-        let (root, wake) = (self.root.clone(), self.wake.clone());
-        std::thread::spawn(move || {
-            let result = download(&root, spec, &job.stop, &|fraction| {
-                job.state.lock().unwrap().0 = fraction;
-                wake();
-            });
-            job.state.lock().unwrap().1 = Some(result);
-            wake();
-        });
+        let root = self.root.clone();
+        self.job = Some(Job::start(spec.id, self.wake.clone(), move |stop, progress| download(&root, spec, stop, progress)));
     }
 
     pub fn stop(&self) {
         if let Some(job) = &self.job {
-            job.stop.store(true, Ordering::Relaxed);
+            job.stop();
         }
     }
 
@@ -300,11 +323,13 @@ mod tests {
         let file = &spec.files[0];
         let agent = ureq::Agent::new_with_defaults();
         let stop = AtomicBool::new(false);
-        let err = fetch(&agent, spec, file, &spec.dir(&root), &stop, &|done| if done > file.size / 2 { stop.store(true, Ordering::Relaxed) }).unwrap_err();
+        let url = format!("https://huggingface.co/{}/resolve/{}/{}", spec.repo, spec.revision, file.path);
+        let target = spec.dir(&root).join(file.path);
+        let err = fetch(&agent, &remote(file, &url), &target, &stop, &|done| if done > file.size / 2 { stop.store(true, Ordering::Relaxed) }).unwrap_err();
         assert_eq!(err, "stopped");
         stop.store(false, Ordering::Relaxed);
         let first = std::sync::Mutex::new(None);
-        fetch(&agent, spec, file, &spec.dir(&root), &stop, &|done| { first.lock().unwrap().get_or_insert(done); }).unwrap();
+        fetch(&agent, &remote(file, &url), &target, &stop, &|done| { first.lock().unwrap().get_or_insert(done); }).unwrap();
         assert!(first.lock().unwrap().unwrap() > file.size / 2, "it started again from the beginning");
         assert_eq!(std::fs::metadata(spec.dir(&root).join(file.path)).unwrap().len(), file.size);
         let _ = std::fs::remove_dir_all(&root);
