@@ -235,7 +235,7 @@ struct Viewer {
     /// The text model, on a thread of its own.
     engine: search::Engine,
     /// The search being worked on: its terms' query numbers (None once answered), their cosines, and how those combine
-    /// (AND, OR, NOT: query.rs).
+    /// (NOT: query.rs).
     asked: Vec<Option<u64>>,
     answers: Vec<Option<Vec<f32>>>,
     logic: query::Logic,
@@ -1791,7 +1791,7 @@ impl Viewer {
                         // whether a search can run now
                         let searchable = self.map.as_ref().is_some_and(|m| m.vectors.is_some());
                         let map_model = self.map.as_ref().map(|m| m.data.manifest.model().to_string());
-                        let hint = map_model.as_deref().and_then(models::spec).map_or("cat OR dog, tree AND snow NOT people, or drop in a photo", |s| s.query_hint);
+                        let hint = map_model.as_deref().and_then(models::spec).map_or("street at night NOT cars, or drop in a photo", |s| s.query_hint);
                         if let Some(why) = self.engine.failed() {
                             ui.label(theme::muted("search off")).on_hover_text(why);
                             theme::dot(ui, theme::MUTED);
@@ -1876,8 +1876,9 @@ impl Viewer {
                 if ui.ctx().memory(|m| m.has_focus(egui::Id::new("search-box"))) && self.search.trim().is_empty() && self.photo.is_none() {
                     ui.add_space(4.0);
                     ui.label(theme::muted(
-                        "AND: both things in one photo (tree AND snow). OR: either one (cat OR dog). NOT: photos with this go lower (street at night NOT cars). Write them in capitals.\n\
-                         Keep a description with its thing: \"red car\", not \"red AND car\" (that is anything red and any car). Short phrases work better than long sentences, and the model doesn't understand \"without\" or \"no\": use NOT.\n\
+                        "Describe what you want in a short phrase: \"woman on a bike in winter\". Short phrases work better than long sentences.\n\
+                         The model doesn't understand \"without\" or \"no\": use NOT, in capitals (street at night NOT cars), and photos with that go lower. \
+                         For \"this or that\", search twice.\n\
                          Good at: things, places, scenes, light, weather, mood, style. Bad at: counting, left and right, who someone is, negation inside a sentence.",
                     ));
                 }
@@ -1904,7 +1905,7 @@ impl Viewer {
                             "Every photo is turned into numbers that describe what it shows, and photos that look alike are placed close together. \
                              Zoom in and similar photos sit side by side; the names mark regions of the map. \
                              Search compares your words, or a photo you drop in (one or the other), with every photo and highlights the best matches. \
-                             Words can be joined with AND, OR and NOT, in capitals: \"street NOT cars\", \"cat OR dog\".",
+                             NOT in capitals pushes things down: \"street NOT cars\".",
                         ));
                         ui.add_space(8.0);
                         egui::Grid::new("keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
