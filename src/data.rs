@@ -5,7 +5,7 @@
 //!     originals/      the photos copied into the map (maps made before kept links to all of them here); photo i = position i in photos.json
 //!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
 //!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
-//!     embeddings.bin  per photo: float16 vector of the picture (search, Axes and Groups)
+//!     embeddings.bin  per photo: float16 vector of the picture (search and Groups)
 //!     tree.bin        per photo: its parent in the tree that paths between photos follow (tree.rs)
 //!     pages_bc7.bin   the always-loaded levels, made while the map is built (bake.rs)
 

@@ -2,7 +2,6 @@
 //! similar photos close together, region names as you zoom.
 //!     photo-map [bundle]      default: the one opened last in maps/
 
-mod axes;
 mod beside;
 mod bake;
 mod backends;
@@ -83,12 +82,10 @@ enum Lifted {
     Copy(usize),
 }
 
-/// Where the photos are: the map's own layout (similar photos together), along two pairs of words (axes.rs), or sorted into
-/// groups by words (groups.rs).
+/// Where the photos are: the map's own layout (similar photos together), or sorted into groups by words (groups.rs).
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Map,
-    Axes,
     Groups,
 }
 
@@ -137,8 +134,6 @@ struct OpenMap {
     /// SLIDE_SECONDS.
     from: Vec<[f32; 4]>,
     moved: Option<Instant>,
-    /// The photos' cosines with the axes' four words, kept while the Axes view shows (changing how they spread needs no model).
-    axes_cos: Option<[Vec<f32>; 4]>,
     /// The Groups view's islands and their words (empty in the other views).
     islands: Vec<groups::Island>,
     island_words: Vec<String>,
@@ -244,9 +239,7 @@ struct Viewer {
     photos: Vec<(PathBuf, egui::TextureHandle)>,
     /// What the last search did, next to the box.
     status: String,
-    /// The words of the Axes view and of the Groups view (as typed), and the view the Layout menu has chosen.
-    axes: axes::Words,
-    axes_spread: axes::Spread,
+    /// The words of the Groups view (as typed), and the view the Layout menu has chosen.
     groups_text: String,
     view_choice: View,
     /// A layout's words on their way from the model: which view they are for, the query number each was asked as (None once
@@ -333,8 +326,6 @@ impl Viewer {
             logic: query::Logic::one(),
             photos: Vec::new(),
             status: String::new(),
-            axes: axes::Words::default(),
-            axes_spread: axes::Spread::default(),
             groups_text: String::new(),
             view_choice: View::Map,
             layout_for: View::Map,
@@ -418,7 +409,6 @@ impl Viewer {
             map_photo_world: photo_world,
             from,
             moved: None,
-            axes_cos: None,
             islands: Vec::new(),
             island_words: Vec::new(),
         });
@@ -734,7 +724,6 @@ impl Viewer {
         let Some(m) = &mut self.map else { return };
         if self.view_choice == View::Map {
             self.layout_asked.clear();
-            m.axes_cos = None;
             m.islands.clear();
             if m.view != View::Map {
                 let (points, size) = (m.map_points.clone(), m.map_photo_world);
@@ -743,23 +732,11 @@ impl Viewer {
             }
             return;
         }
-        let words: Vec<String> = match self.view_choice {
-            View::Axes => {
-                if self.axes.all().iter().any(|w| w.trim().is_empty()) {
-                    self.status = "the axes need a word at each of the four ends".into();
-                    return;
-                }
-                self.axes.all().iter().map(|w| w.trim().to_string()).collect()
-            }
-            _ => {
-                let words = groups::words(&self.groups_text);
-                if words.len() < 2 {
-                    self.status = "type at least two words to sort the photos into".into();
-                    return;
-                }
-                words
-            }
-        };
+        let words = groups::words(&self.groups_text);
+        if words.len() < 2 {
+            self.status = "type at least two words to sort the photos into".into();
+            return;
+        }
         if m.vectors.is_none() {
             self.status = "this map has no vectors (embeddings.bin) to arrange the photos by".into();
             return;
@@ -776,37 +753,19 @@ impl Viewer {
         self.status = "arranging the photos…".into();
     }
 
-    /// All the words' vectors are back: each photo's cosines with them place it (axes.rs, groups.rs), and the photos slide there.
+    /// All the words' vectors are back: each photo's cosines with them place it (groups.rs), and the photos slide there.
     fn arranged(&mut self) {
         let Some(m) = &mut self.map else { return };
         let Some(vectors) = &m.vectors else { return };
         let words = std::mem::take(&mut self.layout_vectors);
         let Some(cos) = words.iter().map(|v| v.as_ref().map(|v| vectors.cosines(v))).collect::<Option<Vec<_>>>() else { return };
-        if self.layout_for == View::Axes {
-            m.axes_cos = Some(cos.try_into().unwrap());
-            m.islands.clear();
-            self.spread_axes();
-            let a = &self.axes;
-            self.status = format!("left to right: {} to {}, bottom to top: {} to {}", a.left.trim(), a.right.trim(), a.down.trim(), a.up.trim());
-        } else {
-            m.axes_cos = None;
-            let forms: Vec<(f32, f32)> = (0..m.data.n()).map(|i| m.data.form(i).into()).collect();
-            let groups::Placed { points, sizes, islands, side } = groups::place(&cos, &forms);
-            m.move_to(&self.gpu.queue, View::Groups, points, sizes, side);
-            self.status = format!("{} groups: each photo is in the one whose word it is most like", islands.len());
-            m.islands = islands;
-            m.island_words = self.layout_words.clone();
-        }
+        let forms: Vec<(f32, f32)> = (0..m.data.n()).map(|i| m.data.form(i).into()).collect();
+        let groups::Placed { points, sizes, islands, side } = groups::place(&cos, &forms);
+        m.move_to(&self.gpu.queue, View::Groups, points, sizes, side);
+        self.status = format!("{} groups: each photo is in the one whose word it is most like", islands.len());
+        m.islands = islands;
+        m.island_words = self.layout_words.clone();
         self.camera.fly_to(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
-    }
-
-    /// Place the photos by the axes' cosines (kept from the last Arrange), spread the way the Layout menu says.
-    fn spread_axes(&mut self) {
-        let Some(m) = &mut self.map else { return };
-        let Some(cos) = &m.axes_cos else { return };
-        let points = axes::place(cos, self.axes_spread);
-        let size = median_neighbour_distance(&points);
-        m.move_to(&self.gpu.queue, View::Axes, points, Vec::new(), size);
     }
 
     /// What the text model has said: a query's vector becomes the photos' cosines, shown at once.
@@ -1308,9 +1267,6 @@ impl Viewer {
         if actions.arrange {
             self.arrange();
         }
-        if actions.respread {
-            self.spread_axes();
-        }
         if actions.reblend {
             self.apply_search();
         }
@@ -1364,7 +1320,6 @@ impl Viewer {
         self.label_rects.clear();
         let Some(m) = &self.map else { return };
         match m.view {
-            View::Axes => return self.draw_axis_words(ctx),
             View::Groups => return self.draw_island_words(ctx),
             View::Map => {}
         }
@@ -1414,33 +1369,6 @@ impl Viewer {
             }
         }
         self.label_rects = shown;
-    }
-
-    /// The Axes view's four words, at the middle of each edge of the photos (kept on the screen when that edge is not).
-    fn draw_axis_words(&self, ctx: &egui::Context) {
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "axis words".into()));
-        let ppp = ctx.pixels_per_point();
-        let screen = ctx.content_rect().shrink(16.0);
-        let a = &self.axes;
-        let ends = [
-            (a.left.trim().to_string(), Vec2::new(0.0, WORLD / 2.0), egui::Align2::RIGHT_CENTER),
-            (a.right.trim().to_string(), Vec2::new(WORLD, WORLD / 2.0), egui::Align2::LEFT_CENTER),
-            (a.down.trim().to_string(), Vec2::new(WORLD / 2.0, WORLD), egui::Align2::CENTER_TOP),
-            (a.up.trim().to_string(), Vec2::new(WORLD / 2.0, 0.0), egui::Align2::CENTER_BOTTOM),
-        ];
-        for (text, world, align) in ends {
-            let galley = painter.layout_no_wrap(text, egui::FontId::proportional(22.0), egui::Color32::from_rgb(255, 220, 120));
-            let at = self.camera.to_screen(world) / ppp;
-            // just outside the photos' edge, then moved in as far as needed to stay on the screen
-            let rect = align.anchor_size(egui::pos2(at.x, at.y) + align.to_sign() * -10.0, galley.size());
-            let shift = egui::vec2(
-                (screen.left() - rect.left()).max(0.0) + (screen.right() - rect.right()).min(0.0),
-                (screen.top() - rect.top()).max(0.0) + (screen.bottom() - rect.bottom()).min(0.0),
-            );
-            let rect = rect.translate(shift);
-            painter.rect_filled(rect.expand2(egui::vec2(8.0, 3.0)), 6.0, egui::Color32::from_black_alpha(170));
-            painter.galley(rect.min, galley, egui::Color32::WHITE);
-        }
     }
 
     /// The Groups view's words, each above its island with how many photos it has.
@@ -1742,7 +1670,6 @@ impl Viewer {
                                 ui.label(theme::muted("PLACE THE PHOTOS"));
                                 let options = [
                                     (View::Map, "Map", "similar photos together, as the map was made"),
-                                    (View::Axes, "Axes", "along two pairs of words you choose"),
                                     (View::Groups, "Groups", "sorted into groups by words you choose"),
                                 ];
                                 if theme::segmented(ui, &mut self.view_choice, &options) && self.view_choice == View::Map {
@@ -1750,45 +1677,6 @@ impl Viewer {
                                 }
                                 if self.view_choice == View::Map {
                                     ui.label(theme::muted("Photos that look alike sit close together, in regions with names."));
-                                } else if self.view_choice == View::Axes {
-                                    ui.label(theme::muted("Left to right: from the first word to the second. Bottom to top: the same with the other pair. Each photo goes by how much more it is like one end than the other."));
-                                    ui.add_space(6.0);
-                                    presets(ui, |ui| {
-                                        for (name, [left, right, down, up]) in axes::PRESETS {
-                                            if ui.selectable_label(false, name).on_hover_text(format!("across: {left} to {right}; up: {down} to {up}")).clicked() {
-                                                self.axes = axes::Words { left: left.into(), right: right.into(), down: down.into(), up: up.into() };
-                                                actions.arrange = true;
-                                            }
-                                        }
-                                    });
-                                    ui.add_space(6.0);
-                                    let mut enter = false;
-                                    let a = &mut self.axes;
-                                    for (label, first, second, hints) in [("across", &mut a.left, &mut a.right, ("left: day", "right: night")), ("up", &mut a.down, &mut a.up, ("bottom: nature", "top: city"))] {
-                                        ui.horizontal(|ui| {
-                                            ui.add_sized([46.0, 20.0], egui::Label::new(theme::muted(label)));
-                                            for (text, hint) in [(first, hints.0), (second, hints.1)] {
-                                                let edit = ui.add(egui::TextEdit::singleline(text).hint_text(hint).margin(egui::Margin::symmetric(8, 5)).desired_width(112.0));
-                                                enter |= edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                            }
-                                        });
-                                    }
-                                    ui.add_space(6.0);
-                                    let spreads = [
-                                        (axes::Spread::Even, "Even", "every photo an equal share of the width: shows their order, not how far apart they are"),
-                                        (axes::Spread::Score, "By score", "places follow the scores: shows how far apart photos are, most bunch in the middle"),
-                                    ];
-                                    if theme::segmented(ui, &mut self.axes_spread, &spreads) {
-                                        actions.respread = true;
-                                    }
-                                    ui.label(theme::muted(match self.axes_spread {
-                                        axes::Spread::Even => "Even: photos fill the square, in order. Close scores can still end up far apart.",
-                                        axes::Spread::Score => "By score: distance means difference. Most photos crowd the middle.",
-                                    }));
-                                    ui.add_space(6.0);
-                                    if theme::button(ui, egui::Button::new("Arrange")).on_hover_text("place the photos along these words (Enter in a box does it too)").clicked() || enter {
-                                        actions.arrange = true;
-                                    }
                                 } else {
                                     ui.label(theme::muted("Each photo joins the word it is most like. In each group the strongest matches are in the middle, the weakest at the edge."));
                                     ui.label(theme::muted("The model can tell which word fits a photo better, but not where a word stops fitting at all. So a photo that fits none of them still lands in some group, at its edge."));
@@ -2092,8 +1980,6 @@ struct UiActions {
     ask: bool,
     /// The Layout menu: show the photos the way it now says.
     arrange: bool,
-    /// The Layout menu: the same axes, spread the other way.
-    respread: bool,
     reblend: bool,
     /// A prev / next button was pressed: -1 / 1.
     step: i32,
