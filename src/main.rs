@@ -682,6 +682,25 @@ impl Viewer {
         true
     }
 
+    /// A picture on the clipboard becomes the search (joining the photos already there, as a dropped one does): it is saved as a
+    /// png in .cache/pasted/ (the search reads photos from files). False if the clipboard holds no picture.
+    fn paste_photo(&mut self) -> bool {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else { return false };
+        let Ok(pic) = clipboard.get_image() else { return false };
+        let Some(rgba) = image::RgbaImage::from_raw(pic.width as u32, pic.height as u32, pic.bytes.into_owned()) else { return false };
+        let dir = self.library.root().join(".cache").join("pasted");
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let path = dir.join(format!("{stamp}.png"));
+        if std::fs::create_dir_all(&dir).is_err() || rgba.save(&path).is_err() {
+            self.status = "can't keep the pasted picture".into();
+            return true;
+        }
+        if self.set_photo(path, !self.photos.is_empty()) {
+            self.ask();
+        }
+        true
+    }
+
     /// Enter in the search box, or a photo dropped on the window: the words or the photo (one of them, never both) go to the model,
     /// whose answer comes back through poll_engine. Nothing to search for clears the last search.
     fn ask(&mut self) {
@@ -1049,6 +1068,15 @@ impl Viewer {
                 }
                 if (self.alt || self.alt_key) && event.state == ElementState::Pressed && !event.repeat && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter)) {
                     return self.toggle_fullscreen();
+                }
+                // Ctrl+V with a picture on the clipboard (text pastes go to the box as usual): it is searched like a dropped photo
+                if self.page == Page::Viewer
+                    && event.state == ElementState::Pressed
+                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyV)
+                    && self.ui.ctx.input(|i| i.modifiers.command)
+                    && self.paste_photo()
+                {
+                    return;
                 }
                 let typing = self.ui.ctx.egui_wants_keyboard_input() && event.state == ElementState::Pressed;
                 // by where the key is, not what it types: the shortcuts work in any keyboard layout
