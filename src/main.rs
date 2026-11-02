@@ -65,6 +65,8 @@ const MIN_PX: f32 = 1.0;
 /// Region names show while their region's spread is between these sizes on screen (points), fading in and out.
 /// Region names on the map (region_names.json, else regions.json).
 const SHOW_REGION_NAMES: bool = true;
+/// A photo's own caption above it once it is big on screen.
+const SHOW_PHOTO_CAPTIONS: bool = false;
 /// A photo shows its own caption above it once it is this wide on screen (points), fully from the second size.
 const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
 /// Stepping to a match zooms in until its photo is this wide on screen (points), unless you are already closer.
@@ -1665,7 +1667,9 @@ impl Viewer {
             self.draw_labels(&ctx);
         }
         self.draw_missing(&ctx);
-        self.draw_photo_captions(&ctx);
+        if SHOW_PHOTO_CAPTIONS {
+            self.draw_photo_captions(&ctx);
+        }
         self.draw_beside(&ctx);
         self.draw_lens(&ctx);
 
