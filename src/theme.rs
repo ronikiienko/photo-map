@@ -149,26 +149,6 @@ pub fn button(ui: &mut Ui, button: egui::Button) -> egui::Response {
     .inner
 }
 
-/// A small round "i" that opens and closes some help (`open`: it is open, and drawn filled).
-pub fn info_button(ui: &mut Ui, open: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
-    let c = rect.center();
-    let colour = if open {
-        ui.painter().circle_filled(c, 8.5, ACCENT.gamma_multiply(if response.hovered() { 0.75 } else { 0.55 }));
-        Color32::WHITE
-    } else if response.hovered() {
-        ui.painter().circle_filled(c, 8.5, CONTROL_HOVER);
-        Color32::WHITE
-    } else {
-        MUTED
-    };
-    ui.painter().circle_stroke(c, 8.0, Stroke::new(1.3, colour));
-    // the "i" drawn, not typed: a letter sits where its font puts it, a little off the circle's middle
-    ui.painter().circle_filled(c + vec2(0.0, -3.6), 0.95, colour);
-    ui.painter().line_segment([c + vec2(0.0, -1.2), c + vec2(0.0, 4.2)], Stroke::new(1.4, colour));
-    response
-}
-
 /// A close cross that lights up when the pointer is on it and again when it is pressed.
 pub fn close_button(ui: &mut Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());

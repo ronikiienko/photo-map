@@ -130,6 +130,17 @@ fn map_shots() {
         shot world-4c-next-match
         appkey KeyH
         shot world-5-help
+        appkey KeyH
+        # the empty box offers a photo of the map every fourth idea; Enter searches with it
+        click 500 27
+        click 500 27
+        key ArrowDown
+        key ArrowDown
+        key ArrowDown
+        shot world-6-photo-idea
+        key Enter
+        wait 60
+        shot world-7-photo-idea-searched
     ";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".local/shots");
     crate::run_headless(crate::library::Library::new(root.join("maps")), (1200.0, 780.0), 1.0, crate::script::Script::new(script, dir));

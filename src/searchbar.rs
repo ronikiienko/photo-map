@@ -1,5 +1,5 @@
 //! The search box at the top of the screen and what shows under it: the words or photos searched with, ideas while typing,
-//! the filter chips, the results (step through them, how many to mark, hide them), the hidden searches and how to search.
+//! the filter chips, the results (step through them, how many to mark, hide them) and the hidden searches.
 //! It reads plain values (Bar) instead of the app, so a test can draw it on its own: `cargo test --bin photo-map shots`
 //! writes each state to .local/shots/*.png.
 
@@ -21,7 +21,6 @@ pub enum Engine {
 pub struct Bar<'a> {
     pub search: &'a mut String,
     pub ideas: &'a mut suggest::Suggest,
-    pub tips_open: &'a mut bool,
     pub hidden_open: &'a mut bool,
     pub wanted: &'a mut f32,
     pub filters: &'a mut Vec<Filter>,
@@ -42,11 +41,13 @@ pub struct Bar<'a> {
     pub hidden: Vec<(String, usize)>,
     /// The open map's photos, to find a photo searched for on it.
     pub data: Option<&'a crate::data::MapData>,
+    /// A small picture of the map's photo with this number, for the empty box offering it (suggest.rs); None if it can't be read.
+    pub thumb: &'a mut dyn FnMut(usize) -> Option<egui::TextureHandle>,
 }
 
 /// The box, `width` wide, centred at the top of the screen.
 pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) {
-    // middle: the search box, then (only when there is something) the results, the hidden searches, and tips
+    // middle: the search box, then (only when there is something) the results, and the hidden searches
     let box_id = egui::Id::new("search-box");
     let focused = ctx.memory(|m| m.has_focus(box_id));
     egui::Area::new("top".into()).anchor(egui::Align2::CENTER_TOP, [0.0, 0.0]).show(ctx, |ui| {
@@ -61,9 +62,9 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
             let (found, at, on_path) = (bar.found, bar.at, bar.on_path);
             let chips = !bar.hidden.is_empty() && *bar.hidden_open;
             let has_filters = !bar.filters.is_empty() || bar.filter_edit.is_some();
-            let below = |tips: bool| found > 0 || !bar.status.is_empty() || chips || tips || has_filters || bar.photos.len() == 1;
+            let below = found > 0 || !bar.status.is_empty() || chips || has_filters || bar.photos.len() == 1;
             let r = theme::RADIUS_SMALL;
-            let top_corners = if below(*bar.tips_open) { egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 } } else { egui::CornerRadius::same(r) };
+            let top_corners = if below { egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 } } else { egui::CornerRadius::same(r) };
             let search_line = egui::Frame::new().fill(ui.visuals().extreme_bg_color).stroke(egui::Stroke::new(1.0, ring)).corner_radius(top_corners).inner_margin(egui::Margin::symmetric(10, 2)).shadow(egui::Shadow { offset: [0, 4], blur: 18, spread: 0, color: egui::Color32::from_black_alpha(110) }).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_min_height(32.0);
@@ -99,7 +100,9 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             *bar.search = whole;
                             to_end = true;
                         }
-                        if tab && let Some(idea) = bar.ideas.idea(bar.search) {
+                        if tab && let Some(photo) = bar.ideas.photo(bar.search) {
+                            actions.like = Some(photo); // a photo offered: taking it searches with it
+                        } else if tab && let Some(idea) = bar.ideas.idea(bar.search) {
                             bar.ideas.took(&idea);
                             *bar.search = idea;
                             to_end = true;
@@ -107,13 +110,11 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                     }
                     let idea = if words { bar.ideas.idea(bar.search) } else { None };
                     let whole = words && bar.ideas.replaces(bar.search);
-                    // the end of the line, from the right: the i, the cross, the hidden badge, + filter, the keys for ideas; the words or
+                    // or, in the empty box, a photo of the map to search with (Enter: photos like it)
+                    let photo_idea = if words { bar.ideas.photo(bar.search) } else { None }.and_then(|p| Some((p, (bar.thumb)(p)?)));
+                    // the end of the line, from the right: the cross, the hidden badge, + filter, the keys for ideas; the words or
                     // photos get what is left, so the line is always as wide as the box
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let open = *bar.tips_open;
-                    if theme::info_button(ui, open).on_hover_text(if open { "close the tips" } else { "how to search" }).clicked() {
-                        *bar.tips_open = !open;
-                    }
                     if clearable && theme::close_button(ui) {
                         if bar.photos.is_empty() {
                             actions.clear_search = true;
@@ -188,17 +189,27 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             if out.on_hover_text("take it out of the search").clicked() {
                                 actions.drop_photo = Some(k);
                             } else if thumb.hovered() && spot.is_none() {
-                                thumb.on_hover_text("not on this map: dropped in or pasted");
-                            } else if thumb.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("go to it on the map").clicked() {
+                                thumb.on_hover_ui(|ui| enlarged(ui, tex, "not on this map: dropped in or pasted"));
+                            } else if thumb.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_ui(|ui| enlarged(ui, tex, "click: go to it on the map")).clicked() {
                                 actions.show_photo = spot;
                             }
                         }
                     } else {
                         // empty: the idea is the placeholder; typing: the rest of it shows faint after the words
-                        let hint = if bar.search.is_empty() { idea.clone().unwrap_or_default() } else { String::new() };
+                        let hint = if bar.search.is_empty() && photo_idea.is_none() { idea.clone().unwrap_or_default() } else { String::new() };
                         let edit = egui::TextEdit::singleline(bar.search).id(box_id).hint_text(hint).frame(egui::Frame::NONE).desired_width(ui.available_width()).show(ui);
                         // the keys stay with the box: Tab and up / down would otherwise move to another button
                         ui.memory_mut(|m| m.set_focus_lock_filter(box_id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..Default::default() }));
+                        if bar.search.is_empty() && let Some((_, tex)) = &photo_idea {
+                            // the photo as the placeholder, faint like the words would be
+                            let rect = edit.response.rect;
+                            let size = egui::vec2(22.0 * tex.aspect_ratio(), 22.0);
+                            let at = egui::Rect::from_min_size(egui::pos2(rect.left() + 6.0, rect.center().y - size.y / 2.0), size);
+                            let painter = ui.painter_at(rect);
+                            egui::Image::new((tex.id(), size)).corner_radius(3).tint(egui::Color32::from_white_alpha(140)).paint_at(ui, at);
+                            ui.interact(at, box_id.with("idea photo"), egui::Sense::hover()).on_hover_ui(|ui| enlarged(ui, tex, "Enter: search for photos like this"));
+                            painter.text(egui::pos2(at.right() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, "photos like this", egui::TextStyle::Body.resolve(ui.style()), ui.visuals().weak_text_color());
+                        }
                         if focused && !bar.search.is_empty() && let Some(idea) = &idea {
                             let rest: String = idea.chars().skip(bar.search.chars().count()).collect();
                             let at = edit.galley_pos + egui::vec2(edit.galley.rect.width(), 0.0);
@@ -211,10 +222,14 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                         }
                         if edit.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             // Enter in the empty box searches the idea it shows; with filters, it searches them alone
-                            if bar.search.trim().is_empty() && bar.filters.is_empty() && let Some(idea) = idea {
-                                *bar.search = idea;
+                            if bar.search.trim().is_empty() && bar.filters.is_empty() && let Some((photo, _)) = photo_idea {
+                                actions.like = Some(photo);
+                            } else {
+                                if bar.search.trim().is_empty() && bar.filters.is_empty() && let Some(idea) = idea {
+                                    *bar.search = idea;
+                                }
+                                actions.ask = true;
                             }
-                            actions.ask = true;
                         }
                     }
                     });
@@ -223,13 +238,12 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
             });
             if focused {
                 let inset = search_line.response.rect.shrink(2.0);
-                let corners = if below(*bar.tips_open) { egui::CornerRadius { nw: r - 2, ne: r - 2, sw: 2, se: 2 } } else { egui::CornerRadius::same(r - 2) };
+                let corners = if below { egui::CornerRadius { nw: r - 2, ne: r - 2, sw: 2, se: 2 } } else { egui::CornerRadius::same(r - 2) };
                 ui.painter().rect_stroke(inset, corners, egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.7)), egui::StrokeKind::Inside);
             }
 
             // the results: step through them, how many are marked, hide them
-            let tips = *bar.tips_open;
-            if !below(tips) {
+            if !below {
                 return;
             }
             ui.add_space(-ui.spacing().item_spacing.y - 1.0); // right under the box, sharing its edge
@@ -300,7 +314,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             });
                         }
                     });
-                    if found > 0 || !bar.status.is_empty() || chips || tips {
+                    if found > 0 || !bar.status.is_empty() || chips {
                         ui.add_space(4.0);
                     }
                 }
@@ -378,38 +392,6 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                     });
                 }
 
-                // how to search, while the i is pointed at
-                if tips {
-                    if found > 0 || !bar.status.is_empty() || chips {
-                        ui.add_space(6.0); // a gap only below something
-                    }
-                    let heading = |ui: &mut egui::Ui, text: &str| {
-                        ui.add_space(if text.starts_with("SEARCH WITH WORDS") { 0.0 } else { 6.0 });
-                        ui.label(egui::RichText::new(text).size(11.0).color(theme::MUTED).strong());
-                    };
-                    heading(ui, "SEARCH WITH WORDS");
-                    ui.label(theme::muted("Describe what is in the photo, in a short phrase. NOT in capitals pushes things down. Try one:"));
-                    if bar.photos.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                        ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
-                        for example in ["woman on a bike in winter", "street at night NOT cars", "foggy forest", "birthday cake", "old black and white photo"] {
-                            if ui.add(egui::Button::new(egui::RichText::new(example).size(12.5))).on_hover_text("search for this").clicked() {
-                                *bar.search = example.to_string();
-                                actions.ask = true;
-                                *bar.tips_open = false;
-                            }
-                        }
-                    });
-                    }
-                    heading(ui, "SEARCH WITH PHOTOS");
-                    ui.label(theme::muted("Drop photos on the window, or right-click one on the map: Photos like this. With several, what they share is found."));
-                    heading(ui, "KEEP ONLY SOME PHOTOS");
-                    ui.label(theme::muted("+ Filter: by file name, camera, date or place. It works with words, with photos, or alone."));
-                    heading(ui, "WHAT IT CAN AND CAN'T TELL");
-                    ui.label(theme::muted("Good at things, places, scenes, light, weather, mood and style. Bad at counting, left and right, and who someone is."));
-                }
-
                 // one photo searched for: that more can join it, and when that helps
                 if bar.photos.len() == 1 {
                     ui.add_space(4.0);
@@ -422,6 +404,14 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
             });
         });
     });
+}
+
+/// A photo of the search, big, as it shows under the mouse, and a line on what a click or key does with it.
+fn enlarged(ui: &mut egui::Ui, tex: &egui::TextureHandle, note: &str) {
+    let long = 260.0;
+    let size = if tex.aspect_ratio() >= 1.0 { egui::vec2(long, long / tex.aspect_ratio()) } else { egui::vec2(long * tex.aspect_ratio(), long) };
+    ui.add(egui::Image::new((tex.id(), size)).corner_radius(4));
+    ui.label(theme::muted(note));
 }
 
 /// A chip in a row: `add` puts its text and cross in one pill, which lights up under the mouse as a button does (a click on its
@@ -486,7 +476,6 @@ mod shots {
     struct State {
         search: String,
         ideas: suggest::Suggest,
-        tips_open: bool,
         hidden_open: bool,
         wanted: f32,
         filters: Vec<Filter>,
@@ -500,13 +489,15 @@ mod shots {
         hidden: Vec<(String, usize)>,
         width: f32,
         focus: bool,
+        /// The empty box offers a (made-up) photo of the map.
+        photo_idea: bool,
+        idea_tex: Option<egui::TextureHandle>,
     }
 
     fn state() -> State {
         State {
             search: String::new(),
             ideas: suggest::Suggest::new(),
-            tips_open: false,
             hidden_open: false,
             wanted: 100.0,
             filters: Vec::new(),
@@ -520,6 +511,8 @@ mod shots {
             hidden: Vec::new(),
             width: 620.0,
             focus: false,
+            photo_idea: false,
+            idea_tex: None,
         }
     }
 
@@ -555,10 +548,20 @@ mod shots {
                     s.textures.push((PathBuf::from(format!("/photos/{k}.jpg")), ctx.load_texture(format!("photo {k}"), img, egui::TextureOptions::LINEAR)));
                 }
                 let mut actions = UiActions::default();
+                if s.photo_idea && s.idea_tex.is_none() {
+                    // a made-up photo of the map, and the box at its turn to offer one
+                    let (w, h) = (48, 36);
+                    let pixels = (0..w * h).map(|i| egui::Color32::from_rgb(200, (i % w * 4) as u8, (i / w * 6) as u8)).collect();
+                    s.idea_tex = Some(ctx.load_texture("idea", egui::ColorImage::new([w, h], pixels), egui::TextureOptions::LINEAR));
+                    s.ideas.set_photos(1);
+                    while s.ideas.photo("").is_none() {
+                        s.ideas.switch("", 1);
+                    }
+                }
+                let idea_tex = s.idea_tex.clone();
                 let bar = Bar {
                     search: &mut s.search,
                     ideas: &mut s.ideas,
-                    tips_open: &mut s.tips_open,
                     hidden_open: &mut s.hidden_open,
                     wanted: &mut s.wanted,
                     filters: &mut s.filters,
@@ -574,6 +577,7 @@ mod shots {
                     all_marked: false,
                     hidden: s.hidden.clone(),
                     data: None,
+                    thumb: &mut |_| idea_tex.clone(),
                 };
                 show(&ctx, s.width, bar, &mut actions);
             },
@@ -602,35 +606,18 @@ mod shots {
         shot("5-editing-a-chip", State { filters: vec![filter("place:istanbul")], filter_edit: Some(FilterEdit { at: 1, key: Key::Date, not: false, value: String::new() }), ..results() }, None);
         shot("6-filters-only", State { search: String::new(), filters: vec![filter("year:2019")], status: "date:2019: 2,412 photos".into(), ..results() }, None);
         shot("7-photos", State { photos: 3, search: String::new(), filters: vec![filter("place:lviv")], ..results() }, None);
+        shot("7b-photo-hovered", State { photos: 3, search: String::new(), filters: vec![filter("place:lviv")], ..results() }, Some(egui::pos2(105.0, 27.0)));
         shot("8-hidden", State { hidden: vec![("cars".into(), 120), ("like IMG_2041 +2".into(), 40)], hidden_open: true, ..results() }, None);
         shot("9-narrow", State { width: 300.0, filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi")], hidden: vec![("cars".into(), 120)], hidden_open: true, ..results() }, None);
-        // the i at the box's right end, pointed at: how to search
+        // a photo of the map offered in the empty box; + Filter
         {
             use egui_kittest::kittest::Queryable;
+            shot("1b-photo-idea", State { photo_idea: true, ..state() }, None);
+            shot("1c-photo-idea-focused", State { photo_idea: true, focus: true, ..state() }, None);
+            shot("1d-photo-idea-hovered", State { photo_idea: true, ..state() }, Some(egui::pos2(40.0 + 8.0 + 10.0 + 22.0 + 20.0, 27.0)));
             shot_then("11-filter-hovered", state(), |h| h.get_by_label("+ Filter").hover());
             shot_then("12-filter-menu", state(), |h| h.get_by_label("+ Filter").click());
             shot_then("12b-filter-menu-results", results(), |h| h.get_by_label("+ Filter").click());
         }
-        // the i at the box's right end, clicked: how to search
-        let click_i = |h: &mut egui_kittest::Harness<'_, State>| {
-            let at = egui::pos2(40.0 + 620.0 - 8.0 - 10.0 - 13.0, 27.0);
-            h.hover_at(at);
-            h.run_steps(2);
-            for pressed in [true, false] {
-                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
-                h.run_steps(1);
-            }
-        };
-        shot_then("10-help", State { width: 620.0, ..state() }, click_i);
-        shot_then("10b-help-with-results", results(), click_i);
-        shot_then("10c-help-narrow", State { width: 300.0, ..state() }, |h| {
-            let at = egui::pos2(40.0 + 300.0 - 8.0 - 10.0 - 13.0, 27.0);
-            h.hover_at(at);
-            h.run_steps(2);
-            for pressed in [true, false] {
-                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
-                h.run_steps(1);
-            }
-        });
     }
 }

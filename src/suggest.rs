@@ -2,7 +2,8 @@
 //! the box is empty its placeholder is one at random; while typing, the rest of one that starts with what was typed shows after
 //! it, faint. Up and down switch to another idea, Tab takes it. When nothing finishes what was typed, or the box holds an idea
 //! taken whole, up and down put a whole other search in the box instead. After a NOT only the part after it is completed
-//! ("street NOT ca" -> "street NOT cars").
+//! ("street NOT ca" -> "street NOT cars"). In the empty box every fourth idea is a photo of the open map, any one at random, to
+//! search with as "Photos like this" does.
 
 const IDEAS: &str = include_str!("../assets/search_ideas.txt");
 
@@ -17,6 +18,8 @@ pub struct Suggest {
     all_at: usize,
     given: String,
     seed: u64,
+    /// How many photos the open map has (0: words only).
+    photos: usize,
 }
 
 impl Suggest {
@@ -29,7 +32,7 @@ impl Suggest {
     }
 
     fn with(pool: Vec<String>, seed: u64) -> Self {
-        let mut s = Suggest { pool, typed: String::new(), ideas: Vec::new(), at: 0, all: Vec::new(), all_at: 0, given: String::new(), seed };
+        let mut s = Suggest { pool, typed: String::new(), ideas: Vec::new(), at: 0, all: Vec::new(), all_at: 0, given: String::new(), seed, photos: 0 };
         let mut all: Vec<usize> = (0..s.pool.len()).collect();
         s.shuffle(&mut all);
         s.all = all;
@@ -46,6 +49,23 @@ impl Suggest {
         }
         let idea = &self.pool[*self.ideas.get(self.at)?];
         Some(format!("{head}{part}{}", idea.chars().skip(part.chars().count()).collect::<String>()))
+    }
+
+    /// How many photos the open map has, to offer them in the empty box (0: words only).
+    pub fn set_photos(&mut self, photos: usize) {
+        self.photos = photos;
+    }
+
+    /// The photo the empty box offers instead of words now, if it is a photo's turn: every fourth idea, never the first.
+    pub fn photo(&mut self, text: &str) -> Option<usize> {
+        if !text.is_empty() || self.photos == 0 {
+            return None;
+        }
+        self.idea(text)?;
+        // the same photo each time this turn comes back (up then down), a different one for each turn
+        let mut x = (self.seed ^ (self.at as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x ^= x >> 31;
+        (self.at % 4 == 3).then(|| (x % self.photos as u64) as usize)
     }
 
     /// Whether up / down put a whole other search in the box for `text`: nothing finishes it, or it is the idea last given whole.
@@ -162,6 +182,17 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(s.switch(&b, -1).unwrap(), a);
         assert_eq!(s.switch("", 1), None); // the empty box switches its placeholder
+    }
+
+    #[test]
+    fn the_empty_box_offers_a_photo_every_fourth_idea() {
+        let mut s = Suggest::with((0..20).map(|i| format!("idea {i}")).collect(), 7);
+        assert_eq!(s.photo(""), None); // no map photos: words only
+        s.set_photos(1000);
+        let turns: Vec<Option<usize>> = (0..8).map(|_| { let p = s.photo(""); s.switch("", 1); p }).collect();
+        assert_eq!(turns.iter().filter(|p| p.is_some()).count(), 2);
+        assert!(turns[0].is_none() && turns[3].is_some() && turns[7].is_some() && turns[3] != turns[7]);
+        assert_eq!(s.photo("red"), None); // typing: words only
     }
 
     #[test]

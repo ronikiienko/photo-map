@@ -53,6 +53,7 @@ use data::{MapData, Progress, WORLD};
 use glam::Vec2;
 use gpu::{CameraUniform, Gpu, MapRenderer, NO_LIFT};
 use library::Library;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -300,10 +301,11 @@ struct Viewer {
     shown: String,
     /// Ideas for the search box (suggest.rs).
     ideas: suggest::Suggest,
+    /// Small pictures of the map's photos the empty search box offers (None: unreadable).
+    idea_thumbs: HashMap<usize, Option<egui::TextureHandle>>,
     /// The Hidden line is open: a chip for each hidden search.
     hidden_open: bool,
     /// How to search shows: the i at the box's end is pointed at.
-    tips_open: bool,
     /// Where photos searched for are on the map (None: not on it), found when first pointed at; emptied when a map opens.
     spots: std::collections::HashMap<PathBuf, Option<usize>>,
     /// The search's filters (name: camera: date: place:), chips under the box apart from its words or photos; the one being
@@ -392,8 +394,8 @@ impl Viewer {
             label_rects: Vec::new(),
             search: String::new(),
             ideas: suggest::Suggest::new(),
+            idea_thumbs: HashMap::new(),
             hidden_open: false,
-            tips_open: false,
             spots: std::collections::HashMap::new(),
             filters: Vec::new(),
             filter_edit: None,
@@ -479,6 +481,8 @@ impl Viewer {
         let from = data.points.iter().map(|p| [p.x, p.y, 1.0, 0.0]).collect();
         self.spots.clear();
         self.name_root = None;
+        self.idea_thumbs.clear();
+        self.ideas.set_photos(data.n());
         self.map = Some(OpenMap {
             path,
             data,
@@ -754,7 +758,7 @@ impl Viewer {
             self.status = "can't read that photo".into();
             return false;
         };
-        let small = img.thumbnail(96, 96).to_rgba8();
+        let small = img.thumbnail(512, 512).to_rgba8(); // big enough to show enlarged under the mouse
         let color = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
         let tex = self.ui.ctx.load_texture("query photo", color, egui::TextureOptions::LINEAR);
         if !add {
@@ -1961,7 +1965,7 @@ impl Viewer {
         mapui::back(&ctx, y, self.map.as_ref().map(|m| m.data.manifest.name.as_str()), actions);
         mapui::look(&ctx, y, mapui::Look { view: &mut self.view_choice, groups_text: &mut self.groups_text, smooth: &mut self.smooth }, actions);
 
-        // middle: the search box, then (only when there is something) the results, the hidden searches, and tips (searchbar.rs)
+        // middle: the search box, then (only when there is something) the results, and the hidden searches (searchbar.rs)
         let engine = match &self.map {
             _ if self.engine.failed().is_some() => searchbar::Engine::Off(self.engine.failed().unwrap_or_default().to_string()),
             None => searchbar::Engine::NoMap,
@@ -1973,7 +1977,6 @@ impl Viewer {
         let bar = searchbar::Bar {
             search: &mut self.search,
             ideas: &mut self.ideas,
-            tips_open: &mut self.tips_open,
             hidden_open: &mut self.hidden_open,
             wanted: &mut self.wanted,
             filters: &mut self.filters,
@@ -1989,6 +1992,18 @@ impl Viewer {
             all_marked: self.names_only,
             hidden: m.map_or(Vec::new(), |m| m.hidden.iter().map(|h| (h.what.clone(), h.photos.len())).collect()),
             data: m.map(|m| &m.data),
+            thumb: &mut |photo| {
+                let data = &m?.data;
+                let thumbs = &mut self.idea_thumbs;
+                thumbs
+                    .entry(photo)
+                    .or_insert_with(|| {
+                        let img = photo::fit(&photo::load_for(&data.path(photo), |_, _| 256)?, 512, false);
+                        let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                        Some(ctx.load_texture("idea photo", color, egui::TextureOptions::LINEAR))
+                    })
+                    .clone()
+            },
         };
         searchbar::show(&ctx, width, bar, actions);
 

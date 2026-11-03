@@ -125,7 +125,7 @@ pub fn help(ctx: &egui::Context, open: &mut bool) {
             ui.add_space(4.0);
             ui.label(theme::muted(
                 "Photos that look alike sit close together: zoom in and similar ones are side by side, and the names mark what a region \
-                 holds. Search lights up the photos that fit best; the i at the end of the search box says how to search.",
+                 holds. Search lights up the photos that fit best.",
             ));
             ui.add_space(8.0);
             egui::Grid::new("keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
