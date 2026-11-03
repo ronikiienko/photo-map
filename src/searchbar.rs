@@ -135,7 +135,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                     ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
                     egui::containers::menu::MenuButton::from_button(add_filter).ui(ui, |ui| {
                         ui.set_width(220.0);
-                        ui.label(theme::muted("Only photos that pass it can match. Commas mean any of: pixel, redmi; two dates with .. a range: 2016..2018. Or type it in the box: camera:pixel and a space."));
+                        ui.label(theme::muted("Only photos that pass it can match. Commas mean any of: pixel, redmi; two dates with .. a range: 2016..2018."));
                         ui.add_space(4.0);
                         for (key, tip) in [
                             (query::Key::Name, "in the file and folder names: greece"),
@@ -200,16 +200,6 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             let rest: String = idea.chars().skip(bar.search.chars().count()).collect();
                             let at = edit.galley_pos + egui::vec2(edit.galley.rect.width(), 0.0);
                             ui.painter_at(edit.response.rect).text(at, egui::Align2::LEFT_TOP, rest, egui::TextStyle::Body.resolve(ui.style()), theme::MUTED.gamma_multiply(0.8));
-                        }
-                        // a filter finished in the box (a space after it) leaves it for a chip
-                        if edit.response.changed() && let Some((rest, found)) = query::finished(&bar.search) {
-                            *bar.search = rest;
-                            for f in found {
-                                if !bar.filters.contains(&f) {
-                                    bar.filters.push(f);
-                                }
-                            }
-                            to_end = true;
                         }
                         if to_end {
                             let mut state = edit.state;

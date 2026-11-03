@@ -796,14 +796,6 @@ impl Viewer {
                 self.search.clear();
             }
         }
-        // filters typed in the box (camera:pixel ...) leave it for chips; they pick which photos can match, the words or photos rank them
-        if self.photos.is_empty() {
-            let (rest, found) = query::filters(&self.search);
-            if !found.is_empty() {
-                self.search = rest;
-                self.add_filters(found);
-            }
-        }
         let text = self.search.trim().to_string();
         let rest = text.clone();
         let filters = self.filters.clone();
@@ -1033,15 +1025,6 @@ impl Viewer {
         self.status = if self.names_only { format!("{}: {shown} photos", self.shown) } else { format!("{}: similarity {cut:.2} to {best:.2}", self.shown) };
         m.flags_dirty = true;
         Some(m.beside_box())
-    }
-
-    /// Filters join the search's chips (one already there isn't doubled).
-    fn add_filters(&mut self, found: Vec<query::Filter>) {
-        for f in found {
-            if !self.filters.contains(&f) {
-                self.filters.push(f);
-            }
-        }
     }
 
     /// The chip being written or changed is done: its values become the filter (none: the chip goes), and the search runs again

@@ -117,14 +117,17 @@ fn map_shots() {
         click right
         shot world-3-right-click
         appkey Escape
-        focus
-        type camera:pixel_
+        click 838 27
+        shot world-4a-filter-menu
+        click 840 154
+        type pixel
+        shot world-4b-writing-filter
         key Enter
         wait 60
         shot world-4-filter
         appkey KeyN
         wait 60
-        shot world-4b-next-match
+        shot world-4c-next-match
         appkey KeyH
         shot world-5-help
     ";

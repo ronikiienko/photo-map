@@ -173,6 +173,7 @@ fn in_dates(taken: &str, dates: &str) -> bool {
 }
 
 /// The key a word starts with ("camera:", any case), and the rest of the word.
+#[cfg(test)]
 fn key_of(word: &str) -> Option<(Key, &str)> {
     let (key, value) = word.split_once(':')?;
     let key = match key.to_lowercase().as_str() {
@@ -185,8 +186,10 @@ fn key_of(word: &str) -> Option<(Key, &str)> {
     Some((key, value))
 }
 
-/// The filters taken out of the box's text, and what is left to search by meaning. A filter is key:value, the value in quotes if it has spaces (`camera:"pixel 7"`); a NOT right before one belongs to it. An unclosed quote
+/// Filters written as text (`camera:pixel NOT place:kyiv`), and the words left: only the tests write them so (in the app they are made
+/// with + Filter). A filter is key:value, the value in quotes if it has spaces (`camera:"pixel 7"`); a NOT right before one belongs to it. An unclosed quote
 /// runs to the end; an unknown key ("http:") is plain words.
+#[cfg(test)]
 pub fn filters(text: &str) -> (String, Vec<Filter>) {
     let mut rest: Vec<&str> = Vec::new();
     let mut found = Vec::new();
@@ -233,19 +236,6 @@ pub fn filters(text: &str) -> (String, Vec<Filter>) {
     (rest.join(" "), found)
 }
 
-/// While typing: the filters finished in the box's text (a space after them, no quote left open), taken out of it, and the
-/// words left (with a space after them, to go on typing). None while there are none.
-pub fn finished(text: &str) -> Option<(String, Vec<Filter>)> {
-    if !text.ends_with(char::is_whitespace) || text.matches('"').count() % 2 == 1 {
-        return None;
-    }
-    let (rest, found) = filters(text);
-    if found.is_empty() {
-        return None;
-    }
-    Some((if rest.is_empty() { rest } else { rest + " " }, found))
-}
-
 /// Whether `name` (already lowercase) is in `hay`, in any case.
 pub fn has_name(hay: &str, name: &str) -> bool {
     if hay.is_ascii() && name.is_ascii() {
@@ -275,18 +265,6 @@ mod tests {
         assert_eq!(filters("NOT camera:canon"), ("".into(), vec![f(Key::Camera, "canon", true)]));
         assert_eq!(filters("year:2016, 2017 x"), ("2017 x".into(), vec![f(Key::Date, "2016", false)]), "a space ends the value");
         assert_eq!(filters(r#"place:"kyiv, lviv" year:2016,,2018"#), ("".into(), vec![f(Key::Place, "kyiv,lviv", false), f(Key::Date, "2016,2018", false)]));
-    }
-
-    #[test]
-    fn finished_filters_leave_the_box() {
-        assert_eq!(finished("dog camera:pi"), None, "still typing it");
-        assert_eq!(finished(r#"place:"new "#), None, "the quote is open");
-        assert_eq!(finished("dog NOT "), None);
-        let (rest, found) = finished(r#"dog NOT place:"New York" "#).unwrap();
-        assert_eq!(rest, "dog ");
-        assert_eq!(found[0].text(), r#"NOT place:"new york""#);
-        assert_eq!(finished("year:2016..2018,2020 ").unwrap(), ("".into(), vec![filters("year:2016..2018,2020").1[0].clone()]));
-        assert_eq!(filters("year:2016..2018,2020").1[0].text(), "date:2016..2018,2020");
     }
 
     #[test]
