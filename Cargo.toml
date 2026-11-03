@@ -39,3 +39,6 @@ rusty_dds = { version = "0.9", default-features = false, features = ["encode", "
 kamadak-exif = "0.6"
 directories = "6.0.0"
 arboard = "3.6"
+
+[dev-dependencies]
+egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot"] }
