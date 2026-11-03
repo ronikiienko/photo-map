@@ -134,14 +134,17 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                     ui.set_style(ui.ctx().global_style());
                     ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
                     egui::containers::menu::MenuButton::from_button(add_filter).ui(ui, |ui| {
-                        ui.set_width(220.0);
-                        ui.label(theme::muted("Only photos that pass it can match. Commas mean any of: pixel, redmi; two dates with .. a range: 2016..2018."));
+                        ui.set_width(230.0);
+                        // a line each, none wrapping (a menu justifies wrapped lines, stretching their letters apart)
+                        for line in ["Only photos that pass can match.", "Commas mean any of them: pixel, redmi", "Two dots make a range: 2016..2018"] {
+                            ui.add(egui::Label::new(theme::muted(line)).wrap_mode(egui::TextWrapMode::Extend));
+                        }
                         ui.add_space(4.0);
                         for (key, tip) in [
-                            (query::Key::Name, "in the file and folder names: greece"),
-                            (query::Key::Camera, "the camera it was taken with: pixel, or pixel, redmi for any of them"),
-                            (query::Key::Date, "when it was taken: 2019, 2019-07, or 2016..2018 for a range"),
-                            (query::Key::Place, "the town nearest to where it was taken: lviv"),
+                            (query::Key::Name, "a word in the file and folder names, like greece"),
+                            (query::Key::Camera, "the camera it was taken with, like pixel"),
+                            (query::Key::Date, "when it was taken, like 2019-07"),
+                            (query::Key::Place, "the town nearest to where it was taken, like lviv"),
                         ] {
                             if theme::button(ui, egui::Button::new(key.label())).on_hover_text(tip).clicked() {
                                 actions.edit_filter = Some(FilterEdit { at: usize::MAX, key, not: false, value: String::new() });

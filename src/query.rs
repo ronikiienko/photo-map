@@ -116,7 +116,7 @@ impl Key {
         match self {
             Key::Name => "greece, screenshot",
             Key::Camera => "pixel, redmi",
-            Key::Date => "2019-07, 2016..2018",
+            Key::Date => "2016..2018",
             Key::Place => "lviv, kyiv",
         }
     }
