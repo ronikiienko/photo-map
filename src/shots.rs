@@ -117,9 +117,9 @@ fn map_shots() {
         click right
         shot world-3-right-click
         appkey Escape
-        click 838 27
+        click 866 27
         shot world-4a-filter-menu
-        click 840 154
+        click 868 154
         type pixel
         shot world-4b-writing-filter
         key Enter

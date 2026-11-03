@@ -842,9 +842,7 @@ impl Viewer {
                 }
                 let n = photos.len();
                 self.map.as_mut().unwrap().sims = vec![0.0; n];
-                if let Some((min, max)) = self.apply_search() {
-                    self.camera.fly_to(self.camera.fit(min, max));
-                }
+                self.apply_search(); // the camera stays where it is: the marks light up where they are
                 return;
             }
         }
@@ -968,9 +966,7 @@ impl Viewer {
                     }
                     let cos: Vec<Vec<f32>> = std::mem::take(&mut self.answers).into_iter().flatten().collect();
                     m.sims = self.logic.combine(&cos);
-                    if let Some((min, max)) = self.apply_search() {
-                        self.camera.fly_to(self.camera.fit(min, max));
-                    }
+                    self.apply_search(); // the camera stays where it is: the marks light up where they are
                     if let Some(note) = note {
                         self.status = format!("{} - {note}", self.status);
                     }
