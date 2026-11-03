@@ -6,10 +6,11 @@
 //!     open takeout-tagged    open this map (from the maps folder), and wait until it is open
 //!     wait 30                let 30 frames pass
 //!     move 600 400           the mouse moves here
-//!     click 600 400 [right]  a click here (left unless right / middle)
+//!     photo 12               the mouse moves onto photo 12 (its number in the map), wherever it is on screen
+//!     click 600 400 [right]  a click here (left unless right / middle); `click [right]` alone: where the mouse is
 //!     scroll -3              the wheel turns (lines; negative: towards you)
 //!     focus                  the search box takes the keyboard
-//!     type shopping cart     these letters are typed
+//!     type shopping cart     these letters are typed (`_` at the end: a space, which the line would lose)
 //!     key Enter              this key is pressed (egui's names: Enter, Tab, Escape, ArrowDown, A ...)
 //!     appkey KeyH            this key goes to the map's own keys (winit's names: KeyH, Escape, F11 ...)
 //!     searched               wait until the search running now has its answer
@@ -26,6 +27,8 @@ pub struct Script {
     wait: u32,
     /// What the step being waited on needs before the next one: a map open, a search answered.
     until: Option<Until>,
+    /// Frames waited for it so far.
+    waited: u32,
     pub dir: PathBuf,
 }
 
@@ -40,7 +43,8 @@ pub enum Step {
     Size(f64, f64),
     Open(String),
     Move(f32, f32),
-    Click(f32, f32, winit::event::MouseButton),
+    Photo(usize),
+    Click(Option<(f32, f32)>, winit::event::MouseButton),
     Scroll(f32),
     Focus,
     Type(String),
@@ -52,23 +56,37 @@ pub enum Step {
 }
 
 impl Script {
-    /// The script named by PHOTO_MAP_SCRIPT, if any.
+    /// The script named by PHOTO_MAP_SCRIPT, if any; its shots go to .local/appshots.
     pub fn from_env() -> Option<Script> {
         let path = std::env::var_os("PHOTO_MAP_SCRIPT")?;
         let text = std::fs::read_to_string(&path).map_err(|e| eprintln!("script {}: {e}", path.to_string_lossy())).ok()?;
+        Some(Script::new(&text, PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".local/appshots")))
+    }
+
+    /// These steps, one a line; shots are saved in `dir`.
+    pub fn new(text: &str, dir: PathBuf) -> Script {
         let steps = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect();
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".local/appshots");
         let _ = std::fs::create_dir_all(&dir);
-        Some(Script { steps, wait: 10, until: None, dir })
+        Script { steps, wait: 10, until: None, waited: 0, dir }
     }
 
     /// The step to take this frame, if its time has come. `open` / `searched`: whether what is waited for is there.
     pub fn next(&mut self, open: bool, searched: bool) -> Option<Step> {
+        // what is waited for doesn't come (a map that can't be opened, a search that never ends): the script stops
+        if self.until.is_some() {
+            self.waited += 1;
+            if self.waited > 60 * 60 {
+                eprintln!("script: waited a minute for {}, stopping", if self.until == Some(Until::Open) { "the map to open" } else { "the search" });
+                self.steps.clear();
+                self.until = None;
+            }
+        }
         match self.until {
             Some(Until::Open) if !open => return None,
             Some(Until::Searched) if !searched => return None,
             Some(_) => {
                 self.until = None;
+                self.waited = 0;
                 self.wait = 60; // and a moment for what came to be drawn (the camera flies there)
             }
             None => {}
@@ -82,7 +100,7 @@ impl Script {
         let (word, rest) = line.split_once(' ').unwrap_or((&line, ""));
         let nums: Vec<f32> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
         let num = |k: usize| nums.get(k).copied().unwrap_or(0.0);
-        self.wait = 3; // a few frames after every step, so that what it did is drawn
+        self.wait = 8; // some frames after every step, so that what it did is drawn (and boxes that fade in are in)
         let step = match word {
             "size" => Step::Size(num(0) as f64, num(1) as f64),
             "open" => {
@@ -94,14 +112,15 @@ impl Script {
                 return None;
             }
             "move" => Step::Move(num(0), num(1)),
+            "photo" => Step::Photo(num(0) as usize),
             "click" => {
                 use winit::event::MouseButton;
                 let button = if rest.contains("right") { MouseButton::Right } else if rest.contains("middle") { MouseButton::Middle } else { MouseButton::Left };
-                Step::Click(num(0), num(1), button)
+                Step::Click((nums.len() >= 2).then(|| (num(0), num(1))), button)
             }
             "scroll" => Step::Scroll(num(0)),
             "focus" => Step::Focus,
-            "type" => Step::Type(rest.to_string()),
+            "type" => Step::Type(rest.strip_suffix('_').map_or(rest.to_string(), |t| format!("{t} "))),
             "key" => match egui::Key::from_name(rest) {
                 Some(k) => Step::Key(k),
                 None => {

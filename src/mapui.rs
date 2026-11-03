@@ -351,6 +351,7 @@ mod shots {
     #[test]
     #[ignore = "needs a GPU; writes pictures to look at"]
     fn shots() {
+        let _turn = crate::shots::gpu_turn();
         shot("1-plain", page(), |_| {});
         shot("2-narrow", Page { size: vec2(760.0, 600.0), ..page() }, |_| {});
         shot("3-layout-menu", page(), |h| h.get_by_label("Layout").click());

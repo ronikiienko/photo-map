@@ -209,8 +209,8 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             state.store(ui.ctx(), box_id);
                         }
                         if edit.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            // Enter in the empty box searches the idea it shows
-                            if bar.search.trim().is_empty() && let Some(idea) = idea {
+                            // Enter in the empty box searches the idea it shows; with filters, it searches them alone
+                            if bar.search.trim().is_empty() && bar.filters.is_empty() && let Some(idea) = idea {
                                 *bar.search = idea;
                             }
                             actions.ask = true;
@@ -566,6 +566,7 @@ mod shots {
     #[test]
     #[ignore = "needs a GPU; writes pictures to look at"]
     fn shots() {
+        let _turn = crate::shots::gpu_turn();
         shot("1-empty", state(), None);
         shot("2-typing", State { search: "street at".into(), focus: true, ..state() }, None);
         let results = || State { search: "shopping cart".into(), found: 100, at: Some(0), status: "shopping cart: similarity 0.12 to 0.25".into(), ..state() };

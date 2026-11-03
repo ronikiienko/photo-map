@@ -1298,7 +1298,7 @@ mod shots {
     }
 
     fn page(set: impl FnOnce(&mut Home, &Library)) -> Page {
-        let root = app_folder(&[("Takeout tagged", 18_412, "2026-10-11 14:00"), ("Main folder", 88_105, "2026-09-02 09:12"), ("Istanbul trip, spring 2019", 1_204, "2026-10-30 21:40"), ("Scans", 312, "")]);
+        let root = app_folder("maps-page", &[("Takeout tagged", 18_412, "2026-10-11 14:00"), ("Main folder", 88_105, "2026-09-02 09:12"), ("Istanbul trip, spring 2019", 1_204, "2026-10-30 21:40"), ("Scans", 312, "")]);
         let lib = Library::new(root.join("maps"));
         let mut home = Home::new();
         set(&mut home, &lib);
@@ -1338,6 +1338,7 @@ mod shots {
     #[test]
     #[ignore = "needs a GPU; writes pictures to look at"]
     fn shots() {
+        let _turn = crate::shots::gpu_turn();
         let size = egui::vec2(1200.0, 780.0);
         shot("1-list", size, page(|_, _| {}));
         shot("2-narrow", egui::vec2(640.0, 700.0), page(|_, _| {}));

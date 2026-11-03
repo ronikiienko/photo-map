@@ -9,8 +9,50 @@ use winit::window::Window;
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    pub surface: wgpu::Surface<'static>,
+    /// The window's surface; None without a window (tests, PHOTO_MAP_HEADLESS): frames are drawn into `offscreen`.
+    pub surface: Option<wgpu::Surface<'static>>,
+    pub offscreen: Option<wgpu::Texture>,
     pub config: wgpu::SurfaceConfiguration,
+}
+
+/// What a frame is drawn into: the window's next picture, or the texture drawn into without one.
+pub enum Target {
+    Surface(wgpu::SurfaceTexture),
+    Offscreen(wgpu::Texture),
+}
+
+impl Target {
+    pub fn texture(&self) -> &wgpu::Texture {
+        match self {
+            Target::Surface(t) => &t.texture,
+            Target::Offscreen(t) => t,
+        }
+    }
+}
+
+/// The GPU to draw with, of those `fits`: the laptop also has an integrated GPU, so the discrete one is preferred (it holds the atlas).
+fn device(instance: &wgpu::Instance, fits: impl Fn(&wgpu::Adapter) -> bool) -> (wgpu::Adapter, wgpu::Device, wgpu::Queue) {
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    let adapter = adapters
+        .into_iter()
+        .filter(|a| fits(a) && a.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC))
+        .min_by_key(|a| match a.get_info().device_type {
+            wgpu::DeviceType::DiscreteGpu => 0,
+            wgpu::DeviceType::IntegratedGpu => 1,
+            _ => 2,
+        })
+        .expect("no GPU that can draw the map");
+    eprintln!("GPU: {}", adapter.get_info().name);
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: None,
+        required_features: wgpu::Features::TEXTURE_COMPRESSION_BC, // the atlas is BC7
+        required_limits: adapter.limits(),
+        memory_hints: Default::default(),
+        trace: wgpu::Trace::Off,
+        experimental_features: Default::default(),
+    }))
+    .unwrap();
+    (adapter, device, queue)
 }
 
 impl Gpu {
@@ -18,27 +60,7 @@ impl Gpu {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance.create_surface(window).unwrap();
-        // the laptop also has an integrated GPU: prefer the discrete one, it holds the atlas
-        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
-        let adapter = adapters
-            .into_iter()
-            .filter(|a| a.is_surface_supported(&surface))
-            .min_by_key(|a| match a.get_info().device_type {
-                wgpu::DeviceType::DiscreteGpu => 0,
-                wgpu::DeviceType::IntegratedGpu => 1,
-                _ => 2,
-            })
-            .expect("no GPU that can draw to this window");
-        eprintln!("GPU: {}", adapter.get_info().name);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: None,
-            required_features: wgpu::Features::TEXTURE_COMPRESSION_BC, // the atlas is BC7
-            required_limits: adapter.limits(),
-            memory_hints: Default::default(),
-            trace: wgpu::Trace::Off,
-            experimental_features: Default::default(),
-        }))
-        .unwrap();
+        let (adapter, device, queue) = device(&instance, |a| a.is_surface_supported(&surface));
         let caps = surface.get_capabilities(&adapter);
         // non-sRGB target: the atlas holds sRGB bytes and they are passed through unchanged
         let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
@@ -59,14 +81,59 @@ impl Gpu {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        Self { device, queue, surface, config }
+        Self { device, queue, surface: Some(surface), offscreen: None, config }
+    }
+
+    /// Without a window: frames are drawn into a texture of this size (pixels), which can be read back (script.rs).
+    pub fn headless(width: u32, height: u32) -> Self {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let (_, device, queue) = device(&instance, |_| true);
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        let mut gpu = Self { device, queue, surface: None, offscreen: None, config };
+        gpu.make_offscreen();
+        gpu
+    }
+
+    fn make_offscreen(&mut self) {
+        self.offscreen = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen"),
+            size: wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: self.config.usage,
+            view_formats: &[],
+        }));
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.config.width = width;
             self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
+            match &self.surface {
+                Some(surface) => surface.configure(&self.device, &self.config),
+                None => self.make_offscreen(),
+            }
+        }
+    }
+
+    /// What to draw the next frame into; None when the surface can't give one now (it was resized: try again next frame).
+    pub fn target(&mut self) -> Option<Target> {
+        let Some(surface) = &self.surface else { return self.offscreen.clone().map(Target::Offscreen) };
+        match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => Some(Target::Surface(t)),
+            _ => None,
         }
     }
 }

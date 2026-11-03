@@ -35,6 +35,7 @@ mod reuse;
 mod photo;
 mod places;
 mod query;
+mod screen;
 mod script;
 #[cfg(test)]
 mod shots;
@@ -61,7 +62,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{Window, WindowId};
 
 /// Side of a photo square in world units is the median distance between nearest neighbours: a map of 12,000 photos
 /// gets bigger squares than one of 88,000 in the same world (zoom changes the size on screen, nothing else does).
@@ -107,7 +108,6 @@ enum Page {
 
 struct Ui {
     ctx: egui::Context,
-    state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
 }
 
@@ -223,7 +223,8 @@ impl OpenMap {
 }
 
 struct Viewer {
-    window: Arc<Window>,
+    /// A window, or none (screen.rs).
+    screen: screen::Screen,
     gpu: Gpu,
     ui: Ui,
     page: Page,
@@ -332,37 +333,32 @@ struct Viewer {
     debug: bool,
     script_events: Vec<egui::Event>,
     shot: Option<PathBuf>,
+    /// The script has ended (without a window: the run is over).
+    quit: bool,
 }
 
 impl Viewer {
-    fn new(window: Arc<Window>, library: Library, first: Option<PathBuf>) -> Self {
-        let gpu = Gpu::new(window.clone());
+    /// `make_screen`: the window (or none) that egui's input comes from, made with the app's egui context.
+    fn new(gpu: Gpu, make_screen: impl FnOnce(&egui::Context) -> screen::Screen, library: Library, first: Option<PathBuf>) -> Self {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
-        let engine = {
-            let window = window.clone();
-            search::Engine::start(library.root(), move || window.request_redraw())
+        let screen = make_screen(&ctx);
+        let wake = screen.waker();
+        let waker = || {
+            let wake = wake.clone();
+            move || wake()
         };
-        let runtime = {
-            let window = window.clone();
-            manager::Manager::new(library.root(), move || window.request_redraw())
-        };
-        let store = {
-            let window = window.clone();
-            modelstore::ModelStore::new(library.root(), move || window.request_redraw())
-        };
-        let examples = {
-            let window = window.clone();
-            examples::Examples::new(library.root(), move || window.request_redraw())
-        };
-        let state = egui_winit::State::new(ctx.clone(), ctx.viewport_id(), &window, None, None, None);
+        let engine = search::Engine::start(library.root(), waker());
+        let runtime = manager::Manager::new(library.root(), waker());
+        let store = modelstore::ModelStore::new(library.root(), waker());
+        let examples = examples::Examples::new(library.root(), waker());
         let renderer = egui_wgpu::Renderer::new(&gpu.device, gpu.config.format, Default::default());
-        let size = window.inner_size();
-        let camera = Camera::new(Vec2::new(size.width as f32, size.height as f32));
+        let size = screen.size();
+        let camera = Camera::new(Vec2::new(size.0 as f32, size.1 as f32));
         let mut viewer = Self {
-            window,
+            screen,
             gpu,
-            ui: Ui { ctx, state, renderer },
+            ui: Ui { ctx, renderer },
             page: if first.is_some() { Page::Viewer } else { Page::Maps },
             home: home::Home::new(),
             runs: Vec::new(),
@@ -427,6 +423,7 @@ impl Viewer {
             can_match: 0,
             script_events: Vec::new(),
             shot: None,
+            quit: false,
         };
         if let Some(path) = first {
             viewer.open(path);
@@ -459,7 +456,7 @@ impl Viewer {
         let streamer = Streamer::new(&self.gpu.device, &self.gpu.queue, &data);
         let renderer = MapRenderer::new(&self.gpu, &data, &streamer);
         eprintln!("{}: {} photos opened in {:.1}s", data.manifest.name, data.n(), started.elapsed().as_secs_f32());
-        self.window.set_title(&format!("{} — photo map", data.manifest.name));
+        self.screen.set_title(&format!("{} — photo map", data.manifest.name));
         self.camera.jump(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
         let n = data.n();
         let photo_world = data.side;
@@ -514,8 +511,8 @@ impl Viewer {
     }
 
     fn wake(&self) -> impl Fn() + Send + Sync + 'static {
-        let window = self.window.clone();
-        move || window.request_redraw()
+        let wake = self.screen.waker();
+        move || wake()
     }
 
     /// Maps being made, as the Maps page shows them.
@@ -703,7 +700,7 @@ impl Viewer {
         if self.page != Page::Viewer || self.map.is_none() {
             return None;
         }
-        self.lens.view(self.camera.center, self.camera.scale, self.camera.viewport, self.window.scale_factor() as f32)
+        self.lens.view(self.camera.center, self.camera.scale, self.camera.viewport, self.screen.scale())
     }
 
     /// The camera that shows this point of the screen: the lens's inside the lens, else the map's. (World point at the screen's
@@ -1170,14 +1167,13 @@ impl Viewer {
         let Some(&photo) = m.order.get(k) else { return };
         m.at = Some(k);
         let p = m.data.points[photo];
-        let wanted_scale = STEP_TO * self.window.scale_factor() as f32 / m.photo_world;
+        let wanted_scale = STEP_TO * self.screen.scale() / m.photo_world;
         self.camera.fly_to((Vec2::new(p.x, p.y), self.camera.scale.max(wanted_scale)));
     }
 
     /// Borderless, like mote-control: exclusive forces a modeset and Wayland ignores it.
     fn toggle_fullscreen(&self) {
-        let on = self.window.fullscreen().is_none();
-        self.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
+        self.screen.toggle_fullscreen();
     }
 
     fn key(&mut self, key: KeyCode, down: bool) {
@@ -1240,7 +1236,7 @@ impl Viewer {
     }
 
     fn event(&mut self, event: WindowEvent) {
-        let egui_took = self.ui.state.on_window_event(&self.window, &event).consumed;
+        let egui_took = self.screen.on_event(&self.ui.ctx, &event);
         let over_ui = self.ui.ctx.is_pointer_over_egui() || self.ui.ctx.egui_is_using_pointer();
         match event {
             WindowEvent::Resized(size) => {
@@ -1256,7 +1252,7 @@ impl Viewer {
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } if !over_ui && self.page == Page::Viewer => {
-                let ppp = self.window.scale_factor() as f32;
+                let ppp = self.screen.scale();
                 self.menu = self.hovered.zip(self.cursor).map(|(i, c)| (i, egui::pos2(c.x / ppp, c.y / ppp)));
             }
             WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
@@ -1325,16 +1321,16 @@ impl Viewer {
             }
             WindowEvent::HoveredFile(_) if self.page == Page::Maps => {
                 self.home.set_drag_over(true);
-                self.window.request_redraw();
+                self.screen.redraw();
             }
             WindowEvent::HoveredFileCancelled => {
                 self.home.set_drag_over(false);
-                self.window.request_redraw();
+                self.screen.redraw();
             }
             // one event per dropped file: kept until the next frame, then handed over together
             WindowEvent::DroppedFile(path) if self.page == Page::Maps => {
                 self.dropped.push(path);
-                self.window.request_redraw();
+                self.screen.redraw();
             }
             // a photo dropped while photos are the search joins them (one event per file: several dropped at once all join)
             WindowEvent::DroppedFile(path) if self.page == Page::Viewer => {
@@ -1351,10 +1347,10 @@ impl Viewer {
                 self.lens.held = false;
                 self.alt_key = false; // Alt+Tab away: its release goes to another window
             }
-            WindowEvent::Focused(true) => self.window.request_redraw(),
+            WindowEvent::Focused(true) => self.screen.redraw(),
             WindowEvent::Occluded(hidden) => {
                 self.hidden = hidden;
-                self.window.request_redraw();
+                self.screen.redraw();
             }
             WindowEvent::RedrawRequested => self.frame(),
             _ => {}
@@ -1363,12 +1359,12 @@ impl Viewer {
 
     fn frame(&mut self) {
         if !self.hidden {
-            self.window.request_redraw(); // first, so that the frames go on when the surface can't be drawn to
+            self.screen.redraw(); // first, so that the frames go on when the surface can't be drawn to
         }
-        let size = self.window.inner_size();
-        if (size.width, size.height) != (self.gpu.config.width, self.gpu.config.height) && size.width > 0 && size.height > 0 {
-            self.gpu.resize(size.width, size.height);
-            self.camera.viewport = Vec2::new(size.width as f32, size.height as f32);
+        let size = self.screen.size();
+        if size != (self.gpu.config.width, self.gpu.config.height) && size.0 > 0 && size.1 > 0 {
+            self.gpu.resize(size.0, size.1);
+            self.camera.viewport = Vec2::new(size.0 as f32, size.1 as f32);
         }
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
@@ -1378,7 +1374,10 @@ impl Viewer {
             self.frame_times.remove(0);
         }
         self.run_script();
-        self.camera.top = 84.0 * self.window.scale_factor() as f32; // the top bar, and the heading over the matches: things fitted stay below
+        // what is fitted stays below the search box as drawn last frame (it grows with chips), the results row it gets once a search is
+        // answered, and the heading over the matches
+        let bar = self.ui.ctx.memory(|m| m.area_rect(egui::Id::new("top"))).map_or(0.0, |r| r.bottom());
+        self.camera.top = (bar + 56.0).max(84.0) * self.screen.scale();
         self.camera.update(dt, self.cursor, self.keys);
         self.lens.update(dt, self.cursor);
         self.frames += 1;
@@ -1419,21 +1418,12 @@ impl Viewer {
             }
         }
 
-        let frame = match self.gpu.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => t,
-            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                drop(t);
-                let size = self.window.inner_size();
-                self.gpu.resize(size.width, size.height);
-                return;
-            }
-            _ => {
-                let size = self.window.inner_size();
-                self.gpu.resize(size.width, size.height);
-                return;
-            }
+        let Some(frame) = self.gpu.target() else {
+            let size = self.screen.size();
+            self.gpu.resize(size.0, size.1); // the surface wants configuring again
+            return;
         };
-        let view = frame.texture.create_view(&Default::default());
+        let view = frame.texture().create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
 
         let (view_min, view_max) = (self.camera.to_world(Vec2::ZERO), self.camera.to_world(self.camera.viewport));
@@ -1484,11 +1474,13 @@ impl Viewer {
         self.draw_ui(&mut encoder, &view);
         self.gpu.queue.submit([encoder.finish()]);
         if let Some(path) = self.shot.take() {
-            script::save_frame(&self.gpu.device, &self.gpu.queue, &frame.texture, self.gpu.config.format, &path);
+            script::save_frame(&self.gpu.device, &self.gpu.queue, frame.texture(), self.gpu.config.format, &path);
         }
-        self.window.pre_present_notify();
-        self.gpu.queue.present(frame);
-        self.window.request_redraw();
+        if let gpu::Target::Surface(frame) = frame {
+            self.screen.pre_present();
+            self.gpu.queue.present(frame);
+        }
+        self.screen.redraw();
     }
 
     /// The script's step for this frame (script.rs), done as if by hand: through the same events the window sends.
@@ -1496,17 +1488,22 @@ impl Viewer {
         let open = self.map.is_some() && self.opening.is_none();
         let searched = self.asked.iter().all(Option::is_none) && !self.status.starts_with("searching") && !self.status.starts_with("loading the search model");
         let Some(step) = self.script.as_mut().and_then(|s| s.next(open, searched)) else { return };
-        let ppp = self.window.scale_factor();
+        let ppp = self.screen.scale() as f64;
         let device_id = winit::event::DeviceId::dummy();
         let at = |x: f32, y: f32| winit::dpi::PhysicalPosition::new(x as f64 * ppp, y as f64 * ppp);
         match step {
-            script::Step::Size(w, h) => {
-                let _ = self.window.request_inner_size(winit::dpi::LogicalSize::new(w, h));
-            }
-            script::Step::Open(name) => self.open(data_root().join("maps").join(format!("{name}.photomap"))),
+            script::Step::Size(w, h) => self.screen.request_size(w, h),
+            script::Step::Open(name) => self.open(self.library.dir().join(format!("{name}.photomap"))),
             script::Step::Move(x, y) => self.event(WindowEvent::CursorMoved { device_id, position: at(x, y) }),
-            script::Step::Click(x, y, button) => {
-                self.event(WindowEvent::CursorMoved { device_id, position: at(x, y) });
+            script::Step::Photo(i) => {
+                let Some(p) = self.map.as_ref().and_then(|m| m.data.points.get(i).copied()) else { return };
+                let on_screen = self.camera.to_screen(Vec2::new(p.x, p.y));
+                self.event(WindowEvent::CursorMoved { device_id, position: winit::dpi::PhysicalPosition::new(on_screen.x as f64, on_screen.y as f64) });
+            }
+            script::Step::Click(place, button) => {
+                if let Some((x, y)) = place {
+                    self.event(WindowEvent::CursorMoved { device_id, position: at(x, y) });
+                }
                 self.event(WindowEvent::MouseInput { device_id, state: ElementState::Pressed, button });
                 self.event(WindowEvent::MouseInput { device_id, state: ElementState::Released, button });
             }
@@ -1527,6 +1524,7 @@ impl Viewer {
             script::Step::Shot(name) => self.shot = self.script.as_ref().map(|s| s.dir.join(format!("{name}.png"))),
             script::Step::Maps => self.go_to_maps(),
             // SAFETY: `_exit` only ends the process (as main does at the end)
+            script::Step::Quit if self.screen.is_headless() => self.quit = true,
             script::Step::Quit => unsafe { libc::_exit(0) },
         }
     }
@@ -1540,8 +1538,7 @@ impl Viewer {
     }
 
     fn draw_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        let mut raw = self.ui.state.take_egui_input(&self.window);
-        raw.events.append(&mut self.script_events);
+        let raw = self.screen.egui_input(&mut self.script_events);
         let mut actions = UiActions::default();
         let ctx = self.ui.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| self.build_ui(ui, &mut actions));
@@ -1627,7 +1624,7 @@ impl Viewer {
             self.handle_home(a);
         }
 
-        self.ui.state.handle_platform_output(&self.window, output.platform_output);
+        self.screen.platform_output(output.platform_output);
         let tris = self.ui.ctx.tessellate(output.shapes, output.pixels_per_point);
         for (id, deltas) in &output.textures_delta.set {
             for delta in deltas {
@@ -1700,7 +1697,7 @@ impl Viewer {
                 let rect = egui::Rect::from_center_size(egui::pos2(at.x, at.y), galley.size());
                 let near = 2.5 * size * l.name.chars().count().max(4) as f32;
                 let again = names.iter().any(|(n, p)| *n == l.name && p.distance(rect.center()) < near);
-                if again || !screen.intersects(rect) || taken.iter().any(|t| t.intersects(rect.expand(6.0))) || self.under_lens(rect, ppp) {
+                if again || !screen.contains_rect(rect) || taken.iter().any(|t| t.intersects(rect.expand(6.0))) || self.under_lens(rect, ppp) {
                     continue;
                 }
                 taken.push(rect);
@@ -1773,7 +1770,7 @@ impl Viewer {
         if let Some(k) = self.pick_copy(c) {
             return self.go_to_match(k);
         }
-        let ppp = self.window.scale_factor() as f32;
+        let ppp = self.screen.scale();
         let at = egui::pos2(c.x / ppp, c.y / ppp);
         if let Some(&(_, level, index)) = self.label_rects.iter().find(|(rect, _, _)| rect.contains(at)) {
             self.go_to_region(level, index);
@@ -2158,7 +2155,8 @@ impl ApplicationHandler for App {
         window.request_redraw(); // a window that isn't maximized gets no resize event to start the first frame
         let library = Library::new(self.maps.clone());
         let first = self.first.take();
-        self.viewer = Some(Viewer::new(window, library, first));
+        let gpu = Gpu::new(window.clone());
+        self.viewer = Some(Viewer::new(gpu, |ctx| screen::Screen::window(window, ctx), library, first));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -2247,10 +2245,34 @@ pub fn data_root() -> PathBuf {
     }
 }
 
+/// The app without a window: `script` is run on the maps in `library`, frames drawn into a texture `size` points big at `ppp` pixels
+/// a point, until its steps are done. For the tests (shots.rs) and PHOTO_MAP_HEADLESS.
+fn run_headless(library: Library, size: (f32, f32), ppp: f32, script: script::Script) {
+    let (w, h) = ((size.0 * ppp) as u32, (size.1 * ppp) as u32);
+    let mut viewer = Viewer::new(Gpu::headless(w, h), |_| screen::Screen::headless(w, h, ppp), library, None);
+    viewer.script = Some(script);
+    while !viewer.quit {
+        // at the window's pace: what moves (the camera, the photos sliding) moves by the clock
+        let started = Instant::now();
+        viewer.frame();
+        std::thread::sleep(std::time::Duration::from_secs_f32(1.0 / 60.0).saturating_sub(started.elapsed()));
+    }
+}
+
 fn main() {
     let maps = data_root().join("maps");
     let _ = std::fs::create_dir_all(&maps);
     let first = std::env::args().nth(1).map(PathBuf::from);
+    // PHOTO_MAP_SCRIPT with PHOTO_MAP_HEADLESS: the script is run without a window
+    if std::env::var_os("PHOTO_MAP_HEADLESS").is_some() {
+        let Some(script) = script::Script::from_env() else {
+            eprintln!("PHOTO_MAP_HEADLESS needs a script: PHOTO_MAP_SCRIPT=steps.txt");
+            return;
+        };
+        run_headless(Library::new(maps), (1200.0, 780.0), 1.0, script);
+        // SAFETY: `_exit` only ends the process (as below).
+        unsafe { libc::_exit(0) };
+    }
     // winit doesn't deliver files dropped on a native Wayland window (the photo search takes dropped photos), but does on
     // an X11 one: with an X server around (XWayland), use that, unless PHOTO_MAP_WAYLAND is set
     if std::env::var_os("DISPLAY").is_some() && std::env::var_os("PHOTO_MAP_WAYLAND").is_none() {
