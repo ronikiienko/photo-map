@@ -125,7 +125,11 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                         }
                     }
                     // filters are chips of their own under the box: this adds one
-                    let add_filter = egui::Button::new(egui::RichText::new("+ filter").color(theme::MUTED)).frame(false).min_size(egui::vec2(0.0, 26.0));
+                    // a small button of its own (filled, lighting up under the mouse and while its menu is open), not words in the box
+                    let add_filter = egui::Button::new(egui::RichText::new("+ Filter").size(12.5)).frame(true).min_size(egui::vec2(0.0, 24.0));
+                    ui.scope(|ui| {
+                    ui.set_style(ui.ctx().global_style());
+                    ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
                     egui::containers::menu::MenuButton::from_button(add_filter).ui(ui, |ui| {
                         ui.set_width(220.0);
                         ui.label(theme::muted("Only photos that pass it can match. Or type it in the box: camera:pixel, then a space."));
@@ -142,6 +146,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             }
                         }
                     }).0.on_hover_text("only photos that pass a filter can match: by name, camera, date or place");
+                    });
                     // while in the box with an idea showing: the keys for ideas
                     if focused && (idea.is_some() || whole) {
                         // the arrows in the monospace font: the proportional one has no ↑↓
@@ -511,6 +516,15 @@ mod shots {
 
     /// Draws `s` (`hover`: the mouse there, as a point in the window) and saves it as .local/shots/<name>.png.
     fn shot(name: &str, s: State, hover: Option<egui::Pos2>) {
+        shot_then(name, s, |h| {
+            if let Some(at) = hover {
+                h.hover_at(at);
+            }
+        });
+    }
+
+    /// Draws `s`, does `then` to it (hover, click), and saves it as .local/shots/<name>.png.
+    fn shot_then(name: &str, s: State, then: impl FnOnce(&mut egui_kittest::Harness<'_, State>)) {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(s.width + 80.0, 300.0)).wgpu().build_ui_state(
             |ui, s: &mut State| {
                 let ctx = ui.ctx().clone();
@@ -553,10 +567,8 @@ mod shots {
             s,
         );
         harness.run_steps(3);
-        if let Some(at) = hover {
-            harness.hover_at(at);
-            harness.run_steps(3);
-        }
+        then(&mut harness);
+        harness.run_steps(8);
         let image = harness.render().expect("render");
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".local/shots");
         std::fs::create_dir_all(&dir).unwrap();
@@ -580,6 +592,12 @@ mod shots {
         shot("8-hidden", State { hidden: vec![("cars".into(), 120), ("like IMG_2041 +2".into(), 40)], hidden_open: true, ..results() }, None);
         shot("9-narrow", State { width: 300.0, filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi")], hidden: vec![("cars".into(), 120)], hidden_open: true, ..results() }, None);
         // the i at the box's right end, pointed at: how to search
+        {
+            use egui_kittest::kittest::Queryable;
+            shot_then("11-filter-hovered", state(), |h| h.get_by_label("+ Filter").hover());
+            shot_then("12-filter-menu", state(), |h| h.get_by_label("+ Filter").click());
+            shot_then("12b-filter-menu-results", results(), |h| h.get_by_label("+ Filter").click());
+        }
         shot("10-help", state(), Some(egui::pos2(40.0 + 620.0 - 8.0 - 10.0 - 13.0, 27.0)));
     }
 }
