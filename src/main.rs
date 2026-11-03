@@ -22,6 +22,7 @@ mod library;
 #[cfg(test)]
 mod macbench;
 mod manager;
+mod mapui;
 mod modelstore;
 mod models;
 mod packs;
@@ -35,6 +36,8 @@ mod photo;
 mod places;
 mod query;
 mod script;
+#[cfg(test)]
+mod shots;
 mod search;
 mod searchbar;
 mod siglip;
@@ -1533,21 +1536,7 @@ impl Viewer {
         let Some((path, _, progress)) = &self.opening else { return };
         let (text, fraction) = progress.now();
         let name = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
-        egui::Area::new("opening".into()).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            theme::card().inner_margin(egui::Margin::same(20)).show(ui, |ui| {
-                ui.set_width(340.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.heading(format!("Opening {name}"));
-                });
-                ui.add_space(4.0);
-                ui.label(theme::muted(text));
-                if let Some(f) = fraction {
-                    ui.add_space(4.0);
-                    ui.add(egui::ProgressBar::new(f).desired_width(ui.available_width()).show_percentage().fill(theme::ACCENT));
-                }
-            });
-        });
+        mapui::opening(ctx, &name, &text, fraction);
     }
 
     fn draw_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
@@ -1567,6 +1556,12 @@ impl Viewer {
             }
             self.search.clear();
             self.ask(); // nothing to search for: the matches go
+        }
+        if let Some(file) = &actions.reveal {
+            files::show_in_folder(file);
+        }
+        if let Some(file) = &actions.open_file {
+            files::open(file);
         }
         if let Some(i) = actions.path_from {
             self.path_from = Some(i);
@@ -1964,9 +1959,7 @@ impl Viewer {
             let ready_msg = notice.as_ref().filter(|(_, good)| *good).map(|(m, _)| m.as_str());
             actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg, &self.runtime, &self.store, &self.examples);
             if let Some((text, false)) = &notice {
-                egui::Area::new("notice".into()).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0]).show(&ctx, |ui| {
-                    theme::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(235, 110, 100))));
-                });
+                mapui::notice(&ctx, text);
             }
             self.opening_card(&ctx);
             return;
@@ -1984,82 +1977,9 @@ impl Viewer {
         // the top of the screen, by job: where you are (left), the search and its results (middle), how the map looks (right)
         let screen_w = ctx.content_rect().width();
         let width = (screen_w - 2.0 * 250.0).clamp(300.0, 620.0);
-        let narrow = screen_w < width + 2.0 * 250.0; // no room beside the search: the corners go under it
-        let corner_y = if narrow { 64.0 } else { 9.0 }; // beside the box: centred on it
-
-        // left: the way out and which map this is
-        egui::Area::new("where".into()).anchor(egui::Align2::LEFT_TOP, [12.0, corner_y]).show(&ctx, |ui| {
-            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let (rect, back) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-                    let colour = if back.hovered() { egui::Color32::WHITE } else { theme::MUTED };
-                    if back.hovered() {
-                        ui.painter().rect_filled(rect, theme::RADIUS_SMALL, egui::Color32::from_white_alpha(14));
-                    }
-                    let c = rect.center();
-                    let stroke = egui::Stroke::new(1.8, colour);
-                    ui.painter().line_segment([c + egui::vec2(6.0, 0.0), c + egui::vec2(-6.0, 0.0)], stroke);
-                    ui.painter().line_segment([c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.0, -5.0)], stroke);
-                    ui.painter().line_segment([c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.0, 5.0)], stroke);
-                    if back.on_hover_text("back to your maps (Esc)").clicked() {
-                        actions.back = true;
-                    }
-                    if let Some(m) = &self.map {
-                        ui.label(egui::RichText::new(&m.data.manifest.name).color(theme::MUTED));
-                        ui.add_space(6.0);
-                    }
-                });
-            });
-        });
-
-        // right: how the photos are placed and drawn
-        egui::Area::new("look".into()).anchor(egui::Align2::RIGHT_TOP, [-12.0, corner_y]).show(&ctx, |ui| {
-            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    // they stay open while you change things: they close on a click outside them
-                    let stay_open = || egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                    egui::containers::menu::MenuButton::new("Layout").config(stay_open()).ui(ui, |ui| {
-                        ui.set_width(300.0);
-                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                            ui.label(theme::muted("PLACE THE PHOTOS"));
-                            let options = [(View::Map, "Map", "similar photos together, as the map was made"), (View::Groups, "Groups", "sorted into groups by words you choose")];
-                            if theme::segmented(ui, &mut self.view_choice, &options) && self.view_choice == View::Map {
-                                actions.arrange = true;
-                            }
-                            if self.view_choice == View::Map {
-                                ui.label(theme::muted("Photos that look alike sit close together, in regions with names."));
-                            } else {
-                                ui.label(theme::muted("Each photo joins the word it is most like. In each group the strongest matches are in the middle, the weakest at the edge."));
-                                ui.label(theme::muted("The model can tell which word fits a photo better, but not where a word stops fitting at all. So a photo that fits none of them still lands in some group, at its edge."));
-                                ui.add_space(6.0);
-                                presets(ui, |ui| {
-                                    for (name, words) in groups::PRESETS {
-                                        if ui.selectable_label(false, name).on_hover_text(words).clicked() {
-                                            self.groups_text = words.to_string();
-                                            actions.arrange = true;
-                                        }
-                                    }
-                                });
-                                ui.add_space(4.0);
-                                ui.add(egui::TextEdit::multiline(&mut self.groups_text).hint_text("mountain, city, forest, river").desired_rows(3).desired_width(f32::INFINITY));
-                                ui.label(theme::muted("Separate the words with commas or new lines."));
-                                ui.add_space(6.0);
-                                if theme::button(ui, egui::Button::new("Arrange")).on_hover_text("sort the photos into these groups").clicked() {
-                                    actions.arrange = true;
-                                }
-                            }
-                        });
-                    });
-                    egui::containers::menu::MenuButton::new("Options").config(stay_open()).ui(ui, |ui| {
-                        ui.set_width(280.0);
-                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                            ui.label(theme::muted("PHOTO PIXELS"));
-                            theme::segmented(ui, &mut self.smooth, &[(true, "Smooth", "pixels blended with their neighbours"), (false, "Nearest", "each pixel as it is: sharp, blocky up close")]);
-                        });
-                    });
-                });
-            });
-        });
+        let y = mapui::corners_y(screen_w, width);
+        mapui::back(&ctx, y, self.map.as_ref().map(|m| m.data.manifest.name.as_str()), actions);
+        mapui::look(&ctx, y, mapui::Look { view: &mut self.view_choice, groups_text: &mut self.groups_text, smooth: &mut self.smooth }, actions);
 
         // middle: the search box, then (only when there is something) the results, the hidden searches, and tips (searchbar.rs)
         let engine = match &self.map {
@@ -2093,122 +2013,24 @@ impl Viewer {
         searchbar::show(&ctx, width, bar, actions);
 
         self.opening_card(&ctx);
-
-        // bottom left: a "?" that opens how the map works and the controls
-        egui::Area::new("help".into()).anchor(egui::Align2::LEFT_BOTTOM, [12.0, -12.0]).show(&ctx, |ui| {
-            let button = egui::Button::new(egui::RichText::new("?").strong()).min_size(egui::vec2(28.0, 28.0)).selected(self.help_open);
-            if ui.add(button).on_hover_text("how this works (H)").clicked() {
-                self.help_open = !self.help_open;
-            }
-        });
-        if self.help_open {
-            egui::Area::new("help-card".into()).anchor(egui::Align2::LEFT_BOTTOM, [12.0, -52.0]).show(&ctx, |ui| {
-                {
-                    theme::card().show(ui, |ui| {
-                        ui.set_width(470.0); // the text wraps as wide as the keys below it
-                        ui.label(egui::RichText::new("How the map works").size(17.0));
-                        ui.add_space(4.0);
-                        ui.label(theme::muted(
-                            "Every photo is turned into numbers that describe what it shows, and photos that look alike are placed close together. \
-                             Zoom in and similar photos sit side by side; the names mark regions of the map. \
-                             Search compares your words, or photos you drop in (words or photos, not both), with every photo and highlights the best matches. \
-                             NOT in capitals pushes things down: \"street NOT cars\". Filters (+ filter in the box) keep only photos of a name, camera, \
-                             date or place.",
-                        ));
-                        ui.add_space(8.0);
-                        egui::Grid::new("keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                            for (keys, what) in [
-                                (&["scroll", "Q", "E"][..], "zoom"),
-                                (&["drag", "W", "A", "S", "D"][..], "move"),
-                                (&["F"][..], "photos like the one under the mouse"),
-                                (&["Space"][..], "hold: a lens over the map (scroll: how much it magnifies)"),
-                                (&["click"][..], "zoom to a photo, a region's name or a match"),
-                                (&["right-click"][..], "a photo's menu: photos like it, a path to another photo, its file"),
-                                (&["N", "P"][..], "next / previous match"),
-                                (&["F11", "Alt", "Enter"][..], "fullscreen"),
-                                (&["Esc"][..], "back to your maps"),
-                                (&["H"][..], "show / hide this help"),
-                            ] {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    for k in keys {
-                                        theme::key(ui, k);
-                                    }
-                                });
-                                ui.label(theme::muted(what));
-                                ui.end_row();
-                            }
-                        });
-                    });
-                }
-            });
-        }
-        let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len().max(1) as f32;
-        // how fast it draws and what it has loaded: for working on the app, F3 shows it
-        if let Some(m) = self.map.as_ref().filter(|_| self.debug) {
-            egui::Area::new("fps".into()).anchor(egui::Align2::RIGHT_BOTTOM, [-14.0, -14.0]).show(&ctx, |ui| {
-                if let Some(i) = self.hovered.filter(|&i| i < m.data.n()) {
-                    let (loaded, original) = m.streamer.loaded_px(i);
-                    let on_screen = self.size_px() * m.data.size(i);
-                    let text = format!("loaded {loaded} px, on screen {on_screen:.0} px, original {original} px");
-                    ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(theme::MUTED)).extend());
-                }
-                let detail = format!(
-                    "{:.1} ms a frame\nstreamed: {}\nloading: {}",
-                    avg * 1000.0,
-                    m.streamer.usage().iter().map(|(s, used, total)| format!("{s} px {used}/{total}")).collect::<Vec<_>>().join(", "),
-                    m.streamer.in_flight()
-                );
-                let speed = egui::RichText::new(format!("{:.0} fps", 1.0 / avg.max(1e-6))).monospace().color(theme::MUTED);
-                ui.add(egui::Label::new(speed).sense(egui::Sense::hover())).on_hover_text(detail);
-            });
-        }
+        mapui::help(&ctx, &mut self.help_open);
+        self.debug_overlay(&ctx);
 
         if let (Some((photo, at)), Some(m)) = (self.menu, &self.map) {
-            egui::Area::new("photo menu".into()).fixed_pos(at + egui::vec2(4.0, 4.0)).order(egui::Order::Foreground).show(&ctx, |ui| {
-                theme::card().inner_margin(egui::Margin::symmetric(8, 8)).show(ui, |ui| ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                    // one column of buttons as wide as each other, their words at the left, like a menu
-                    ui.set_width(210.0);
-                    ui.add(egui::Label::new(theme::muted(&m.data.photos[photo].title)).truncate());
-                    ui.add_space(2.0);
-                    match self.path_from {
-                        Some(from) if from != photo => {
-                            if theme::button(ui, egui::Button::new("Path to here")).on_hover_text("a chain of photos from the start you picked to this one, each like the one before it").clicked() {
-                                actions.path_to = Some(photo);
-                            }
-                        }
-                        _ => {
-                            if theme::button(ui, egui::Button::new("Path from here")).on_hover_text("then right-click the photo it goes to").clicked() {
-                                actions.path_from = Some(photo);
-                            }
-                        }
-                    }
-                    if theme::button(ui, egui::Button::new("Photos like this")).on_hover_text("search with this photo (F)").clicked() {
-                        actions.like = Some(photo);
-                    }
-                    let path = m.data.path(photo);
-                    if !self.photos.is_empty() && !self.photos.iter().any(|(p, _)| *p == path) {
-                        if theme::button(ui, egui::Button::new("Add to search")).on_hover_text("search for what this photo and the ones searched for share").clicked() {
-                            actions.add_like = Some(photo);
-                        }
-                    }
-                    ui.separator();
-                    let file = files::original(&m.data, photo);
-                    let source = &m.data.photos[photo].source;
-                    let tip = if file.as_os_str() == source.as_str() || source.is_empty() { file.display().to_string() } else { format!("{source} is not there any more: the map's own copy, {}", file.display()) };
-                    if theme::button(ui, egui::Button::new("Show in folder")).on_hover_text(tip).clicked() {
-                        files::show_in_folder(&file);
-                        actions.done = true;
-                    }
-                    if theme::button(ui, egui::Button::new("Open")).on_hover_text("in the app your system opens it with").clicked() {
-                        files::open(&file);
-                        actions.done = true;
-                    }
-                    if theme::button(ui, egui::Button::new("Details")).on_hover_text("file, date taken, camera, place").clicked() {
-                        actions.details = Some((photo, at));
-                    }
-                }));
-            });
+            let file = files::original(&m.data, photo);
+            let source = &m.data.photos[photo].source;
+            let file_tip = if file.as_os_str() == source.as_str() || source.is_empty() { file.display().to_string() } else { format!("{source} is not there any more: the map's own copy, {}", file.display()) };
+            let path = m.data.path(photo);
+            let menu = mapui::PhotoMenu {
+                photo,
+                at,
+                title: m.data.photos[photo].title.clone(),
+                ends_path: self.path_from.is_some_and(|from| from != photo),
+                can_add: !self.photos.is_empty() && !self.photos.iter().any(|(p, _)| *p == path),
+                file,
+                file_tip,
+            };
+            mapui::photo_menu(&ctx, &menu, actions);
         }
         if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.add_like.is_some() || actions.details.is_some() || actions.done {
             self.menu = None;
@@ -2217,49 +2039,33 @@ impl Viewer {
             self.details = Some((photo, at, files::details(&m.data, photo)));
         }
         if let (Some((photo, at, details)), Some(m)) = (&self.details, &self.map) {
-            let mut close = false;
-            egui::Area::new("photo details".into()).fixed_pos(*at + egui::vec2(4.0, 4.0)).order(egui::Order::Foreground).constrain(true).show(&ctx, |ui| {
-                theme::card().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
-                    ui.set_max_width(420.0);
-                    close = theme::window_header(ui, &m.data.photos[*photo].title);
-                    egui::Grid::new("details grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                        for (name, value) in &details.lines {
-                            ui.label(theme::muted(name));
-                            match details.place {
-                                Some((lat, lon)) if name == "Place" => {
-                                    let (place, waiting) = places::describe(lat, lon);
-                                    if waiting {
-                                        ctx.request_repaint_after(std::time::Duration::from_millis(250));
-                                    }
-                                    ui.vertical(|ui| {
-                                        ui.add(egui::Label::new(place).wrap()).on_hover_text("the nearest town; place names from GeoNames (geonames.org)");
-                                        ui.label(theme::muted(format!("{lat:.5}, {lon:.5}")));
-                                    });
-                                }
-                                _ => {
-                                    ui.add(egui::Label::new(value).wrap());
-                                }
-                            }
-                            ui.end_row();
-                        }
-                    });
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        let file = files::original(&m.data, *photo);
-                        if theme::button(ui, egui::Button::new("Show in folder")).clicked() {
-                            files::show_in_folder(&file);
-                        }
-                        if theme::button(ui, egui::Button::new("Open")).clicked() {
-                            files::open(&file);
-                        }
-                    });
-                });
-            });
-            if close {
+            let file = files::original(&m.data, *photo);
+            if mapui::details(&ctx, *at, &m.data.photos[*photo].title, details, &file, actions) {
                 self.details = None;
             }
         }
+    }
 
+    /// F3: how fast it draws and what it has loaded, in the corner, for working on the app.
+    fn debug_overlay(&self, ctx: &egui::Context) {
+        let Some(m) = self.map.as_ref().filter(|_| self.debug) else { return };
+        let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len().max(1) as f32;
+        egui::Area::new("fps".into()).anchor(egui::Align2::RIGHT_BOTTOM, [-14.0, -14.0]).show(ctx, |ui| {
+            if let Some(i) = self.hovered.filter(|&i| i < m.data.n()) {
+                let (loaded, original) = m.streamer.loaded_px(i);
+                let on_screen = self.size_px() * m.data.size(i);
+                let text = format!("loaded {loaded} px, on screen {on_screen:.0} px, original {original} px");
+                ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(theme::MUTED)).extend());
+            }
+            let detail = format!(
+                "{:.1} ms a frame\nstreamed: {}\nloading: {}",
+                avg * 1000.0,
+                m.streamer.usage().iter().map(|(s, used, total)| format!("{s} px {used}/{total}")).collect::<Vec<_>>().join(", "),
+                m.streamer.in_flight()
+            );
+            let speed = egui::RichText::new(format!("{:.0} fps", 1.0 / avg.max(1e-6))).monospace().color(theme::MUTED);
+            ui.add(egui::Label::new(speed).sense(egui::Sense::hover())).on_hover_text(detail);
+        });
     }
 }
 
@@ -2295,6 +2101,9 @@ struct UiActions {
     show_photo: Option<usize>,
     /// "Details": the photo and where the menu was.
     details: Option<(usize, egui::Pos2)>,
+    /// "Show in folder" and "Open" on a photo's file.
+    reveal: Option<PathBuf>,
+    open_file: Option<PathBuf>,
     /// A menu item that needs nothing more was chosen: the menu closes.
     done: bool,
     /// The back arrow.
@@ -2370,17 +2179,6 @@ impl ApplicationHandler for App {
             }
         }
     }
-}
-
-/// A "Presets" button in the Layout menu, opening a list beside it: a submenu, so choosing one leaves the menu open (a combo box's
-/// list is a popup of its own, and a click on it closed the menu).
-fn presets(ui: &mut egui::Ui, list: impl FnOnce(&mut egui::Ui)) {
-    let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    ui.scope(|ui| {
-        ui.set_style(ui.ctx().global_style()); // a button that looks like one, as theme::button
-        let button = egui::Button::new("Presets").right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW).frame(true);
-        egui::containers::menu::SubMenuButton::from_button(button).config(config).ui(ui, list);
-    });
 }
 
 /// The median distance from a photo to its nearest neighbour, over a sample of up to 2,000 photos.

@@ -123,6 +123,11 @@ pub struct Home {
 
 const COVER: f32 = 200.0;
 
+/// How many map cards fit side by side in this width (12 between them; a little slack, as widths come back a hair under).
+fn per_row(width: f32) -> usize {
+    ((width + 12.5) / (COVER + 12.0)).floor().max(1.0) as usize
+}
+
 impl Home {
     pub fn new() -> Self {
         Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: false, models_open: false, confirm_remove_model: None, examples_open: false, confirm_remove_example: None }
@@ -167,7 +172,8 @@ impl Home {
             let screen = ctx.content_rect();
             let width = (screen.width() - 64.0).clamp(320.0, 1100.0);
             // as wide as a whole row of cards, so that the title, the cards and what is under them line up
-            let per_row = ((width + 12.0) / (COVER + 12.0)).floor().max(1.0);
+            // (no wider than the maps there are: four maps in a page for five would leave the title and the cards out of line)
+            let per_row = per_row(width).min(lib.maps.len().max(2)) as f32;
             let width = if lib.maps.is_empty() { width } else { per_row * COVER + (per_row - 1.0) * 12.0 };
             ui.set_width(screen.width());
             ui.set_height(screen.height());
@@ -183,10 +189,14 @@ impl Home {
             });
         });
         if self.drag_over {
-            egui::Area::new("drop-hint".into()).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
-                theme::card().inner_margin(egui::Margin::symmetric(28, 20)).stroke(egui::Stroke::new(1.5, theme::ACCENT)).show(ui, |ui| {
-                    ui.label(RichText::new("Drop a folder or photos to make a map").size(17.0));
-                });
+            // the whole window takes the drop: dimmed, with an accent edge and the words in the middle
+            egui::Area::new("drop-hint".into()).anchor(Align2::LEFT_TOP, [0.0, 0.0]).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
+                let screen = ctx.content_rect();
+                ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(205));
+                ui.painter().rect_stroke(screen.shrink(16.0), theme::RADIUS, egui::Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
+                ui.painter().text(screen.center() - vec2(0.0, 12.0), Align2::CENTER_CENTER, "Drop to make a map", egui::FontId::proportional(22.0), theme::TEXT);
+                ui.painter().text(screen.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, "folders or photos", egui::FontId::proportional(14.0), theme::MUTED);
+                ui.allocate_rect(screen, Sense::hover());
             });
         }
         self.dialogs(ctx, builds, lib, rt, store, examples, &mut actions);
@@ -194,9 +204,17 @@ impl Home {
     }
 
     fn page(&mut self, ui: &mut Ui, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, actions: &mut Vec<Action>) {
-        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        // the buttons at the right of the title, or under it when the page is too narrow for both
+        let narrow = ui.available_width() < 600.0;
+        if narrow {
             ui.label(RichText::new("Maps").size(26.0).strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(4.0);
+        }
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            if !narrow {
+                ui.label(RichText::new("Maps").size(26.0).strong());
+            }
+            ui.with_layout(if narrow { Layout::left_to_right(Align::Center) } else { Layout::right_to_left(Align::Center) }, |ui| {
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), true, egui::Button::new(RichText::new("+  New map").strong()).min_size(vec2(112.0, 34.0))).clicked() {
                     self.open_new_map();
                 }
@@ -253,7 +271,7 @@ impl Home {
         } else {
             ui.label(RichText::new("Your maps").size(17.0));
             ui.add_space(8.0);
-            let per_row = ((ui.available_width() + 12.0) / (COVER + 12.0)).floor().max(1.0) as usize;
+            let per_row = per_row(ui.available_width());
             for row in lib.maps.chunks(per_row) {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
@@ -1261,4 +1279,76 @@ fn cover_image(map: &Path) -> Option<egui::ColorImage> {
         }
     };
     Some(egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
+}
+
+#[cfg(test)]
+mod shots {
+    use super::*;
+    use crate::shots::{app_folder, harness, save};
+    use std::time::{Duration, Instant};
+
+    /// The Maps page in one state: the page itself (which windows are open), what it is drawn from, and the maps being made.
+    struct Page {
+        home: Home,
+        lib: Library,
+        rt: Manager,
+        store: ModelStore,
+        examples: Examples,
+        builds: Vec<BuildView>,
+    }
+
+    fn page(set: impl FnOnce(&mut Home, &Library)) -> Page {
+        let root = app_folder(&[("Takeout tagged", 18_412, "2026-10-11 14:00"), ("Main folder", 88_105, "2026-09-02 09:12"), ("Istanbul trip, spring 2019", 1_204, "2026-10-30 21:40"), ("Scans", 312, "")]);
+        let lib = Library::new(root.join("maps"));
+        let mut home = Home::new();
+        set(&mut home, &lib);
+        Page { home, rt: Manager::new(root.clone(), || {}), store: ModelStore::new(root.clone(), || {}), examples: Examples::new(root, || {}), lib, builds: Vec::new() }
+    }
+
+    fn building(running: bool, error: Option<&str>) -> BuildView {
+        let now = Instant::now();
+        let state = State {
+            stage: Stage::Embed,
+            done: 4_210,
+            total: 12_000,
+            message: "making the photos' numbers".into(),
+            stage_started: now - Duration::from_secs(300),
+            base: (now - Duration::from_secs(300), 0),
+            samples: Default::default(),
+            error: error.map(String::from),
+            finished: false,
+            recent: Default::default(),
+            vector_head: vec![0.12, -0.03, 0.4, 0.07, -0.21, 0.0, 0.33, -0.1],
+        };
+        BuildView { dir: "/maps/new.building".into(), name: "Phone 2024".into(), source: "/photos/phone (12,000 photos)".into(), stage: Stage::Embed, running, backend: "on the graphics card".into(), queued: false, elsewhere: false, state: Some(state) }
+    }
+
+    /// Draws `p` (`size`: the window) and saves it as .local/shots/maps-<name>.png. Covers load on threads: it draws until they are in.
+    fn shot(name: &str, size: egui::Vec2, p: Page) {
+        let mut h = harness(size, p, |ctx, p: &mut Page| {
+            let _ = p.home.show(ctx, &p.lib, &p.builds, false, None, &p.rt, &p.store, &p.examples);
+        });
+        for _ in 0..20 {
+            h.run_steps(2);
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        save(h.render().expect("render"), &format!("maps-{name}"));
+    }
+
+    #[test]
+    #[ignore = "needs a GPU; writes pictures to look at"]
+    fn shots() {
+        let size = egui::vec2(1200.0, 780.0);
+        shot("1-list", size, page(|_, _| {}));
+        shot("2-narrow", egui::vec2(640.0, 700.0), page(|_, _| {}));
+        shot("3-details", size, page(|h, lib| h.details = Some(lib.maps[0].path.clone())));
+        shot("4-new-map", size, page(|h, _| h.open_new_map()));
+        shot("5-runtime", size, page(|h, _| h.runtime_open = true));
+        shot("6-models", size, page(|h, _| h.models_open = true));
+        shot("7-examples", size, page(|h, _| h.examples_open = true));
+        shot("8-delete", size, page(|h, lib| h.confirm_delete = Some(lib.maps[1].path.clone())));
+        shot("9-building", size, Page { builds: vec![building(true, None)], ..page(|_, _| {}) });
+        shot("10-build-failed", size, Page { builds: vec![building(false, Some("the model ran out of memory on the graphics card"))], ..page(|_, _| {}) });
+        shot("11-dragging", size, page(|h, _| h.drag_over = true));
+    }
 }
