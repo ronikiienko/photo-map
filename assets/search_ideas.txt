@@ -2456,131 +2456,55 @@ mysterious door
 secret path
 hidden place
 
-# travel and famous kinds of places
-eiffel tower
-big ben
-colosseum
-leaning tower of pisa
-statue of liberty
-golden gate bridge
-times square
-sydney opera house
-taj mahal
-great wall of china
-machu picchu
-pyramids of giza
-santorini white houses
-venice canals
-gondola
-amsterdam canals
-paris streets
-london red bus
-new york skyline
-tokyo at night
-shibuya crossing
-hong kong skyline
-singapore skyline
-dubai skyscrapers
-istanbul mosque
-moroccan market
-riad courtyard
-greek island
-italian coast
-amalfi coast
-tuscany hills
-swiss alps
-norwegian fjord
-iceland waterfall
-scottish highlands
-irish cliffs
-english countryside
-french village
-spanish plaza
-portuguese tiles
-azulejos
-prague old town
-vienna palace
-budapest parliament
-kraków old town
-kyiv
-kyiv pechersk lavra
-saint sophia cathedral
-lviv old town
-odesa
-odesa steps
-carpathian mountains
-black sea coast
-dnipro river
-khreshchatyk
-maidan
-golden gate kyiv
-ukrainian village
-ukrainian church
-wooden church in the carpathians
-sunflower field in ukraine
-steppe
-chernobyl
-pripyat
-vancouver
-vancouver skyline
-stanley park
-canadian rockies
-lake louise
-moraine lake
-banff
-whistler
-british columbia forest
-pacific coast
-totem poles
-seawall
-granville island
-north shore mountains
-canada flag
-maple leaf
-canadian winter
-toronto skyline
-niagara falls
-yosemite
-grand canyon
-monument valley
-las vegas strip
-hollywood sign
-route 66
-mexican village
-caribbean beach
-rio de janeiro
-amazon river
-andes mountains
-patagonia
-easter island statues
-african safari
-kilimanjaro
-victoria falls
-sahara
-nile river
-bali rice fields
-thai temple
-buddha statue
-vietnamese boats
-ha long bay
-chinese lanterns
-forbidden city
-japanese temple in autumn
-mount fuji
-kyoto street
-korean palace
-seoul at night
-himalayas
-nepal prayer flags
-indian street
-indian market
-holi festival
-dubai desert
-maldives water villa
-australian outback
-great barrier reef
-new zealand mountains
-antarctica
+# travel and kinds of places
+old town square
+cobblestone street in an old town
+canals with boats
+city skyline at night
+skyscrapers from below
+busy crossing at night
+neon street at night
+famous landmark with tourists
+tower over a city
+old cathedral
+golden church domes
+wooden church in the mountains
+mosque with minarets
+buddhist temple
+temple in autumn
+palace with gardens
+castle on a hill
+ruins of an old temple
+ancient stone ruins
+pyramids in the desert
+white houses on a hillside
+colourful houses by the sea
+fishing village
+mountain village
+village in the countryside
+rolling hills with cypress trees
+sunflower field
+wide steppe
+fjord with steep cliffs
+waterfall in a canyon
+turquoise mountain lake
+glacier in the mountains
+rice terraces
+tropical island
+water villas over the sea
+coral reef
+desert dunes
+red rock canyon
+safari with animals
+big waterfall
+river through a city
+seaside promenade
+city park with tall trees
+wide stone steps
+street market abroad
+night market with lanterns
+prayer flags in the mountains
+abandoned town
 hotel with a sea view
 view from a hotel window
 view from a balcony at the sea
@@ -2596,7 +2520,6 @@ hostel bunk beds
 camping by a lake
 road sign to a city
 border crossing
-customs
 travel souvenirs
 fridge magnets from trips
 

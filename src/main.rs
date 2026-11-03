@@ -1892,10 +1892,12 @@ impl Viewer {
                             let mut to_end = false;
                             if focused {
                                 let (tab, down, up) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, egui::Key::Tab), i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)));
-                                if down || up {
-                                    self.ideas.step(if down { 1 } else { -1 });
+                                if (down || up) && let Some(whole) = self.ideas.switch(&self.search, if down { 1 } else { -1 }) {
+                                    self.search = whole;
+                                    to_end = true;
                                 }
                                 if tab && let Some(idea) = self.ideas.idea(&self.search) {
+                                    self.ideas.took(&idea);
                                     self.search = idea;
                                     to_end = true;
                                 }
@@ -1904,8 +1906,9 @@ impl Viewer {
                             // empty: the idea is the placeholder; typing: the rest of it shows faint after the words
                             let hint = if self.search.is_empty() { idea.clone().unwrap_or_default() } else { String::new() };
                             // while in the box with an idea showing: the keys for ideas, as key caps at its end
-                            let keys = focused && idea.is_some();
-                            let keys_w = if keys { 150.0 } else { 0.0 };
+                            let whole = self.ideas.replaces(&self.search);
+                            let keys = focused && (idea.is_some() || whole);
+                            let keys_w = if keys { 170.0 } else { 0.0 };
                             let edit = egui::TextEdit::singleline(&mut self.search).id(box_id).hint_text(hint).frame(egui::Frame::NONE).desired_width(ui.available_width() - cross - keys_w).show(ui);
                             // the keys stay with the box: Tab and up / down would otherwise move to another button
                             ui.memory_mut(|m| m.set_focus_lock_filter(box_id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..Default::default() }));
@@ -1919,8 +1922,16 @@ impl Viewer {
                                 let faint = theme::MUTED.gamma_multiply(0.7);
                                 let mut hint = egui::text::LayoutJob::default();
                                 hint.append("↑↓", 0.0, egui::TextFormat::simple(egui::FontId::monospace(11.5), faint));
-                                hint.append(" other idea · Tab take", 0.0, egui::TextFormat::simple(egui::FontId::proportional(11.5), faint));
-                                ui.label(hint).on_hover_text("up and down: another idea; Tab: take it; Enter in the empty box: search it");
+                                let (what, tip) = if whole { (" another search", "up and down: put another search in the box") } else { (" other idea", "up and down: another idea; Enter in the empty box: search it") };
+                                hint.append(what, 0.0, egui::TextFormat::simple(egui::FontId::proportional(11.5), faint));
+                                // always there (fainter with nothing to take), in a slot of its own width: the box keeps its size
+                                let take = if idea.is_some() { faint } else { faint.gamma_multiply(0.45) };
+                                hint.append(" · Tab take", 0.0, egui::TextFormat::simple(egui::FontId::proportional(11.5), take));
+                                let tip = if idea.is_some() { format!("{tip}; Tab: take the faint rest") } else { tip.to_string() };
+                                ui.allocate_ui_with_layout(egui::vec2(keys_w, ui.available_height()), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.set_min_width(keys_w);
+                                    ui.label(hint).on_hover_text(tip);
+                                });
                             }
                             if to_end {
                                 let mut state = edit.state;
