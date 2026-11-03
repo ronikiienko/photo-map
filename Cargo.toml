@@ -22,7 +22,7 @@ rayon = "1.11"
 ort = { version = "=2.0.0-rc.14", default-features = false, features = ["load-dynamic", "cuda", "tensorrt", "coreml", "std"] }
 libloading = "0.9.0"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
-half = "2"
+half = { version = "2", features = ["bytemuck"] }
 onnx-protobuf = "0.2.3"
 # onnx-protobuf's generated code checks for exactly this version
 protobuf = "=3.4.0"
