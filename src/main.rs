@@ -285,6 +285,8 @@ struct Viewer {
     ideas: suggest::Suggest,
     /// The Hidden line is open: a chip for each hidden search.
     hidden_open: bool,
+    /// How to search shows: the i at the box's end is pointed at.
+    tips_open: bool,
     /// Where photos searched for are on the map (None: not on it), found when first pointed at; emptied when a map opens.
     spots: std::collections::HashMap<PathBuf, Option<usize>>,
     /// The runtime libraries: what is installed and the install under way.
@@ -362,6 +364,7 @@ impl Viewer {
             search: String::new(),
             ideas: suggest::Suggest::new(),
             hidden_open: false,
+            tips_open: false,
             spots: std::collections::HashMap::new(),
             engine,
             asked: Vec::new(),
@@ -1770,7 +1773,7 @@ impl Viewer {
         let screen_w = ctx.content_rect().width();
         let width = (screen_w - 2.0 * 250.0).clamp(300.0, 620.0);
         let narrow = screen_w < width + 2.0 * 250.0; // no room beside the search: the corners go under it
-        let corner_y = if narrow { 76.0 } else { 12.0 };
+        let corner_y = if narrow { 64.0 } else { 9.0 }; // beside the box: centred on it
 
         // left: the way out and which map this is
         egui::Area::new("where".into()).anchor(egui::Align2::LEFT_TOP, [12.0, corner_y]).show(&ctx, |ui| {
@@ -1849,14 +1852,21 @@ impl Viewer {
         // middle: the search box, then (only when there is something) the results, the hidden searches, and tips
         let box_id = egui::Id::new("search-box");
         let focused = ctx.memory(|m| m.has_focus(box_id));
-        egui::Area::new("top".into()).anchor(egui::Align2::CENTER_TOP, [0.0, 12.0]).show(&ctx, |ui| {
+        egui::Area::new("top".into()).anchor(egui::Align2::CENTER_TOP, [0.0, 0.0]).show(&ctx, |ui| {
             // no card around it all: the box stands on its own, and what is under it gets a card only while there is something
             egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(ui, |ui| {
                 ui.set_width(width - 16.0);
                 ui.set_max_width(width - 16.0); // the rows below wrap at this width instead of widening the card
                 // the box: whether search can run (a dot), the words or the photos searched with, a cross to clear
-                let ring = if focused { theme::ACCENT.gamma_multiply(0.7) } else { theme::CARD_STROKE };
-                egui::Frame::new().fill(ui.visuals().extreme_bg_color).stroke(egui::Stroke::new(1.0, ring)).corner_radius(theme::RADIUS_SMALL).inner_margin(egui::Margin::symmetric(10, 2)).shadow(egui::Shadow { offset: [0, 4], blur: 18, spread: 0, color: egui::Color32::from_black_alpha(110) }).show(ui, |ui| {
+                // the edge stays quiet; typing in the box lights a ring just inside its search line, not around everything under it
+                let ring = theme::CARD_STROKE;
+                // what shows under the box (results, status, hidden searches, help) joins it: one box, a line between
+                let (found, at, on_path) = self.map.as_ref().map_or((0, None, false), |m| (m.order.len(), m.at, m.trail.is_some()));
+                let chips = self.map.as_ref().is_some_and(|m| !m.hidden.is_empty()) && self.hidden_open;
+                let below = |tips: bool| found > 0 || !self.status.is_empty() || chips || tips || self.photos.len() == 1;
+                let r = theme::RADIUS_SMALL;
+                let top_corners = if below(self.tips_open) { egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 } } else { egui::CornerRadius::same(r) };
+                let search_line = egui::Frame::new().fill(ui.visuals().extreme_bg_color).stroke(egui::Stroke::new(1.0, ring)).corner_radius(top_corners).inner_margin(egui::Margin::symmetric(10, 2)).shadow(egui::Shadow { offset: [0, 4], blur: 18, spread: 0, color: egui::Color32::from_black_alpha(110) }).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.set_min_height(32.0);
                         let searchable = self.map.as_ref().is_some_and(|m| m.vectors.is_some());
@@ -1879,7 +1889,7 @@ impl Viewer {
                         let hidden_total: usize = self.map.as_ref().map_or(0, |m| m.hidden.iter().map(|h| h.photos.len()).sum());
                         let badge = (hidden_total > 0).then(|| format!("{hidden_total} hidden {}", if self.hidden_open { "⏷" } else { "⏵" }));
                         let badge_w = badge.as_ref().map_or(0.0, |b| ui.fonts_mut(|f| f.layout_no_wrap(b.clone(), egui::FontId::proportional(12.0), theme::MUTED).size().x) + 12.0 + ui.spacing().item_spacing.x);
-                        let cross = if clearable { 26.0 + ui.spacing().item_spacing.x } else { 0.0 } + badge_w;
+                        let cross = if clearable { 26.0 + ui.spacing().item_spacing.x } else { 0.0 } + badge_w + 26.0 + ui.spacing().item_spacing.x; // and the i
                         if !self.photos.is_empty() {
                             // a search is photos or words, never both: while photos are the search they take the place of the words
                             for (k, (path, tex)) in self.photos.iter().enumerate() {
@@ -1979,20 +1989,25 @@ impl Viewer {
                                 actions.clear_photo = true;
                             }
                         }
+                        self.tips_open = theme::info_button(ui);
                     });
                 });
+                if focused {
+                    let inset = search_line.response.rect.shrink(2.0);
+                    let corners = if below(self.tips_open) { egui::CornerRadius { nw: r - 2, ne: r - 2, sw: 2, se: 2 } } else { egui::CornerRadius::same(r - 2) };
+                    ui.painter().rect_stroke(inset, corners, egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.7)), egui::StrokeKind::Inside);
+                }
 
                 // the results: step through them, how many are marked, hide them
-                let (found, at, on_path) = self.map.as_ref().map_or((0, None, false), |m| (m.order.len(), m.at, m.trail.is_some()));
-                let chips = self.map.as_ref().is_some_and(|m| !m.hidden.is_empty()) && self.hidden_open;
-                let tips = focused && self.search.trim().is_empty() && self.photos.is_empty();
-                if !(found > 0 || !self.status.is_empty() || chips || tips || self.photos.len() == 1) {
+                let tips = self.tips_open;
+                if !below(tips) {
                     return;
                 }
-                ui.add_space(6.0);
-                // as wide as the box: the card's margins (10 each side) and its stroke come out of the width, not added to it
+                ui.add_space(-ui.spacing().item_spacing.y - 1.0); // right under the box, sharing its edge
+                // as wide as the box: the margins (10 each side) and the stroke come out of the width, not added to it
                 let inner = ui.available_width() - 2.0 * 10.0 - 2.0;
-                theme::card().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                let bottom_corners = egui::CornerRadius { nw: 0, ne: 0, sw: r, se: r };
+                egui::Frame::new().fill(ui.visuals().extreme_bg_color).stroke(egui::Stroke::new(1.0, ring)).corner_radius(bottom_corners).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                     ui.set_width(inner);
                     ui.set_max_width(inner);
                     if found > 0 {
@@ -2015,22 +2030,22 @@ impl Viewer {
                             } else {
                                 // how many to mark, right where they are counted; the similarities they span in its tip
                                 let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
-                                // as wide as the line allows (Hide these keeps its room), so a pixel moves it little even over millions;
-                                // the number beside it can be dragged slowly or typed
-                                // the line's other parts measured, so it fits the card exactly: the number beside the slider (at its widest)
-                            // and Hide these
-                            let text_w = |ui: &egui::Ui, t: String| egui::WidgetText::from(t).into_galley(ui, None, f32::INFINITY, egui::TextStyle::Button).size().x + 2.0 * ui.spacing().button_padding.x;
-                            let value_w = text_w(ui, format!("{} matches", most as u64)).max(ui.spacing().interact_size.x);
-                            let hide_w = text_w(ui, "Hide these".into());
-                            ui.spacing_mut().slider_width = (ui.available_width() - value_w - hide_w - 3.0 * ui.spacing().item_spacing.x - 2.0).max(60.0);
-                                let slider = egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer().suffix(" matches").drag_value_speed(0.2);
                                 let tip = format!("{}\n\nMarks this many photos, best first, yellow to red. The model knows which fit better, not where fitting stops: only you can tell. All of them fit? Try more. Junk at the end? Lower it.", self.status);
-                                if ui.add(slider).on_hover_text(tip.trim_start()).changed() {
-                                    actions.reblend = true;
-                                }
+                                let tip = tip.trim_start();
+                                // from the right: Hide these, the number (dragged slowly or typed), and the slider in all the room left, so
+                                // nothing leaves a gap and a pixel moves it little even over millions
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if theme::button(ui, egui::Button::new("Hide these")).on_hover_text("hide these matches: they turn faint, stay where they are, and no search marks them; the chip that appears brings them back").clicked() {
                                         actions.hide = true;
+                                    }
+                                    ui.add_space(4.0);
+                                    let number = egui::DragValue::new(&mut self.wanted).range(10.0..=most).speed(0.2).fixed_decimals(0).suffix(" matches");
+                                    let number = ui.add(number).on_hover_text(tip);
+                                    ui.spacing_mut().slider_width = ui.available_width();
+                                    let slider = ui.add(egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).show_value(false)).on_hover_text(tip);
+                                    if number.changed() || slider.changed() {
+                                        self.wanted = self.wanted.round();
+                                        actions.reblend = true;
                                     }
                                 });
                             }
@@ -2060,9 +2075,11 @@ impl Viewer {
                         });
                     }
 
-                    // the empty box, clicked in: how to search
+                    // how to search, while the i is pointed at
                     if tips {
-                        ui.add_space(6.0);
+                        if found > 0 || !self.status.is_empty() || chips {
+                            ui.add_space(6.0); // a gap only below something
+                        }
                         ui.label(theme::muted(
                             "Describe what you want in a short phrase: \"woman on a bike in winter\". Use NOT in capitals to push things down: \
                              \"street at night NOT cars\". Or drop in a photo to find ones like it.\n\

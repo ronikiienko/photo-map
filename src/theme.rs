@@ -150,6 +150,16 @@ pub fn button(ui: &mut Ui, button: egui::Button) -> egui::Response {
 }
 
 /// A close cross that lights up when the pointer is on it and again when it is pressed.
+/// A small round "i" for some help that shows while it is pointed at. True while hovered.
+pub fn info_button(ui: &mut Ui) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::hover());
+    let colour = if response.hovered() { Color32::WHITE } else { MUTED };
+    let c = rect.center();
+    ui.painter().circle_stroke(c, 8.0, Stroke::new(1.3, colour));
+    ui.painter().text(c + vec2(0.0, 0.5), egui::Align2::CENTER_CENTER, "i", egui::FontId::proportional(12.0), colour);
+    response.hovered()
+}
+
 pub fn close_button(ui: &mut Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
     let (fill, cross) = if response.is_pointer_button_down_on() {
