@@ -1767,7 +1767,7 @@ impl Viewer {
 
         // left: the way out and which map this is
         egui::Area::new("where".into()).anchor(egui::Align2::LEFT_TOP, [12.0, corner_y]).show(&ctx, |ui| {
-            theme::card().inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (rect, back) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
                     let colour = if back.hovered() { egui::Color32::WHITE } else { theme::MUTED };
@@ -1792,7 +1792,7 @@ impl Viewer {
 
         // right: how the photos are placed and drawn
         egui::Area::new("look".into()).anchor(egui::Align2::RIGHT_TOP, [-12.0, corner_y]).show(&ctx, |ui| {
-            theme::card().inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // they stay open while you change things: they close on a click outside them
                     let stay_open = || egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
@@ -1843,12 +1843,13 @@ impl Viewer {
         let box_id = egui::Id::new("search-box");
         let focused = ctx.memory(|m| m.has_focus(box_id));
         egui::Area::new("top".into()).anchor(egui::Align2::CENTER_TOP, [0.0, 12.0]).show(&ctx, |ui| {
-            theme::card().inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            // no card around it all: the box stands on its own, and what is under it gets a card only while there is something
+            egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(ui, |ui| {
                 ui.set_width(width - 16.0);
                 ui.set_max_width(width - 16.0); // the rows below wrap at this width instead of widening the card
                 // the box: whether search can run (a dot), the words or the photos searched with, a cross to clear
                 let ring = if focused { theme::ACCENT.gamma_multiply(0.7) } else { theme::CARD_STROKE };
-                egui::Frame::new().fill(ui.visuals().extreme_bg_color).stroke(egui::Stroke::new(1.0, ring)).corner_radius(theme::RADIUS_SMALL).inner_margin(egui::Margin::symmetric(10, 2)).show(ui, |ui| {
+                egui::Frame::new().fill(ui.visuals().extreme_bg_color).stroke(egui::Stroke::new(1.0, ring)).corner_radius(theme::RADIUS_SMALL).inner_margin(egui::Margin::symmetric(10, 2)).shadow(egui::Shadow { offset: [0, 4], blur: 18, spread: 0, color: egui::Color32::from_black_alpha(110) }).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.set_min_height(32.0);
                         let searchable = self.map.as_ref().is_some_and(|m| m.vectors.is_some());
@@ -1908,7 +1909,8 @@ impl Viewer {
                             // while in the box with an idea showing: the keys for ideas, as key caps at its end
                             let whole = self.ideas.replaces(&self.search);
                             let keys = focused && (idea.is_some() || whole);
-                            let keys_w = if keys { 170.0 } else { 0.0 };
+                            // the hint's slot, with the gap before it: the box takes the rest and so keeps its width
+                            let keys_w = if keys { 170.0 + ui.spacing().item_spacing.x } else { 0.0 };
                             let edit = egui::TextEdit::singleline(&mut self.search).id(box_id).hint_text(hint).frame(egui::Frame::NONE).desired_width(ui.available_width() - cross - keys_w).show(ui);
                             // the keys stay with the box: Tab and up / down would otherwise move to another button
                             ui.memory_mut(|m| m.set_focus_lock_filter(box_id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..Default::default() }));
@@ -1928,9 +1930,9 @@ impl Viewer {
                                 let take = if idea.is_some() { faint } else { faint.gamma_multiply(0.45) };
                                 hint.append(" · Tab take", 0.0, egui::TextFormat::simple(egui::FontId::proportional(11.5), take));
                                 let tip = if idea.is_some() { format!("{tip}; Tab: take the faint rest") } else { tip.to_string() };
-                                ui.allocate_ui_with_layout(egui::vec2(keys_w, ui.available_height()), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.set_min_width(keys_w);
-                                    ui.label(hint).on_hover_text(tip);
+                                ui.allocate_ui_with_layout(egui::vec2(170.0, ui.available_height()), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.set_width(170.0);
+                                    ui.add(egui::Label::new(hint).truncate()).on_hover_text(tip);
                                 });
                             }
                             if to_end {
@@ -1964,86 +1966,94 @@ impl Viewer {
 
                 // the results: step through them, how many are marked, hide them
                 let (found, at, on_path) = self.map.as_ref().map_or((0, None, false), |m| (m.order.len(), m.at, m.trail.is_some()));
-                if found > 0 {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        let step = |ui: &mut egui::Ui, text: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(text).size(18.0)).min_size(egui::vec2(28.0, 28.0))).on_hover_text(tip).clicked();
-                        if step(ui, "‹", "the previous match (P or [)") {
-                            actions.step = -1;
-                        }
-                        if step(ui, "›", "the next match, best first (N or ])") {
-                            actions.step = 1;
-                        }
-                        if let Some(k) = at {
-                            ui.label(format!("{} of", k + 1));
-                        }
-                        if on_path {
-                            ui.label(format!("{found} photos"));
-                            if !self.status.is_empty() {
-                                ui.label(theme::muted(&self.status));
+                let chips = self.map.as_ref().is_some_and(|m| !m.hidden.is_empty()) && self.hidden_open;
+                let tips = focused && self.search.trim().is_empty() && self.photos.is_empty();
+                if !(found > 0 || !self.status.is_empty() || chips || tips || self.photos.len() == 1) {
+                    return;
+                }
+                ui.add_space(6.0);
+                theme::card().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if found > 0 {
+                        ui.horizontal(|ui| {
+                            let step = |ui: &mut egui::Ui, text: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(text).size(18.0)).min_size(egui::vec2(28.0, 28.0))).on_hover_text(tip).clicked();
+                            if step(ui, "‹", "the previous match (P or [)") {
+                                actions.step = -1;
                             }
-                        } else {
-                            // how many to mark, right where they are counted; the similarities they span in its tip
-                            let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
-                            // as wide as the line allows (Hide these keeps its room), so a pixel moves it little even over millions;
-                            // the number beside it can be dragged slowly or typed
-                            ui.spacing_mut().slider_width = (ui.available_width() - 210.0).max(160.0);
-                            let slider = egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer().suffix(" matches").drag_value_speed(0.2);
-                            let tip = format!("{}\n\nMarks this many photos, best first, yellow to red. The model knows which fit better, not where fitting stops: only you can tell. All of them fit? Try more. Junk at the end? Lower it.", self.status);
-                            if ui.add(slider).on_hover_text(tip.trim_start()).changed() {
-                                actions.reblend = true;
+                            if step(ui, "›", "the next match, best first (N or ])") {
+                                actions.step = 1;
                             }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if theme::button(ui, egui::Button::new("Hide these")).on_hover_text("hide these matches: they turn faint, stay where they are, and no search marks them; the chip that appears brings them back").clicked() {
-                                    actions.hide = true;
+                            if let Some(k) = at {
+                                ui.label(format!("{} of", k + 1));
+                            }
+                            if on_path {
+                                ui.label(format!("{found} photos"));
+                                if !self.status.is_empty() {
+                                    ui.label(theme::muted(&self.status));
                                 }
-                            });
-                        }
-                    });
-                } else if !self.status.is_empty() {
-                    // what happened, when there are no results to show it with (searching…, an error, what was hidden)
-                    ui.add_space(4.0);
-                    ui.label(theme::muted(&self.status));
-                }
-
-                // the hidden searches, opened from the badge in the box: a chip each
-                if let Some(m) = self.map.as_ref().filter(|m| !m.hidden.is_empty() && self.hidden_open) {
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        for (k, h) in m.hidden.iter().enumerate() {
-                            // the chip takes the search back into the box; its cross just brings the photos back
-                            let chip = egui::Button::new(format!("{} ({})", h.what, h.photos.len())).wrap_mode(egui::TextWrapMode::Extend);
-                            if ui.add(chip).on_hover_text("search this again, to change it and hide again (its photos come back meanwhile)").clicked() {
-                                actions.unhide = Some((k, true));
+                            } else {
+                                // how many to mark, right where they are counted; the similarities they span in its tip
+                                let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
+                                // as wide as the line allows (Hide these keeps its room), so a pixel moves it little even over millions;
+                                // the number beside it can be dragged slowly or typed
+                                ui.spacing_mut().slider_width = (ui.available_width() - 210.0).max(160.0);
+                                let slider = egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer().suffix(" matches").drag_value_speed(0.2);
+                                let tip = format!("{}\n\nMarks this many photos, best first, yellow to red. The model knows which fit better, not where fitting stops: only you can tell. All of them fit? Try more. Junk at the end? Lower it.", self.status);
+                                if ui.add(slider).on_hover_text(tip.trim_start()).changed() {
+                                    actions.reblend = true;
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if theme::button(ui, egui::Button::new("Hide these")).on_hover_text("hide these matches: they turn faint, stay where they are, and no search marks them; the chip that appears brings them back").clicked() {
+                                        actions.hide = true;
+                                    }
+                                });
                             }
-                            ui.add_space(-ui.spacing().item_spacing.x + 2.0);
-                            if ui.add(egui::Button::new("×")).on_hover_text("show these photos again").clicked() {
-                                actions.unhide = Some((k, false));
+                        });
+                    } else if !self.status.is_empty() {
+                        // what happened, when there are no results to show it with (searching…, an error, what was hidden)
+                        ui.add_space(4.0);
+                        ui.label(theme::muted(&self.status));
+                    }
+
+                    // the hidden searches, opened from the badge in the box: a chip each
+                    if let Some(m) = self.map.as_ref().filter(|_| chips) {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for (k, h) in m.hidden.iter().enumerate() {
+                                // the chip takes the search back into the box; its cross just brings the photos back
+                                let chip = egui::Button::new(format!("{} ({})", h.what, h.photos.len())).wrap_mode(egui::TextWrapMode::Extend);
+                                if ui.add(chip).on_hover_text("search this again, to change it and hide again (its photos come back meanwhile)").clicked() {
+                                    actions.unhide = Some((k, true));
+                                }
+                                ui.add_space(-ui.spacing().item_spacing.x + 2.0);
+                                if ui.add(egui::Button::new("×")).on_hover_text("show these photos again").clicked() {
+                                    actions.unhide = Some((k, false));
+                                }
+                                ui.add_space(6.0);
                             }
-                            ui.add_space(6.0);
-                        }
-                    });
-                }
+                        });
+                    }
 
-                // the empty box, clicked in: how to search
-                if focused && self.search.trim().is_empty() && self.photos.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(theme::muted(
-                        "Describe what you want in a short phrase: \"woman on a bike in winter\". Use NOT in capitals to push things down: \
-                         \"street at night NOT cars\". Or drop in a photo to find ones like it.\n\
-                         Good at: things, places, scenes, light, weather, mood, style. Bad at: counting, left and right, who someone is.",
-                    ));
-                }
+                    // the empty box, clicked in: how to search
+                    if tips {
+                        ui.add_space(6.0);
+                        ui.label(theme::muted(
+                            "Describe what you want in a short phrase: \"woman on a bike in winter\". Use NOT in capitals to push things down: \
+                             \"street at night NOT cars\". Or drop in a photo to find ones like it.\n\
+                             Good at: things, places, scenes, light, weather, mood, style. Bad at: counting, left and right, who someone is.",
+                        ));
+                    }
 
-                // one photo searched for: that more can join it, and when that helps
-                if self.photos.len() == 1 {
-                    ui.add_space(4.0);
-                    ui.label(theme::muted(
-                        "One photo brings everything in it: the background, the light, the colours. To find one thing (a place, an object, a style), \
-                         add more photos of it, the more different the better: drop them here, or right-click a photo and Add to search. \
-                         It doesn't recognise faces: a person is found by what they wear and where they are.",
-                    ));
-                }
+                    // one photo searched for: that more can join it, and when that helps
+                    if self.photos.len() == 1 {
+                        ui.add_space(4.0);
+                        ui.label(theme::muted(
+                            "One photo brings everything in it: the background, the light, the colours. To find one thing (a place, an object, a style), \
+                             add more photos of it, the more different the better: drop them here, or right-click a photo and Add to search. \
+                             It doesn't recognise faces: a person is found by what they wear and where they are.",
+                        ));
+                    }
+                });
             });
         });
 
