@@ -285,6 +285,8 @@ struct Viewer {
     ideas: suggest::Suggest,
     /// The Hidden line is open: a chip for each hidden search.
     hidden_open: bool,
+    /// Where photos searched for are on the map (None: not on it), found when first pointed at; emptied when a map opens.
+    spots: std::collections::HashMap<PathBuf, Option<usize>>,
     /// The runtime libraries: what is installed and the install under way.
     runtime: manager::Manager,
     store: modelstore::ModelStore,
@@ -360,6 +362,7 @@ impl Viewer {
             search: String::new(),
             ideas: suggest::Suggest::new(),
             hidden_open: false,
+            spots: std::collections::HashMap::new(),
             engine,
             asked: Vec::new(),
             answers: Vec::new(),
@@ -428,6 +431,7 @@ impl Viewer {
         self.engine.want(data.manifest.model()); // load the map's model now, so that the first search is quick
         let map_points = data.points.clone();
         let from = data.points.iter().map(|p| [p.x, p.y, 1.0, 0.0]).collect();
+        self.spots.clear();
         self.map = Some(OpenMap {
             path,
             data,
@@ -1384,6 +1388,9 @@ impl Viewer {
         if let Some(i) = actions.add_like {
             self.ask_like(i, true);
         }
+        if let Some(i) = actions.show_photo {
+            self.go_to_photo(i);
+        }
         if let Some(k) = actions.drop_photo {
             let _ = self.photos.remove(k);
             self.ask();
@@ -1875,16 +1882,27 @@ impl Viewer {
                         let cross = if clearable { 26.0 + ui.spacing().item_spacing.x } else { 0.0 } + badge_w;
                         if !self.photos.is_empty() {
                             // a search is photos or words, never both: while photos are the search they take the place of the words
-                            for (k, (_, tex)) in self.photos.iter().enumerate() {
+                            for (k, (path, tex)) in self.photos.iter().enumerate() {
                                 let image = egui::Image::new((tex.id(), egui::vec2(26.0 * tex.aspect_ratio(), 26.0))).corner_radius(4);
                                 let thumb = ui.add(image.sense(egui::Sense::click()));
-                                // under the mouse: darkened, with a cross, as clicking takes it out
-                                if thumb.hovered() {
-                                    ui.painter().rect_filled(thumb.rect, 4.0, egui::Color32::from_black_alpha(150));
-                                    ui.painter().text(thumb.rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(20.0), egui::Color32::WHITE);
+                                // a click goes to it on the map; under the mouse, a small cross in its corner takes it out
+                                let corner = egui::Rect::from_center_size(thumb.rect.right_top() + egui::vec2(-5.0, 5.0), egui::vec2(13.0, 13.0));
+                                let out = ui.interact(corner, thumb.id.with("out"), egui::Sense::click());
+                                if thumb.hovered() || out.hovered() {
+                                    let fill = if out.hovered() { theme::DANGER } else { egui::Color32::from_black_alpha(200) };
+                                    ui.painter().circle_filled(corner.center(), 6.5, fill);
+                                    let (c, r) = (corner.center(), 2.5);
+                                    let stroke = egui::Stroke::new(1.4, egui::Color32::WHITE);
+                                    ui.painter().line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], stroke);
+                                    ui.painter().line_segment([c + egui::vec2(-r, r), c + egui::vec2(r, -r)], stroke);
                                 }
-                                if thumb.on_hover_text("take it out of the search").clicked() {
+                                let spot = if thumb.hovered() { *self.spots.entry(path.clone()).or_insert_with(|| self.map.as_ref().and_then(|m| find_photo(&m.data, path))) } else { None };
+                                if out.on_hover_text("take it out of the search").clicked() {
                                     actions.drop_photo = Some(k);
+                                } else if thumb.hovered() && spot.is_none() {
+                                    thumb.on_hover_text("not on this map: dropped in or pasted");
+                                } else if thumb.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("go to it on the map").clicked() {
+                                    actions.show_photo = spot;
                                 }
                             }
                             ui.add_space((ui.available_width() - cross).max(0.0));
@@ -1972,8 +1990,11 @@ impl Viewer {
                     return;
                 }
                 ui.add_space(6.0);
+                // as wide as the box: the card's margins (10 each side) and its stroke come out of the width, not added to it
+                let inner = ui.available_width() - 2.0 * 10.0 - 2.0;
                 theme::card().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                    ui.set_width(inner);
+                    ui.set_max_width(inner);
                     if found > 0 {
                         ui.horizontal(|ui| {
                             let step = |ui: &mut egui::Ui, text: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(text).size(18.0)).min_size(egui::vec2(28.0, 28.0))).on_hover_text(tip).clicked();
@@ -1996,7 +2017,12 @@ impl Viewer {
                                 let most = self.map.as_ref().map_or(1000.0, |m| m.flags.len() as f32).max(11.0);
                                 // as wide as the line allows (Hide these keeps its room), so a pixel moves it little even over millions;
                                 // the number beside it can be dragged slowly or typed
-                                ui.spacing_mut().slider_width = (ui.available_width() - 210.0).max(160.0);
+                                // the line's other parts measured, so it fits the card exactly: the number beside the slider (at its widest)
+                            // and Hide these
+                            let text_w = |ui: &egui::Ui, t: String| egui::WidgetText::from(t).into_galley(ui, None, f32::INFINITY, egui::TextStyle::Button).size().x + 2.0 * ui.spacing().button_padding.x;
+                            let value_w = text_w(ui, format!("{} matches", most as u64)).max(ui.spacing().interact_size.x);
+                            let hide_w = text_w(ui, "Hide these".into());
+                            ui.spacing_mut().slider_width = (ui.available_width() - value_w - hide_w - 3.0 * ui.spacing().item_spacing.x - 2.0).max(60.0);
                                 let slider = egui::Slider::new(&mut self.wanted, 10.0..=most).logarithmic(true).integer().suffix(" matches").drag_value_speed(0.2);
                                 let tip = format!("{}\n\nMarks this many photos, best first, yellow to red. The model knows which fit better, not where fitting stops: only you can tell. All of them fit? Try more. Junk at the end? Lower it.", self.status);
                                 if ui.add(slider).on_hover_text(tip.trim_start()).changed() {
@@ -2247,6 +2273,8 @@ struct UiActions {
     add_like: Option<usize>,
     /// A photo taken out of the search (its place in `photos`).
     drop_photo: Option<usize>,
+    /// A photo searched for, by its place on the map: go to it.
+    show_photo: Option<usize>,
     /// "Details": the photo and where the menu was.
     details: Option<(usize, egui::Pos2)>,
     /// A menu item that needs nothing more was chosen: the menu closes.
@@ -2364,6 +2392,12 @@ const MAX_PHOTO_WORLD: f32 = data::WORLD / 8.0;
 const PHOTO_TYPES: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "bmp"];
 
 /// The file a text names, if it is a photo: plain, in quotes, with escaped spaces, or as file://.
+/// Which photo of the map is this file, if any (one pass over them all, for a click).
+fn find_photo(data: &data::MapData, path: &std::path::Path) -> Option<usize> {
+    let rel = path.strip_prefix(&data.bundle).ok();
+    data.photos.iter().position(|p| if p.file.is_empty() { std::path::Path::new(&p.source) == path } else { rel.is_some_and(|r| r == std::path::Path::new(&p.file)) })
+}
+
 fn photo_path(text: &str) -> Option<PathBuf> {
     let t = text.trim().trim_matches(|c| c == '\'' || c == '"').replace("\\ ", " ");
     let path = PathBuf::from(t.strip_prefix("file://").unwrap_or(&t));
