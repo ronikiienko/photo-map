@@ -15,8 +15,8 @@ pub const ACCENT: Color32 = Color32::from_rgb(124, 164, 255);
 pub const OK: Color32 = Color32::from_rgb(110, 205, 140);
 pub const TEXT: Color32 = Color32::from_rgb(232, 235, 242);
 pub const MUTED: Color32 = Color32::from_rgb(140, 147, 163);
-/// Cards sit on the map, so they are a little see-through.
-pub const CARD: Color32 = Color32::from_rgba_premultiplied(17, 19, 25, 226);
+/// Cards sit on the map; solid, as text over a photo seen through them can't be read.
+pub const CARD: Color32 = Color32::from_rgb(17, 19, 25);
 pub const CARD_STROKE: Color32 = Color32::from_rgba_premultiplied(40, 44, 54, 255);
 const CONTROL: Color32 = Color32::from_rgb(38, 42, 52);
 const CONTROL_HOVER: Color32 = Color32::from_rgb(52, 58, 73);

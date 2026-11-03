@@ -34,6 +34,7 @@ mod reuse;
 mod photo;
 mod places;
 mod query;
+mod script;
 mod search;
 mod searchbar;
 mod siglip;
@@ -320,6 +321,14 @@ struct Viewer {
     last_frame: Instant,
     frame_times: Vec<f32>,
     frames: u64,
+    /// PHOTO_MAP_SCRIPT (script.rs): the steps being run, the keys and letters they type for egui, and the frame to save.
+    script: Option<script::Script>,
+    /// How many photos the search showing can mark (not hidden, passing its filters): the most its slider goes to.
+    can_match: usize,
+    /// F3: how fast frames are drawn and what is loaded, in the corner.
+    debug: bool,
+    script_events: Vec<egui::Event>,
+    shot: Option<PathBuf>,
 }
 
 impl Viewer {
@@ -410,6 +419,11 @@ impl Viewer {
             last_frame: Instant::now(),
             frame_times: Vec::new(),
             frames: 0,
+            script: script::Script::from_env(),
+            debug: false,
+            can_match: 0,
+            script_events: Vec::new(),
+            shot: None,
         };
         if let Some(path) = first {
             viewer.open(path);
@@ -986,6 +1000,7 @@ impl Viewer {
         let out = |i: usize| m.hidden_mask[i] || self.names.as_ref().is_some_and(|p| !p[i]);
         let score: Vec<f32> = (0..n).map(|i| if out(i) { f32::NEG_INFINITY } else { m.sims[i] }).collect();
         let shown = (0..n).filter(|&i| !out(i)).count();
+        self.can_match = shown;
         if shown == 0 && self.names.is_some() {
             m.flags.fill(0);
             m.flags_dirty = true;
@@ -1165,6 +1180,10 @@ impl Viewer {
     fn key(&mut self, key: KeyCode, down: bool) {
         if let (true, KeyCode::F11) = (down, key) {
             return self.toggle_fullscreen();
+        }
+        if let (true, KeyCode::F3) = (down, key) {
+            self.debug = !self.debug;
+            return;
         }
         if self.page != Page::Viewer {
             return;
@@ -1355,6 +1374,8 @@ impl Viewer {
         if self.frame_times.len() > 60 {
             self.frame_times.remove(0);
         }
+        self.run_script();
+        self.camera.top = 84.0 * self.window.scale_factor() as f32; // the top bar, and the heading over the matches: things fitted stay below
         self.camera.update(dt, self.cursor, self.keys);
         self.lens.update(dt, self.cursor);
         self.frames += 1;
@@ -1459,9 +1480,52 @@ impl Viewer {
         }
         self.draw_ui(&mut encoder, &view);
         self.gpu.queue.submit([encoder.finish()]);
+        if let Some(path) = self.shot.take() {
+            script::save_frame(&self.gpu.device, &self.gpu.queue, &frame.texture, self.gpu.config.format, &path);
+        }
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
         self.window.request_redraw();
+    }
+
+    /// The script's step for this frame (script.rs), done as if by hand: through the same events the window sends.
+    fn run_script(&mut self) {
+        let open = self.map.is_some() && self.opening.is_none();
+        let searched = self.asked.iter().all(Option::is_none) && !self.status.starts_with("searching") && !self.status.starts_with("loading the search model");
+        let Some(step) = self.script.as_mut().and_then(|s| s.next(open, searched)) else { return };
+        let ppp = self.window.scale_factor();
+        let device_id = winit::event::DeviceId::dummy();
+        let at = |x: f32, y: f32| winit::dpi::PhysicalPosition::new(x as f64 * ppp, y as f64 * ppp);
+        match step {
+            script::Step::Size(w, h) => {
+                let _ = self.window.request_inner_size(winit::dpi::LogicalSize::new(w, h));
+            }
+            script::Step::Open(name) => self.open(data_root().join("maps").join(format!("{name}.photomap"))),
+            script::Step::Move(x, y) => self.event(WindowEvent::CursorMoved { device_id, position: at(x, y) }),
+            script::Step::Click(x, y, button) => {
+                self.event(WindowEvent::CursorMoved { device_id, position: at(x, y) });
+                self.event(WindowEvent::MouseInput { device_id, state: ElementState::Pressed, button });
+                self.event(WindowEvent::MouseInput { device_id, state: ElementState::Released, button });
+            }
+            script::Step::Scroll(lines) => {
+                self.event(WindowEvent::MouseWheel { device_id, delta: MouseScrollDelta::LineDelta(0.0, lines), phase: winit::event::TouchPhase::Moved });
+            }
+            script::Step::Focus => self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box"))),
+            script::Step::Type(text) => self.script_events.push(egui::Event::Text(text)),
+            script::Step::Key(key) => {
+                for pressed in [true, false] {
+                    self.script_events.push(egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE });
+                }
+            }
+            script::Step::AppKey(key) => {
+                self.key(key, true);
+                self.key(key, false);
+            }
+            script::Step::Shot(name) => self.shot = self.script.as_ref().map(|s| s.dir.join(format!("{name}.png"))),
+            script::Step::Maps => self.go_to_maps(),
+            // SAFETY: `_exit` only ends the process (as main does at the end)
+            script::Step::Quit => unsafe { libc::_exit(0) },
+        }
     }
 
     /// A map being opened: one card in the middle.
@@ -1487,7 +1551,8 @@ impl Viewer {
     }
 
     fn draw_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        let raw = self.ui.state.take_egui_input(&self.window);
+        let mut raw = self.ui.state.take_egui_input(&self.window);
+        raw.events.append(&mut self.script_events);
         let mut actions = UiActions::default();
         let ctx = self.ui.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| self.build_ui(ui, &mut actions));
@@ -1615,7 +1680,10 @@ impl Viewer {
         let ppp = ctx.pixels_per_point();
         let screen = ctx.content_rect();
         let smooth = |(a, b): (f32, f32), x: f32| ((x - a) / (b - a)).clamp(0.0, 1.0);
-        let mut taken: Vec<egui::Rect> = Vec::new();
+        // the boxes over the map (last frame's): no name is drawn under them
+        let mut taken: Vec<egui::Rect> = ["top", "where", "look", "help", "help-card"].iter().filter_map(|id| ctx.memory(|mem| mem.area_rect(egui::Id::new(*id)))).collect();
+        // a name already drawn near here (a finer region often has its parent's name): once is enough
+        let mut names: Vec<(&str, egui::Pos2)> = Vec::new();
         for (level, labels) in m.data.regions.levels.iter().enumerate() {
             // coarsest in big gold letters, then white, each finer level a little smaller and greyer
             let size = (26.0 - 3.0 * level as f32).max(13.0);
@@ -1635,10 +1703,13 @@ impl Viewer {
                 let at = self.camera.to_screen(Vec2::new(l.x, l.y)) / ppp;
                 let galley = painter.layout_no_wrap(l.name.clone(), egui::FontId::proportional(size), colour);
                 let rect = egui::Rect::from_center_size(egui::pos2(at.x, at.y), galley.size());
-                if !screen.intersects(rect) || taken.iter().any(|t| t.intersects(rect.expand(6.0))) || self.under_lens(rect, ppp) {
+                let near = 2.5 * size * l.name.chars().count().max(4) as f32;
+                let again = names.iter().any(|(n, p)| *n == l.name && p.distance(rect.center()) < near);
+                if again || !screen.intersects(rect) || taken.iter().any(|t| t.intersects(rect.expand(6.0))) || self.under_lens(rect, ppp) {
                     continue;
                 }
                 taken.push(rect);
+                names.push((&l.name, rect.center()));
                 if alpha > 0.3 {
                     shown.push((rect, level, index));
                 }
@@ -2014,7 +2085,8 @@ impl Viewer {
             found: m.map_or(0, |m| m.order.len()),
             at: m.and_then(|m| m.at),
             on_path: m.is_some_and(|m| m.trail.is_some()),
-            most: m.map_or(1000.0, |m| m.flags.len() as f32),
+            most: self.can_match as f32,
+            all_marked: self.names_only,
             hidden: m.map_or(Vec::new(), |m| m.hidden.iter().map(|h| (h.what.clone(), h.photos.len())).collect()),
             data: m.map(|m| &m.data),
         };
@@ -2033,14 +2105,15 @@ impl Viewer {
             egui::Area::new("help-card".into()).anchor(egui::Align2::LEFT_BOTTOM, [12.0, -52.0]).show(&ctx, |ui| {
                 {
                     theme::card().show(ui, |ui| {
-                        ui.set_max_width(400.0);
+                        ui.set_width(470.0); // the text wraps as wide as the keys below it
                         ui.label(egui::RichText::new("How the map works").size(17.0));
                         ui.add_space(4.0);
                         ui.label(theme::muted(
                             "Every photo is turned into numbers that describe what it shows, and photos that look alike are placed close together. \
                              Zoom in and similar photos sit side by side; the names mark regions of the map. \
                              Search compares your words, or photos you drop in (words or photos, not both), with every photo and highlights the best matches. \
-                             NOT in capitals pushes things down: \"street NOT cars\".",
+                             NOT in capitals pushes things down: \"street NOT cars\". Filters (+ filter in the box) keep only photos of a name, camera, \
+                             date or place.",
                         ));
                         ui.add_space(8.0);
                         egui::Grid::new("keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -2071,7 +2144,8 @@ impl Viewer {
             });
         }
         let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len().max(1) as f32;
-        if let Some(m) = &self.map {
+        // how fast it draws and what it has loaded: for working on the app, F3 shows it
+        if let Some(m) = self.map.as_ref().filter(|_| self.debug) {
             egui::Area::new("fps".into()).anchor(egui::Align2::RIGHT_BOTTOM, [-14.0, -14.0]).show(&ctx, |ui| {
                 if let Some(i) = self.hovered.filter(|&i| i < m.data.n()) {
                     let (loaded, original) = m.streamer.loaded_px(i);
@@ -2092,9 +2166,10 @@ impl Viewer {
 
         if let (Some((photo, at)), Some(m)) = (self.menu, &self.map) {
             egui::Area::new("photo menu".into()).fixed_pos(at + egui::vec2(4.0, 4.0)).order(egui::Order::Foreground).show(&ctx, |ui| {
-                theme::card().inner_margin(egui::Margin::symmetric(8, 8)).show(ui, |ui| {
-                    ui.set_max_width(260.0);
-                    ui.label(&m.data.photos[photo].title);
+                theme::card().inner_margin(egui::Margin::symmetric(8, 8)).show(ui, |ui| ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                    // one column of buttons as wide as each other, their words at the left, like a menu
+                    ui.set_width(210.0);
+                    ui.add(egui::Label::new(theme::muted(&m.data.photos[photo].title)).truncate());
                     ui.add_space(2.0);
                     match self.path_from {
                         Some(from) if from != photo => {
@@ -2132,7 +2207,7 @@ impl Viewer {
                     if theme::button(ui, egui::Button::new("Details")).on_hover_text("file, date taken, camera, place").clicked() {
                         actions.details = Some((photo, at));
                     }
-                });
+                }));
             });
         }
         if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.add_like.is_some() || actions.details.is_some() || actions.done {

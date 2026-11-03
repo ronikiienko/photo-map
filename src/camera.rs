@@ -54,6 +54,8 @@ pub struct Camera {
     /// Screen pixels per world unit.
     pub scale: f32,
     pub viewport: Vec2,
+    /// Screen pixels at the top that the bar covers (the search box, the menus): what is fitted stays below them.
+    pub top: f32,
     pan: Pan,
     drag_moved: Vec2,
     zoom_velocity: f32,
@@ -68,6 +70,7 @@ pub struct Camera {
 impl Camera {
     pub fn new(viewport: Vec2) -> Self {
         Self {
+            top: 0.0,
             center: Vec2::ZERO,
             scale: 1.0,
             viewport,
@@ -93,7 +96,9 @@ impl Camera {
     /// Scale and centre that show the world box `min..max` with some margin.
     pub fn fit(&self, min: Vec2, max: Vec2) -> (Vec2, f32) {
         let size = (max - min).max(Vec2::splat(1.0)) + Vec2::splat(400.0);
-        ((min + max) * 0.5, (self.viewport / size).min_element())
+        // in the screen below the bar: the middle moves down by half of it
+        let scale = ((self.viewport - Vec2::new(0.0, self.top)) / size).min_element();
+        ((min + max) * 0.5 - Vec2::new(0.0, self.top * 0.5 / scale), scale)
     }
 
     pub fn jump(&mut self, (center, scale): (Vec2, f32)) {

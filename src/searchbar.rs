@@ -34,7 +34,10 @@ pub struct Bar<'a> {
     pub found: usize,
     pub at: Option<usize>,
     pub on_path: bool,
+    /// How many photos can match (not hidden, passing the filters), and whether every one of them is marked (the filters are
+    /// the whole search).
     pub most: f32,
+    pub all_marked: bool,
     /// The hidden searches: what each was and how many photos it hid.
     pub hidden: Vec<(String, usize)>,
     /// The open map's photos, to find a photo searched for on it.
@@ -255,11 +258,17 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                         for k in 0..=bar.filters.len() {
                             if editing == Some(k) {
                                 let e = bar.filter_edit.as_mut().unwrap();
-                                fits(ui, chip_width(ui, chip_text(e.key, e.not, "")) + 130.0 + 6.0);
-                                pill(ui.visuals(), true).show(ui, |ui| ui.horizontal(|ui| {
+                                fits(ui, chip_width(ui, chip_text(e.key, false, "")) + 40.0 + 130.0 + 6.0);
+                                chip(ui, true, |ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
-                                    // its name, which a click turns to NOT and back; the values after it
-                                    let head = ui.add(egui::Label::new(chip_text(e.key, e.not, "")).wrap_mode(egui::TextWrapMode::Extend).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("click: leave these out instead (NOT), or back");
+                                    // its name, a NOT button (lit when on: leave these out), then the values
+                                    ui.add(egui::Label::new(chip_text(e.key, false, "")).wrap_mode(egui::TextWrapMode::Extend));
+                                    let not = egui::RichText::new("NOT").size(11.5).color(if e.not { egui::Color32::WHITE } else { theme::MUTED });
+                                    let not = egui::Button::new(not).fill(if e.not { theme::DANGER } else { ui.visuals().extreme_bg_color }).min_size(egui::vec2(0.0, 20.0));
+                                    let head = ui.scope(|ui| {
+                                        ui.spacing_mut().button_padding = egui::vec2(6.0, 1.0);
+                                        ui.add(not)
+                                    }).inner.on_hover_text(if e.not { "leaving these out: click to keep only these instead" } else { "click to leave these out instead of keeping only these" });
                                     if head.clicked() {
                                         e.not = !e.not;
                                         ui.memory_mut(|m| m.request_focus(egui::Id::new("filter-edit")));
@@ -272,12 +281,12 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                                     } else if edit.lost_focus() && !head.hovered() {
                                         actions.filter_done = true;
                                     }
-                                }));
+                                });
                                 continue;
                             }
                             let Some(f) = bar.filters.get(k) else { continue };
                             fits(ui, chip_width(ui, chip_text(f.key, f.not, &f.value_text())));
-                            pill(ui.visuals(), false).show(ui, |ui| ui.horizontal(|ui| {
+                            chip(ui, false, |ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 let tip = if f.not { "photos this picks are left out; click to change it" } else { "only photos this picks can match; click to change it" };
                                 let text = ui.add(egui::Label::new(chip_text(f.key, f.not, &f.value_text())).wrap_mode(egui::TextWrapMode::Extend).sense(egui::Sense::click()));
@@ -287,7 +296,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                                 if small_cross(ui).on_hover_text("take this filter out").clicked() {
                                     actions.drop_filter = Some(k);
                                 }
-                            }));
+                            });
                         }
                     });
                     if found > 0 || !bar.status.is_empty() || chips || tips {
@@ -306,9 +315,10 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                         if let Some(k) = at {
                             ui.label(format!("{} of", k + 1));
                         }
-                        if on_path {
-                            ui.label(format!("{found} photos"));
-                            if !bar.status.is_empty() {
+                        if on_path || bar.all_marked || bar.most <= 10.0 {
+                            // a path, the filters alone, or no more photos able to match than are marked: nothing to choose
+                            ui.label(format!("{found} {}", if found == 1 { "photo" } else { "photos" }));
+                            if on_path && !bar.status.is_empty() {
                                 ui.label(theme::muted(bar.status));
                             }
                         } else {
@@ -353,7 +363,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             job.append(what, 0.0, egui::TextFormat::simple(font.clone(), ui.visuals().text_color()));
                             job.append(&n.to_string(), 6.0, egui::TextFormat::simple(font, theme::MUTED));
                             fits(ui, chip_width(ui, job.clone()));
-                            pill(ui.visuals(), false).show(ui, |ui| ui.horizontal(|ui| {
+                            chip(ui, false, |ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 let text = ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend).sense(egui::Sense::click()));
                                 if text.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("search this again, to change it and hide again (its photos come back meanwhile)").clicked() {
@@ -362,7 +372,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                                 if small_cross(ui).on_hover_text("show these photos again").clicked() {
                                     actions.unhide = Some((k, false));
                                 }
-                            }));
+                            });
                         }
                     });
                 }
@@ -394,6 +404,21 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
             });
         });
     });
+}
+
+/// A chip in a row: `add` puts its text and cross in one pill, which lights up under the mouse as a button does (a click on its
+/// text changes it). The one being written has a ring instead.
+fn chip<R>(ui: &mut egui::Ui, editing: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let mut prepared = pill(ui.visuals(), editing).begin(ui);
+    let inner = prepared.content_ui.horizontal(add).inner;
+    let response = prepared.allocate_space(ui);
+    if !editing && ui.rect_contains_pointer(response.rect) {
+        let hovered = &ui.visuals().widgets.hovered;
+        prepared.frame.fill = hovered.weak_bg_fill;
+        prepared.frame.stroke = hovered.bg_stroke;
+    }
+    prepared.paint(ui);
+    inner
 }
 
 /// A chip: one rounded pill, its text then a small cross inside it; the one being written has a ring.
@@ -519,6 +544,7 @@ mod shots {
                     at: s.at,
                     on_path: false,
                     most: 19_000.0,
+                    all_marked: false,
                     hidden: s.hidden.clone(),
                     data: None,
                 };
@@ -545,6 +571,8 @@ mod shots {
         let results = || State { search: "shopping cart".into(), found: 100, at: Some(0), status: "shopping cart: similarity 0.12 to 0.25".into(), ..state() };
         shot("3-results", results(), None);
         shot("4-chips", State { filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi"), filter("year:2016..2018")], ..results() }, None);
+        shot("4b-chip-hovered", State { filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi")], ..results() }, Some(egui::pos2(100.0, 71.0)));
+        shot("5b-editing-a-not-chip", State { filters: vec![filter("place:istanbul")], filter_edit: Some(FilterEdit { at: 1, key: Key::Camera, not: true, value: "pixel".into() }), ..results() }, None);
         shot("5-editing-a-chip", State { filters: vec![filter("place:istanbul")], filter_edit: Some(FilterEdit { at: 1, key: Key::Date, not: false, value: String::new() }), ..results() }, None);
         shot("6-filters-only", State { search: String::new(), filters: vec![filter("year:2019")], status: "date:2019: 2,412 photos".into(), ..results() }, None);
         shot("7-photos", State { photos: 3, search: String::new(), filters: vec![filter("place:lviv")], ..results() }, None);

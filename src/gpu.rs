@@ -43,7 +43,12 @@ impl Gpu {
         // non-sRGB target: the atlas holds sRGB bytes and they are passed through unchanged
         let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // a scripted run (script.rs) copies frames out to save them
+            usage: if std::env::var_os("PHOTO_MAP_SCRIPT").is_some() && caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+            },
             format,
             width: size.width.max(1),
             height: size.height.max(1),

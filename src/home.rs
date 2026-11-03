@@ -166,12 +166,15 @@ impl Home {
         egui::Area::new("maps-page".into()).anchor(Align2::LEFT_TOP, [0.0, 0.0]).order(egui::Order::Middle).show(ctx, |ui| {
             let screen = ctx.content_rect();
             let width = (screen.width() - 64.0).clamp(320.0, 1100.0);
+            // as wide as a whole row of cards, so that the title, the cards and what is under them line up
+            let per_row = ((width + 12.0) / (COVER + 12.0)).floor().max(1.0);
+            let width = if lib.maps.is_empty() { width } else { per_row * COVER + (per_row - 1.0) * 12.0 };
             ui.set_width(screen.width());
             ui.set_height(screen.height());
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(32.0);
-                    ui.allocate_ui(vec2(width, 0.0), |ui| {
+                    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
                         ui.set_width(width);
                         self.page(ui, lib, builds, resume, ready_msg, &mut actions);
                     });
@@ -264,6 +267,9 @@ impl Home {
 
         ui.add_space(8.0);
         let mut on = resume;
+        // the box drawn with an edge: the theme's unticked box is almost the page's colour
+        ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme::MUTED);
+        ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme::TEXT);
         if ui.checkbox(&mut on, "Continue unfinished maps when the app starts").changed() {
             actions.push(Action::Resume(on));
         }
@@ -433,7 +439,9 @@ impl Home {
                     }
                 }
                 p.text(rect.min + vec2(12.0, COVER + 6.0), Align2::LEFT_TOP, &e.name, egui::FontId::proportional(15.0), theme::TEXT);
-                let detail = if e.created.is_empty() { format!("{} photos", thousands(e.photos)) } else { format!("{} photos · {}", thousands(e.photos), e.created) };
+                // the day it was made (the time of day would run past the card's edge on a big map)
+                let day = e.created.get(..10).unwrap_or(&e.created);
+                let detail = if day.is_empty() { format!("{} photos", thousands(e.photos)) } else { format!("{} photos · {day}", thousands(e.photos)) };
                 p.text(rect.min + vec2(12.0, COVER + 28.0), Align2::LEFT_TOP, detail, egui::FontId::proportional(12.0), theme::MUTED);
                 // the model that made its vectors (it is the one that searches it)
                 let model = crate::models::spec(&e.model).map_or("unknown model", |s| s.label);
@@ -455,7 +463,7 @@ impl Home {
                         x += w;
                     }
                 }
-                let details = egui::Rect::from_min_size(rect.min + vec2(COVER - 62.0, COVER + 62.0), vec2(56.0, 20.0));
+                let details = egui::Rect::from_min_size(rect.min + vec2(COVER - 62.0, COVER + 65.5), vec2(56.0, 20.0)); // on the size's line
                 let more = ui.interact(details, ui.id().with(("details", &e.path)), Sense::click());
                 ui.painter().text(details.right_center() - vec2(4.0, 0.0), Align2::RIGHT_CENTER, "Details", egui::FontId::proportional(12.0), if more.hovered() { theme::ACCENT } else { theme::MUTED });
                 if more.clicked() {
