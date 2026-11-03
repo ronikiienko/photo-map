@@ -1,7 +1,8 @@
 //! A map bundle, plus a spatial grid for "which photo is under the mouse". Bundles are made in Python
 //! (src/photomap.py: maps/<name>.photomap/):
 //!     manifest.json   name, photo count
-//!     photos.json     per photo: file (originals/NNNNNN.ext if copied into the map, else empty), source, width, height, title, caption (optional), meta (any strings, for people to read)
+//!     photos.json     per photo: file (originals/NNNNNN.ext if copied into the map, else empty), source, width, height, title, caption (optional), meta (any strings, for people to read),
+//!                     facts (optional: camera, taken, place from its EXIF, for search's camera: date: place:)
 //!     originals/      the photos copied into the map (maps made before kept links to all of them here); photo i = position i in photos.json
 //!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
 //!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
@@ -10,7 +11,7 @@
 //!     pages_bc7.bin   the always-loaded levels, made while the map is built (bake.rs)
 
 use memmap2::Mmap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -112,6 +113,23 @@ pub struct Photo {
     /// Whatever the image file said about itself: description, date taken, camera, location...
     #[serde(default)]
     pub meta: serde_json::Map<String, serde_json::Value>,
+    /// What its EXIF says that search can pick by (boxed: most photos of a big map have none, and this keeps them small).
+    #[serde(default)]
+    pub facts: Option<Box<Facts>>,
+}
+
+/// A photo's camera, when it was taken and where, read from its EXIF when the map was made (files::facts). Empty: not known.
+#[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+pub struct Facts {
+    /// "Google Pixel 7", "Canon EOS 550D".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub camera: String,
+    /// "2019-07-04 14:00" (local time, as the camera had it).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub taken: String,
+    /// The nearest town to where it was taken: "Lviv, Lviv Oblast, Ukraine" (places.rs).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub place: String,
 }
 
 impl Photo {

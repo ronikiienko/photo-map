@@ -609,9 +609,28 @@ fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
             Ok(()) => {}
         }
     }
+    // what each photo's EXIF says that search picks by: camera, when, where (files::facts; the header only)
+    ctx.progress(0, total, "reading when and where the photos were taken");
+    let done = AtomicUsize::new(0);
+    let facts: Option<Vec<Option<Box<crate::data::Facts>>>> = found
+        .par_iter()
+        .map(|f| {
+            if ctx.paused() {
+                return None;
+            }
+            let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+            if d % 256 == 0 {
+                ctx.set_done(d);
+            }
+            Some(crate::files::facts(&f.src))
+        })
+        .collect();
+    let Some(mut facts) = facts else { return Ok(Flow::Paused) };
     // photos.json's entries (keys in this order, as the file has always had them), borrowing the paths rather than copying them
     #[derive(Serialize)]
     struct Entry<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        facts: Option<Box<crate::data::Facts>>,
         file: String,
         height: u32,
         meta: serde_json::Map<String, serde_json::Value>,
@@ -623,6 +642,7 @@ fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         .iter()
         .enumerate()
         .map(|(i, f)| Entry {
+            facts: facts[i].take(),
             file: if copy_photos { original_name(i, &f.src) } else { String::new() },
             height: f.height,
             meta: serde_json::Map::new(),

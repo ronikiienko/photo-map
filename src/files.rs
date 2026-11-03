@@ -127,12 +127,7 @@ fn from_exif(exif: &exif::Exif) -> Vec<(String, String)> {
     if let Some(date) = date(Tag::DateTimeOriginal).or_else(|| date(Tag::DateTime)) {
         lines.push(("Taken".into(), date));
     }
-    let camera = match (text(Tag::Make), text(Tag::Model)) {
-        (Some(make), Some(model)) if model.starts_with(&make) => Some(model),
-        (Some(make), Some(model)) => Some(format!("{make} {model}")),
-        (a, b) => a.or(b),
-    };
-    if let Some(camera) = camera {
+    if let Some(camera) = camera(exif) {
         lines.push(("Camera".into(), camera));
     }
     if let Some(lens) = text(Tag::LensModel) {
@@ -143,6 +138,49 @@ fn from_exif(exif: &exif::Exif) -> Vec<(String, String)> {
         lines.push(("Exposure".into(), exposure.join(", ")));
     }
     lines
+}
+
+/// The camera, by its maker and model ("Canon EOS 550D"; the maker once if the model already says it).
+fn camera(exif: &exif::Exif) -> Option<String> {
+    use exif::{In, Tag};
+    // the raw text: some cameras pad it with empty entries and zeros ("DJI", "", "", ...), which the display form keeps
+    let text = |tag: Tag| match &exif.get_field(tag, In::PRIMARY)?.value {
+        exif::Value::Ascii(parts) => parts.iter().map(|p| String::from_utf8_lossy(p).trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string()).find(|s| !s.is_empty()),
+        _ => None,
+    };
+    match (text(Tag::Make), text(Tag::Model)) {
+        (Some(make), Some(model)) if model.to_lowercase().starts_with(&make.to_lowercase()) => Some(model),
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        (a, b) => a.or(b),
+    }
+}
+
+/// What a photo's EXIF says that search picks by (data::Facts): its camera, when it was taken, the town nearest to where.
+/// None if the file has no EXIF or says none of these. Reads the file's header only.
+pub fn facts(path: &Path) -> Option<Box<crate::data::Facts>> {
+    use exif::{In, Tag};
+    let file = std::fs::File::open(path).ok()?;
+    let exif = exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file)).ok()?;
+    let taken = [Tag::DateTimeOriginal, Tag::DateTime].into_iter().find_map(|tag| match &exif.get_field(tag, In::PRIMARY)?.value {
+        exif::Value::Ascii(v) => v.first().and_then(|s| sortable_date(&String::from_utf8_lossy(s))),
+        _ => None,
+    });
+    let place = coordinates(&exif).and_then(|(lat, lon)| crate::places::town_at(lat, lon));
+    let facts = crate::data::Facts { camera: camera(&exif).unwrap_or_default(), taken: taken.unwrap_or_default(), place: place.unwrap_or_default() };
+    (facts != crate::data::Facts::default()).then(|| Box::new(facts))
+}
+
+/// EXIF's "2002:10:25 14:00:31" as "2002-10-25 14:00" (the date alone if there is no time), so that "2002-10" starts it.
+fn sortable_date(raw: &str) -> Option<String> {
+    let n: Vec<u32> = raw.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).filter_map(|s| s.parse().ok()).collect();
+    let (&year, &month, &day) = (n.first()?, n.get(1)?, n.get(2)?);
+    if year == 0 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(match (n.get(3), n.get(4)) {
+        (Some(h), Some(m)) if *h < 24 && *m < 60 => format!("{year:04}-{month:02}-{day:02} {h:02}:{m:02}"),
+        _ => format!("{year:04}-{month:02}-{day:02}"),
+    })
 }
 
 /// Latitude and longitude from the GPS fields (degrees, minutes, seconds; south and west negative).
@@ -190,6 +228,13 @@ mod tests {
         assert_eq!(in_words("2002:10:25 14:00:31").as_deref(), Some("October 25, 2002, 14:00"));
         assert_eq!(in_words("2006:08:01").as_deref(), Some("August 1, 2006"));
         assert_eq!(in_words("0000:00:00 00:00:00"), None);
+    }
+
+    #[test]
+    fn sortable_dates() {
+        assert_eq!(sortable_date("2002:10:25 14:00:31").as_deref(), Some("2002-10-25 14:00"));
+        assert_eq!(sortable_date("2006:08:01").as_deref(), Some("2006-08-01"));
+        assert_eq!(sortable_date("0000:00:00 00:00:00"), None);
     }
 
     #[test]

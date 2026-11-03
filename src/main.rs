@@ -113,7 +113,18 @@ struct Hidden {
     photos: Vec<usize>,
     words: String,
     searched: Vec<(PathBuf, egui::TextureHandle)>,
+    filters: Vec<query::Filter>,
     wanted: f32,
+}
+
+/// A filter chip being written or changed: its place among the filters (`filters.len()`: a new one), what it looks at, whether
+/// it leaves out (NOT), and its values as written ("pixel, redmi").
+#[derive(Clone)]
+struct FilterEdit {
+    at: usize,
+    key: query::Key,
+    not: bool,
+    value: String,
 }
 
 /// The open map: its data, its GPU side and its search.
@@ -289,6 +300,15 @@ struct Viewer {
     tips_open: bool,
     /// Where photos searched for are on the map (None: not on it), found when first pointed at; emptied when a map opens.
     spots: std::collections::HashMap<PathBuf, Option<usize>>,
+    /// The search's filters (name: camera: date: place:), chips under the box apart from its words or photos; the one being
+    /// written or changed (its place, `filters.len()` for a new one, and its text).
+    filters: Vec<query::Filter>,
+    filter_edit: Option<FilterEdit>,
+    /// Which photos the filters pass, and whether the search is only them.
+    names: Option<Vec<bool>>,
+    names_only: bool,
+    /// How much of the photos' paths every one of them shares (cut off before matching names), found at the first name: filter.
+    name_root: Option<usize>,
     /// The runtime libraries: what is installed and the install under way.
     runtime: manager::Manager,
     store: modelstore::ModelStore,
@@ -366,6 +386,11 @@ impl Viewer {
             hidden_open: false,
             tips_open: false,
             spots: std::collections::HashMap::new(),
+            filters: Vec::new(),
+            filter_edit: None,
+            names: None,
+            names_only: false,
+            name_root: None,
             engine,
             asked: Vec::new(),
             answers: Vec::new(),
@@ -424,6 +449,9 @@ impl Viewer {
         // the last map's search is over with it: its words, its photo, and what the box said it was
         self.search.clear();
         self.photos.clear();
+        self.filters.clear();
+        self.filter_edit = None;
+        self.names = None;
         self.shown.clear();
         let vectors = search::Vectors::open(&path, n, data.manifest.dim());
         let tree = tree::read(&path, n);
@@ -435,6 +463,7 @@ impl Viewer {
         let map_points = data.points.clone();
         let from = data.points.iter().map(|p| [p.x, p.y, 1.0, 0.0]).collect();
         self.spots.clear();
+        self.name_root = None;
         self.map = Some(OpenMap {
             path,
             data,
@@ -752,7 +781,62 @@ impl Viewer {
                 self.search.clear();
             }
         }
+        // filters typed in the box (camera:pixel ...) leave it for chips; they pick which photos can match, the words or photos rank them
+        if self.photos.is_empty() {
+            let (rest, found) = query::filters(&self.search);
+            if !found.is_empty() {
+                self.search = rest;
+                self.add_filters(found);
+            }
+        }
         let text = self.search.trim().to_string();
+        let rest = text.clone();
+        let filters = self.filters.clone();
+        let filters_text = filters.iter().map(query::Filter::text).collect::<Vec<_>>().join(" ");
+        self.names = None;
+        self.names_only = false;
+        if !filters.is_empty() && let Some(m) = &self.map {
+            let photos = &m.data.photos;
+            let root = *self.name_root.get_or_insert_with(|| common_root(photos.iter().map(|p| p.source.as_str())));
+            let pass: Vec<bool> = photos
+                .iter()
+                .map(|p| {
+                    let name = p.source.get(root..).unwrap_or(&p.source);
+                    filters.iter().all(|f| f.passes(name, p.facts.as_deref()))
+                })
+                .collect();
+            let hits = pass.iter().zip(&m.hidden_mask).filter(|&(&p, &h)| p && !h).count();
+            self.names = Some(pass);
+            if rest.is_empty() && self.photos.is_empty() {
+                // filters only: every photo they pass marks, no model needed
+                self.names_only = true;
+                self.asked.clear();
+                self.shown = filters_text.clone();
+                self.wanted = hits.max(1) as f32;
+                if hits == 0 {
+                    let knows = |key| filters.iter().any(|f: &query::Filter| f.key == key && !f.not) && photos.iter().all(|p| p.facts.is_none());
+                    let unknown = knows(query::Key::Camera) || knows(query::Key::Date) || knows(query::Key::Place);
+                    let m = self.map.as_mut().unwrap();
+                    m.flags.fill(0);
+                    m.flags_dirty = true;
+                    m.sims.clear();
+                    m.trail = None;
+                    m.show_beside(&self.gpu.queue, Vec::new());
+                    self.status = if unknown {
+                        "this map knows no cameras, dates or places: make it again to read them".into()
+                    } else {
+                        format!("no photo fits {filters_text}")
+                    };
+                    return;
+                }
+                let n = photos.len();
+                self.map.as_mut().unwrap().sims = vec![0.0; n];
+                if let Some((min, max)) = self.apply_search() {
+                    self.camera.fly_to(self.camera.fit(min, max));
+                }
+                return;
+            }
+        }
         let Some(m) = &mut self.map else { return };
         if text.is_empty() && self.photos.is_empty() {
             m.flags.fill(0);
@@ -774,7 +858,7 @@ impl Viewer {
         } else {
             let model = m.data.manifest.model().to_string();
             let (queries, logic, shown) = match self.photos.len() {
-                0 => match query::Logic::parse(&text) {
+                0 => match query::Logic::parse(&rest) {
                     Ok(logic) => (logic.terms.iter().map(|t| search::Query::Words(t.clone())).collect(), logic, text),
                     Err(e) => {
                         self.status = e;
@@ -897,9 +981,17 @@ impl Viewer {
         if n == 0 || m.sims.len() != n {
             return None;
         }
-        // hidden photos never match
-        let score: Vec<f32> = m.sims.iter().zip(&m.hidden_mask).map(|(&s, &h)| if h { f32::NEG_INFINITY } else { s }).collect();
-        let shown = m.hidden_mask.iter().filter(|&&h| !h).count();
+        // hidden photos never match, nor ones the filters leave out
+        let out = |i: usize| m.hidden_mask[i] || self.names.as_ref().is_some_and(|p| !p[i]);
+        let score: Vec<f32> = (0..n).map(|i| if out(i) { f32::NEG_INFINITY } else { m.sims[i] }).collect();
+        let shown = (0..n).filter(|&i| !out(i)).count();
+        if shown == 0 && self.names.is_some() {
+            m.flags.fill(0);
+            m.flags_dirty = true;
+            m.show_beside(&self.gpu.queue, Vec::new());
+            self.status = "no photo fits the filters".into();
+            return None;
+        }
         if shown == 0 {
             m.flags.fill(0);
             m.flags_dirty = true;
@@ -922,9 +1014,34 @@ impl Viewer {
         m.trail = None;
         m.show_beside(&self.gpu.queue, order);
         // how many is already in "6 of 100" beside it
-        self.status = format!("{}: similarity {cut:.2} to {best:.2}", self.shown);
+        self.status = if self.names_only { format!("{}: {shown} photos", self.shown) } else { format!("{}: similarity {cut:.2} to {best:.2}", self.shown) };
         m.flags_dirty = true;
         Some(m.beside_box())
+    }
+
+    /// Filters join the search's chips (one already there isn't doubled).
+    fn add_filters(&mut self, found: Vec<query::Filter>) {
+        for f in found {
+            if !self.filters.contains(&f) {
+                self.filters.push(f);
+            }
+        }
+    }
+
+    /// The chip being written or changed is done: its values become the filter (none: the chip goes), and the search runs again
+    /// with it.
+    fn finish_filter(&mut self) {
+        let Some(e) = self.filter_edit.take() else { return };
+        let before = self.filters.clone();
+        if e.at < self.filters.len() {
+            self.filters.remove(e.at);
+        }
+        if let Some(f) = query::Filter::new(e.key, &e.value, e.not).filter(|f| !self.filters.contains(f)) {
+            self.filters.insert(e.at.min(self.filters.len()), f);
+        }
+        if self.filters != before {
+            self.ask();
+        }
     }
 
     /// "Hide these": the search's matches are hidden (drawn faint, never matched again) until their chip is clicked, and the
@@ -942,7 +1059,10 @@ impl Viewer {
             [(p, _)] => format!("like {}", file(p)),
             [(p, _), rest @ ..] => format!("like {} +{}", file(p), rest.len()),
         };
-        m.hidden.push(Hidden { what, photos: m.order.clone(), words: if self.photos.is_empty() { self.shown.clone() } else { String::new() }, searched: self.photos.clone(), wanted: self.wanted });
+        // with its filters, unless they are the whole search (and so its name already)
+        let what = if self.names_only || self.filters.is_empty() { what } else { format!("{what} {}", self.filters.iter().map(query::Filter::text).collect::<Vec<_>>().join(" ")) };
+        let words = if self.photos.is_empty() && !self.names_only { self.shown.clone() } else { String::new() };
+        m.hidden.push(Hidden { what, photos: m.order.clone(), words, searched: self.photos.clone(), filters: std::mem::take(&mut self.filters), wanted: self.wanted });
         m.rehide();
         self.search.clear();
         self.photos.clear();
@@ -961,6 +1081,7 @@ impl Viewer {
         if edit {
             self.search = h.words;
             self.photos = h.searched;
+            self.filters = h.filters;
             self.wanted = h.wanted;
             self.ask();
         } else if !m.sims.is_empty() {
@@ -1375,6 +1496,9 @@ impl Viewer {
             self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box"))); // ready to type
         }
         if actions.clear_search {
+            if self.search.trim().is_empty() {
+                self.filters.clear(); // the box was empty already: the cross takes the filters too
+            }
             self.search.clear();
             self.ask(); // nothing to search for: the matches go
         }
@@ -1400,6 +1524,22 @@ impl Viewer {
             if self.photos.is_empty() {
                 self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box"))); // the last one: back to words
             }
+        }
+        if actions.filter_done {
+            self.finish_filter();
+        }
+        if let Some(mut e) = actions.edit_filter {
+            self.finish_filter(); // the one being written before (which can move the others: the chip is found again by what it is)
+            let same = |f: &query::Filter| f.key == e.key && f.not == e.not && f.value_text() == e.value;
+            e.at = if e.at == usize::MAX { self.filters.len() } else { self.filters.iter().position(same).unwrap_or(self.filters.len()) };
+            self.filter_edit = Some(e);
+            self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("filter-edit")));
+        }
+        if let Some(k) = actions.drop_filter {
+            if k < self.filters.len() {
+                self.filters.remove(k);
+            }
+            self.ask();
         }
         if actions.ask {
             self.ask();
@@ -1863,7 +2003,8 @@ impl Viewer {
                 // what shows under the box (results, status, hidden searches, help) joins it: one box, a line between
                 let (found, at, on_path) = self.map.as_ref().map_or((0, None, false), |m| (m.order.len(), m.at, m.trail.is_some()));
                 let chips = self.map.as_ref().is_some_and(|m| !m.hidden.is_empty()) && self.hidden_open;
-                let below = |tips: bool| found > 0 || !self.status.is_empty() || chips || tips || self.photos.len() == 1;
+                let has_filters = !self.filters.is_empty() || self.filter_edit.is_some();
+                let below = |tips: bool| found > 0 || !self.status.is_empty() || chips || tips || has_filters || self.photos.len() == 1;
                 let r = theme::RADIUS_SMALL;
                 let top_corners = if below(self.tips_open) { egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 } } else { egui::CornerRadius::same(r) };
                 let search_line = egui::Frame::new().fill(ui.visuals().extreme_bg_color).stroke(egui::Stroke::new(1.0, ring)).corner_radius(top_corners).inner_margin(egui::Margin::symmetric(10, 2)).shadow(egui::Shadow { offset: [0, 4], blur: 18, spread: 0, color: egui::Color32::from_black_alpha(110) }).show(ui, |ui| {
@@ -1889,7 +2030,10 @@ impl Viewer {
                         let hidden_total: usize = self.map.as_ref().map_or(0, |m| m.hidden.iter().map(|h| h.photos.len()).sum());
                         let badge = (hidden_total > 0).then(|| format!("{hidden_total} hidden {}", if self.hidden_open { "⏷" } else { "⏵" }));
                         let badge_w = badge.as_ref().map_or(0.0, |b| ui.fonts_mut(|f| f.layout_no_wrap(b.clone(), egui::FontId::proportional(12.0), theme::MUTED).size().x) + 12.0 + ui.spacing().item_spacing.x);
-                        let cross = if clearable { 26.0 + ui.spacing().item_spacing.x } else { 0.0 } + badge_w + 26.0 + ui.spacing().item_spacing.x; // and the i
+                        // filters are chips of their own under the box: this adds one
+                        let add_filter = theme::muted("+ filter");
+                        let add_filter_w = egui::WidgetText::from(add_filter.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button).size().x + 2.0 * ui.spacing().button_padding.x + ui.spacing().item_spacing.x;
+                        let cross = if clearable { 26.0 + ui.spacing().item_spacing.x } else { 0.0 } + badge_w + add_filter_w + 26.0 + ui.spacing().item_spacing.x; // and the i
                         if !self.photos.is_empty() {
                             // a search is photos or words, never both: while photos are the search they take the place of the words
                             for (k, (path, tex)) in self.photos.iter().enumerate() {
@@ -1963,6 +2107,16 @@ impl Viewer {
                                     ui.add(egui::Label::new(hint).truncate()).on_hover_text(tip);
                                 });
                             }
+                            // a filter finished in the box (a space after it) leaves it for a chip
+                            if edit.response.changed() && let Some((rest, found)) = query::finished(&self.search) {
+                                self.search = rest;
+                                for f in found {
+                                    if !self.filters.contains(&f) {
+                                        self.filters.push(f);
+                                    }
+                                }
+                                to_end = true;
+                            }
                             if to_end {
                                 let mut state = edit.state;
                                 state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(self.search.chars().count()))));
@@ -1976,6 +2130,22 @@ impl Viewer {
                                 actions.ask = true;
                             }
                         }
+                        egui::containers::menu::MenuButton::from_button(egui::Button::new(add_filter).frame(false)).ui(ui, |ui| {
+                            ui.set_width(220.0);
+                            ui.label(theme::muted("Only photos that pass it can match. Or type it in the box: camera:pixel, then a space."));
+                            ui.add_space(4.0);
+                            for (key, tip) in [
+                                (query::Key::Name, "in the file and folder names: greece"),
+                                (query::Key::Camera, "the camera it was taken with: pixel, or pixel, redmi for any of them"),
+                                (query::Key::Date, "when it was taken: 2019, 2019-07, or 2016..2018 for a range"),
+                                (query::Key::Place, "the town nearest to where it was taken: lviv"),
+                            ] {
+                                if theme::button(ui, egui::Button::new(key.label())).on_hover_text(tip).clicked() {
+                                    actions.edit_filter = Some(FilterEdit { at: usize::MAX, key, not: false, value: String::new() });
+                                    ui.close();
+                                }
+                            }
+                        }).0.on_hover_text("only photos that pass a filter can match: by name, camera, date or place");
                         if let Some(badge) = badge {
                             let tip = if self.hidden_open { "fold away the hidden searches" } else { "show the hidden searches, to bring some back or change them" };
                             if ui.add(egui::Button::new(theme::muted(badge)).frame(false).min_size(egui::vec2(0.0, 20.0))).on_hover_text(tip).clicked() {
@@ -2010,6 +2180,55 @@ impl Viewer {
                 egui::Frame::new().fill(ui.visuals().extreme_bg_color).stroke(egui::Stroke::new(1.0, ring)).corner_radius(bottom_corners).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                     ui.set_width(inner);
                     ui.set_max_width(inner);
+                    // the filters: a chip each (click: change it, NOT ones in red), and the one being written
+                    if has_filters {
+                        ui.horizontal_wrapped(|ui| {
+                            let editing = self.filter_edit.as_ref().map(|e| e.at);
+                            // a chip's name ("Camera"), NOT ones in red, then its values
+                            let font = egui::TextStyle::Button.resolve(ui.style());
+                            let ink = ui.visuals().text_color();
+                            let chip_text = |key: query::Key, not: bool, value: &str| {
+                                let mut job = egui::text::LayoutJob::default();
+                                let font = font.clone();
+                                let (head, color) = if not { (format!("NOT {}", key.label()), theme::DANGER) } else { (key.label().to_string(), theme::MUTED) };
+                                job.append(&head, 0.0, egui::TextFormat::simple(font.clone(), color));
+                                if !value.is_empty() {
+                                    job.append(value, 6.0, egui::TextFormat::simple(font, ink));
+                                }
+                                job
+                            };
+                            for k in 0..=self.filters.len() {
+                                if editing == Some(k) {
+                                    let e = self.filter_edit.as_mut().unwrap();
+                                    // its name, which a click turns to NOT and back; the values after it
+                                    let head = ui.add(egui::Button::new(chip_text(e.key, e.not, "")).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text("click: leave these out instead (NOT), or back");
+                                    if head.clicked() {
+                                        e.not = !e.not;
+                                        ui.memory_mut(|m| m.request_focus(egui::Id::new("filter-edit")));
+                                    }
+                                    let edit = ui.add(egui::TextEdit::singleline(&mut e.value).id(egui::Id::new("filter-edit")).hint_text(e.key.hint()).desired_width(140.0));
+                                    if edit.lost_focus() && !head.hovered() {
+                                        actions.filter_done = true;
+                                    }
+                                    ui.add_space(6.0);
+                                    continue;
+                                }
+                                let Some(f) = self.filters.get(k) else { continue };
+                                let tip = if f.not { "photos this picks are left out; click to change it" } else { "only photos this picks can match; click to change it" };
+                                if ui.add(egui::Button::new(chip_text(f.key, f.not, &f.value_text())).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text(tip).clicked() {
+                                    actions.edit_filter = Some(FilterEdit { at: k, key: f.key, not: f.not, value: f.value_text() });
+                                }
+                                ui.add_space(-ui.spacing().item_spacing.x + 2.0);
+                                if ui.add(egui::Button::new("×")).on_hover_text("take this filter out").clicked() {
+                                    actions.drop_filter = Some(k);
+                                }
+                                ui.add_space(6.0);
+                            }
+                        });
+                        if found > 0 || !self.status.is_empty() || chips || tips {
+                            ui.add_space(4.0);
+                        }
+                    }
                     if found > 0 {
                         ui.horizontal(|ui| {
                             let step = |ui: &mut egui::Ui, text: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(text).size(18.0)).min_size(egui::vec2(28.0, 28.0))).on_hover_text(tip).clicked();
@@ -2083,6 +2302,9 @@ impl Viewer {
                         ui.label(theme::muted(
                             "Describe what you want in a short phrase: \"woman on a bike in winter\". Use NOT in capitals to push things down: \
                              \"street at night NOT cars\". Or drop in a photo to find ones like it.\n\
+                             Filters (+ filter, or typed in the box and a space after) become chips under it, and only photos they pass can match: \
+                             name:greece looks in file and folder names, camera:pixel, date:2019-07, place:lviv in what the photo says about itself; \
+                             year:2016,2018 is any of them, year:2016..2018 a range, NOT place:kyiv leaves out.\n\
                              Good at: things, places, scenes, light, weather, mood, style. Bad at: counting, left and right, who someone is.",
                         ));
                     }
@@ -2288,6 +2510,12 @@ struct UiActions {
     path_to: Option<usize>,
     like: Option<usize>,
     add_like: Option<usize>,
+    /// A filter to write or change: its place (usize::MAX: a new one) and its text.
+    edit_filter: Option<FilterEdit>,
+    /// The filter being written or changed is done (Enter, or clicked away from).
+    filter_done: bool,
+    /// A filter chip's cross: its place in `filters`.
+    drop_filter: Option<usize>,
     /// A photo taken out of the search (its place in `photos`).
     drop_photo: Option<usize>,
     /// A photo searched for, by its place on the map: go to it.
@@ -2409,6 +2637,18 @@ const MAX_PHOTO_WORLD: f32 = data::WORLD / 8.0;
 const PHOTO_TYPES: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "bmp"];
 
 /// The file a text names, if it is a photo: plain, in quotes, with escaped spaces, or as file://.
+/// The folder every path shares ("/mnt/data/takeout-tagged/"), as a length: names are matched below it, so name: can't
+/// match every photo by the disk they are on.
+fn common_root<'a>(mut paths: impl Iterator<Item = &'a str>) -> usize {
+    let Some(first) = paths.next() else { return 0 };
+    let mut len = first.len();
+    for p in paths {
+        len = first.as_bytes()[..len].iter().zip(p.as_bytes()).take_while(|(a, b)| a == b).count();
+    }
+    // back to the end of a folder, so a name isn't cut
+    first.as_bytes()[..len].iter().rposition(|&b| b == b'/' || b == b'\\').map_or(0, |k| k + 1)
+}
+
 /// Which photo of the map is this file, if any (one pass over them all, for a click).
 fn find_photo(data: &data::MapData, path: &std::path::Path) -> Option<usize> {
     let rel = path.strip_prefix(&data.bundle).ok();
@@ -2466,6 +2706,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_are_matched_below_the_shared_folder() {
+        let paths = ["/mnt/data/takeout/Trip 2019/a.jpg", "/mnt/data/takeout/Home/b.jpg", "/mnt/data/takeout/Tr/c.jpg"];
+        assert_eq!(common_root(paths.into_iter()), "/mnt/data/takeout/".len());
+        assert_eq!(common_root(["/x/Київ/a.jpg", "/x/Київець/b.jpg"].into_iter()), "/x/".len());
+        assert_eq!(common_root(std::iter::empty()), 0);
+    }
 
     fn at(x: f32, y: f32) -> data::Point {
         data::Point { x, y }

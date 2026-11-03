@@ -75,9 +75,46 @@ fn nearest(towns: &[Town], lat: f64, lon: f64) -> Option<String> {
                 km if km > NEAR_KM => "near ".to_string(),
                 _ => String::new(),
             };
-            Some(if town.within.is_empty() { format!("{near}{}", town.name) } else { format!("{near}{}, {}", town.name, town.within) })
+            Some(format!("{near}{}", town_name(town)))
         })
         .clone()
+}
+
+fn town_name(town: &Town) -> String {
+    if town.within.is_empty() { town.name.clone() } else { format!("{}, {}", town.name, town.within) }
+}
+
+/// The nearest town to lat, lon ("Lviv, Lviv Oblast, Ukraine"), for many photos at once (a map's facts, as it is made): the list
+/// is read here if it wasn't, and kept in a grid of 1° cells. None: no town within FAR_KM, or the list can't be read.
+pub fn town_at(lat: f64, lon: f64) -> Option<String> {
+    type Grid = (Vec<Town>, HashMap<(i32, i32), Vec<u32>>);
+    static GRID: OnceLock<Option<Grid>> = OnceLock::new();
+    let (towns, cells) = GRID
+        .get_or_init(|| {
+            let towns = load().ok()?;
+            let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+            for (i, t) in towns.iter().enumerate() {
+                cells.entry((t.lat.floor() as i32, t.lon.floor() as i32)).or_default().push(i as u32);
+            }
+            Some((towns, cells))
+        })
+        .as_ref()?;
+    // the cell and the ones around it: FAR_KM (100 km) is under a degree of latitude, and of longitude this side of ~25° from a pole
+    let (cy, cx) = (lat.floor() as i32, lon.floor() as i32);
+    let mut best: Option<(f64, &Town)> = None;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let x = (cx + dx + 180).rem_euclid(360) - 180; // across the date line
+            for &i in cells.get(&(cy + dy, x)).into_iter().flatten() {
+                let t = &towns[i as usize];
+                let km = km_between(lat, lon, t.lat, t.lon);
+                if best.is_none_or(|(b, _)| km < b) {
+                    best = Some((km, t));
+                }
+            }
+        }
+    }
+    best.filter(|(km, _)| *km <= FAR_KM).map(|(_, t)| town_name(t))
 }
 
 /// Great-circle distance.
@@ -182,6 +219,14 @@ mod tests {
         assert_eq!(nearest(&towns, 55.2375, -4.8540).unwrap(), "Girvan, Scotland, United Kingdom");
         assert_eq!(nearest(&towns, 64.1466, -21.9426).unwrap(), "Reykjavík, Capital Region, Iceland");
         assert!(nearest(&towns, 0.0, -30.0).unwrap().contains(" km from "), "mid-ocean");
+        // the grid finds the same towns, and nothing far out at sea
+        assert_eq!(town_at(55.2375, -4.8540).unwrap(), "Girvan, Scotland, United Kingdom");
+        assert_eq!(town_at(64.1466, -21.9426).unwrap(), "Reykjavík, Capital Region, Iceland");
+        assert_eq!(town_at(0.0, -30.0), None);
+        for (lat, lon) in [(49.84, 24.03), (50.45, 30.52), (49.28, -123.12), (-33.87, 151.21), (-18.14, 178.44)] {
+            let whole = nearest(&towns, lat, lon).unwrap();
+            assert_eq!(town_at(lat, lon).as_deref(), Some(whole.trim_start_matches("near ")), "{lat}, {lon}");
+        }
     }
 
     /// Makes assets/places.zip again from GeoNames' files (needs the network, 10 MB):
