@@ -25,6 +25,9 @@ const STREAMED: u32 = 6u; // levels from here on (64 px) are streamed; below are
 const ENTRY: u32 = 17u;   // table u32s per photo: loaded level count, original's longer side, 2 unused, slot per level (13 levels: 1 ... 4096 px)
 const COLD = vec3f(0.9, 0.15, 0.15);  // a match just above the cutoff ...
 const HOT = vec3f(1.0, 0.92, 0.25);   // ... the strongest ones (flags 1 ... 255)
+const MATCH: u32 = 255u;   // a photo's flags: its match (0: none) ...
+const HIDDEN: u32 = 256u;  // ... and whether it is hidden (a search hidden with "Hide these"): drawn faint
+const FAINT: f32 = 0.12;   // how much of a hidden photo shows over the background
 const TINT_FROM: f32 = 24.0;  // a match is tinted solid while it is smaller than this on screen (px) ...
 const TINT_UNTIL: f32 = 96.0; // ... and shows its own picture by this size
 const GROW: f32 = 3.0;        // a match is drawn this much bigger while it is small, real size by TINT_UNTIL
@@ -82,7 +85,7 @@ fn quad(v: u32, id: u32, at: vec2f, shape: vec2f, px: f32, grow: f32, lift: f32)
 
 // How much bigger photo `id` is drawn: a match, while it is small.
 fn grow(id: u32) -> f32 {
-    return 1.0 + select(0.0, GROW - 1.0, flags[id] != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
+    return 1.0 + select(0.0, GROW - 1.0, (flags[id] & MATCH) != 0u) * (1.0 - smoothstep(TINT_FROM, TINT_UNTIL, cam.size_px));
 }
 
 // A photo on the map, sliding from where it was (and its size then) to where it goes.
@@ -170,11 +173,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let hi = min(lo + 1.0, top);
     var c = sample_level(in.id, u32(lo), uv, in.shape);
     if hi > lo { c = mix(c, sample_level(in.id, u32(hi), uv, in.shape), f - lo); }
-    if in.flags != 0u {  // a match: tinted from afar (red to yellow with the match), its picture up close
-        let tint = mix(COLD, HOT, f32(in.flags - 1u) / 254.0);
+    let found = in.flags & MATCH;
+    if found != 0u {  // a match: tinted from afar (red to yellow with the match), its picture up close
+        let tint = mix(COLD, HOT, f32(found - 1u) / 254.0);
         c = mix(c, tint, 1.0 - smoothstep(TINT_FROM, TINT_UNTIL, in.px));
         c = mix(tint, c, smoothstep(OUTLINE - 1.0, OUTLINE, -edge));  // the outline, inside the photo's edge
     }
+    if (in.flags & HIDDEN) != 0u { c = mix(BACKGROUND, c, FAINT); }  // hidden: almost the background, its place kept
     return vec4f(c * cover, cover + (1.0 - cover) * shadow);  // over its shadow (black)
 }
 

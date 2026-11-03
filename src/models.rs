@@ -27,8 +27,6 @@ pub struct Spec {
     pub size: u32,
     /// The most tokens of a search text it reads (about 3 or 4 words in 5); None: more than any search is.
     pub max_tokens: Option<usize>,
-    /// What the search box says for a map made with it.
-    pub query_hint: &'static str,
     /// Where its files come from: a Hugging Face repository at a fixed revision. They are kept under .cache/onnx/<folder>/ with
     /// the paths they have there.
     pub repo: &'static str,
@@ -56,7 +54,6 @@ pub const ALL: [Spec; 2] = [
         dim: 768,
         size: 256,
         max_tokens: Some(64),
-        query_hint: "street at night NOT cars, or drop in a photo",
         repo: "onnx-community/siglip2-base-patch16-256-ONNX",
         revision: "d1114256522a37ffa257a0a58017348ab0058db2",
         folder: "siglip2-base-patch16-256",
@@ -73,7 +70,6 @@ pub const ALL: [Spec; 2] = [
         dim: 768,
         size: 512,
         max_tokens: Some(64),
-        query_hint: "street at night NOT cars, or drop in a photo",
         repo: "onnx-community/siglip2-base-patch16-512-ONNX",
         revision: "323fe16b35d8ced8182f8d9ff5e5ec935dd79bd7",
         folder: "siglip2-base-patch16-512",
