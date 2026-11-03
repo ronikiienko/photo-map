@@ -124,11 +124,8 @@ pub fn help(ctx: &egui::Context, open: &mut bool) {
             ui.label(RichText::new("How the map works").size(17.0));
             ui.add_space(4.0);
             ui.label(theme::muted(
-                "Every photo is turned into numbers that describe what it shows, and photos that look alike are placed close together. \
-                 Zoom in and similar photos sit side by side; the names mark regions of the map. \
-                 Search compares your words, or photos you drop in (words or photos, not both), with every photo and highlights the best matches. \
-                 NOT in capitals pushes things down: \"street NOT cars\". Filters (+ filter in the box) keep only photos of a name, camera, \
-                 date or place.",
+                "Photos that look alike sit close together: zoom in and similar ones are side by side, and the names mark what a region \
+                 holds. Search lights up the photos that fit best; the i at the end of the search box says how to search.",
             ));
             ui.add_space(8.0);
             egui::Grid::new("keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {

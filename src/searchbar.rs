@@ -110,7 +110,10 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                     // the end of the line, from the right: the i, the cross, the hidden badge, + filter, the keys for ideas; the words or
                     // photos get what is left, so the line is always as wide as the box
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    *bar.tips_open = theme::info_button(ui);
+                    let open = *bar.tips_open;
+                    if theme::info_button(ui, open).on_hover_text(if open { "close the tips" } else { "how to search" }).clicked() {
+                        *bar.tips_open = !open;
+                    }
                     if clearable && theme::close_button(ui) {
                         if bar.photos.is_empty() {
                             actions.clear_search = true;
@@ -132,7 +135,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                     ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
                     egui::containers::menu::MenuButton::from_button(add_filter).ui(ui, |ui| {
                         ui.set_width(220.0);
-                        ui.label(theme::muted("Only photos that pass it can match. Or type it in the box: camera:pixel, then a space."));
+                        ui.label(theme::muted("Only photos that pass it can match. Commas mean any of: pixel, redmi; two dates with .. a range: 2016..2018. Or type it in the box: camera:pixel and a space."));
                         ui.add_space(4.0);
                         for (key, tip) in [
                             (query::Key::Name, "in the file and folder names: greece"),
@@ -387,14 +390,31 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                     if found > 0 || !bar.status.is_empty() || chips {
                         ui.add_space(6.0); // a gap only below something
                     }
-                    ui.label(theme::muted(
-                        "Describe what you want in a short phrase: \"woman on a bike in winter\". Use NOT in capitals to push things down: \
-                         \"street at night NOT cars\". Or drop in a photo to find ones like it.\n\
-                         Filters (+ filter, or typed in the box and a space after) become chips under it, and only photos they pass can match: \
-                         name:greece looks in file and folder names, camera:pixel, date:2019-07, place:lviv in what the photo says about itself; \
-                         year:2016,2018 is any of them, year:2016..2018 a range, NOT place:kyiv leaves out.\n\
-                         Good at: things, places, scenes, light, weather, mood, style. Bad at: counting, left and right, who someone is.",
-                    ));
+                    let heading = |ui: &mut egui::Ui, text: &str| {
+                        ui.add_space(if text.starts_with("SEARCH WITH WORDS") { 0.0 } else { 6.0 });
+                        ui.label(egui::RichText::new(text).size(11.0).color(theme::MUTED).strong());
+                    };
+                    heading(ui, "SEARCH WITH WORDS");
+                    ui.label(theme::muted("Describe what is in the photo, in a short phrase. NOT in capitals pushes things down. Try one:"));
+                    if bar.photos.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                        ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
+                        for example in ["woman on a bike in winter", "street at night NOT cars", "foggy forest", "birthday cake", "old black and white photo"] {
+                            if ui.add(egui::Button::new(egui::RichText::new(example).size(12.5))).on_hover_text("search for this").clicked() {
+                                *bar.search = example.to_string();
+                                actions.ask = true;
+                                *bar.tips_open = false;
+                            }
+                        }
+                    });
+                    }
+                    heading(ui, "SEARCH WITH PHOTOS");
+                    ui.label(theme::muted("Drop photos on the window, or right-click one on the map: Photos like this. With several, what they share is found."));
+                    heading(ui, "KEEP ONLY SOME PHOTOS");
+                    ui.label(theme::muted("+ Filter: by file name, camera, date or place. It works with words, with photos, or alone."));
+                    heading(ui, "WHAT IT CAN AND CAN'T TELL");
+                    ui.label(theme::muted("Good at things, places, scenes, light, weather, mood and style. Bad at counting, left and right, and who someone is."));
                 }
 
                 // one photo searched for: that more can join it, and when that helps
@@ -525,7 +545,7 @@ mod shots {
 
     /// Draws `s`, does `then` to it (hover, click), and saves it as .local/shots/<name>.png.
     fn shot_then(name: &str, s: State, then: impl FnOnce(&mut egui_kittest::Harness<'_, State>)) {
-        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(s.width + 80.0, 300.0)).wgpu().build_ui_state(
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(s.width + 80.0, 440.0)).wgpu().build_ui_state(
             |ui, s: &mut State| {
                 let ctx = ui.ctx().clone();
                 theme::apply(&ctx);
@@ -598,6 +618,26 @@ mod shots {
             shot_then("12-filter-menu", state(), |h| h.get_by_label("+ Filter").click());
             shot_then("12b-filter-menu-results", results(), |h| h.get_by_label("+ Filter").click());
         }
-        shot("10-help", state(), Some(egui::pos2(40.0 + 620.0 - 8.0 - 10.0 - 13.0, 27.0)));
+        // the i at the box's right end, clicked: how to search
+        let click_i = |h: &mut egui_kittest::Harness<'_, State>| {
+            let at = egui::pos2(40.0 + 620.0 - 8.0 - 10.0 - 13.0, 27.0);
+            h.hover_at(at);
+            h.run_steps(2);
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+                h.run_steps(1);
+            }
+        };
+        shot_then("10-help", State { width: 620.0, ..state() }, click_i);
+        shot_then("10b-help-with-results", results(), click_i);
+        shot_then("10c-help-narrow", State { width: 300.0, ..state() }, |h| {
+            let at = egui::pos2(40.0 + 300.0 - 8.0 - 10.0 - 13.0, 27.0);
+            h.hover_at(at);
+            h.run_steps(2);
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+                h.run_steps(1);
+            }
+        });
     }
 }
