@@ -8,7 +8,10 @@
 //!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
 //!     embeddings.bin  per photo: float16 vector of the picture (search and Groups)
 //!     tree.bin        per photo: its parent in the tree that paths between photos follow (tree.rs)
-//!     pages_bc7.bin   the baked levels (1 ... 32 px), made while the map is built (bake.rs)
+//!     frames.json     if it has videos: their frames (Frame below), in the order of frames.bin's rows
+//!     frames.bin      if it has videos: per frame, float16 vector (a search scores a video by its best frame)
+//!     frames/<n>/     a video's poster.jpg (its picture on the map) and its frames, small (shown for a search's matches)
+//!     pages_bc7.bin   the baked levels (1 ... 32 px) of every picture: the photos', then the frames' (bake.rs)
 
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
@@ -139,6 +142,23 @@ impl Photo {
     }
 }
 
+/// A frame of a video (frames.json): kept small (FRAME_SIDE), shown beside the world when it is a search's best match in its
+/// video. Pictures are numbered photos first, then frames: frame k is picture n + k.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Frame {
+    /// The photo (the video) it is from.
+    pub video: usize,
+    /// Seconds from the video's start.
+    pub time: f32,
+    /// Its picture, in the map.
+    pub file: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A frame's longer side, as kept in the map (px).
+pub const FRAME_SIDE: u32 = 256;
+
 /// A named area of the map (regions.json).
 #[derive(Deserialize)]
 pub struct Label {
@@ -168,6 +188,8 @@ pub struct MapData {
     pub bundle: PathBuf,
     pub manifest: Manifest,
     pub photos: Vec<Photo>,
+    /// The videos' frames (none if the map has no videos).
+    pub frames: Vec<Frame>,
     pub points: Vec<Point>,
     /// How big each photo is drawn, times `side` (the Groups view: the most typical photos biggest); empty: all 1.
     pub sizes: Vec<f32>,
@@ -191,9 +213,16 @@ impl MapData {
         if photos.len() != n || points.len() != n {
             return Err(std::io::Error::other("bundle files don't match"));
         }
+        let frames: Vec<Frame> = match read("frames.json") {
+            Ok(raw) => serde_json::from_slice(&raw)?,
+            Err(_) => Vec::new(),
+        };
+        if frames.iter().any(|f| f.video >= n) {
+            return Err(std::io::Error::other("frames.json doesn't match the photos"));
+        }
         let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
-        if pages.len() != crate::pages::baked_bytes(n) {
-            return Err(std::io::Error::other("pages_bc7.bin is not the size of the photos"));
+        if pages.len() != crate::pages::baked_bytes(n + frames.len()) {
+            return Err(std::io::Error::other("pages_bc7.bin is not the size of the pictures"));
         }
         let (side, points) = match manifest.photo_side {
             Some(side) => (side, points),
@@ -207,7 +236,7 @@ impl MapData {
         for level in &mut regions.levels {
             level.sort_by(|a, b| b.photos.cmp(&a.photos));
         }
-        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, sizes: Vec::new(), side, pages: std::sync::Arc::new(pages), grid, regions })
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, frames, points, sizes: Vec::new(), side, pages: std::sync::Arc::new(pages), grid, regions })
     }
 
     pub fn n(&self) -> usize {
@@ -233,6 +262,39 @@ impl MapData {
 
     pub fn path(&self, id: usize) -> PathBuf {
         self.photos[id].path(&self.bundle)
+    }
+
+    /// Photos and frames: everything with pixels (pages.rs, stream.rs).
+    pub fn pictures(&self) -> usize {
+        self.photos.len() + self.frames.len()
+    }
+
+    /// Where picture `id`'s file is (a photo's, or a frame's in the map).
+    pub fn picture_path(&self, id: usize) -> PathBuf {
+        match id.checked_sub(self.n()) {
+            Some(k) => self.bundle.join(&self.frames[k].file),
+            None => self.path(id),
+        }
+    }
+
+    /// Picture `id`'s width and height, in pixels.
+    fn picture_size(&self, id: usize) -> (u32, u32) {
+        match id.checked_sub(self.n()) {
+            Some(k) => (self.frames[k].width, self.frames[k].height),
+            None => (self.photos[id].width, self.photos[id].height),
+        }
+    }
+
+    /// Picture `id`'s longer side, in pixels.
+    pub fn picture_long(&self, id: usize) -> u32 {
+        let (w, h) = self.picture_size(id);
+        w.max(h)
+    }
+
+    /// Picture `id`'s shape, its longer side 1.
+    pub fn picture_form(&self, id: usize) -> glam::Vec2 {
+        let (w, h) = self.picture_size(id);
+        glam::Vec2::new(w as f32, h as f32) / w.max(h).max(1) as f32
     }
 
     /// Longer side of the original, in pixels.

@@ -31,10 +31,13 @@ pub const VIDEO_TYPES: [&str; 7] = ["mp4", "mov", "m4v", "mkv", "webm", "avi", "
 const MAX_FRAMES: usize = 64;
 /// Photos handed to the model at once.
 const BATCH: usize = 16;
+/// Pictures read and prepared ahead of the model (photos, or a video's frames): about 200 MB with the 256 px model.
+const AHEAD: usize = 256;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
+    Videos,
     #[serde(alias = "copy")] // linking the photos into the map was a step of its own
     Scan,
     #[serde(alias = "load")] // a job saved while loading the model was a step of its own
@@ -48,12 +51,13 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 8] = [Stage::Scan, Stage::Embed, Stage::Layout, Stage::Tree, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
+    pub const ALL: [Stage; 9] = [Stage::Videos, Stage::Scan, Stage::Embed, Stage::Layout, Stage::Tree, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
 
     /// What the stage is doing, for the list of steps.
     pub fn label(self) -> &'static str {
         match self {
-            Stage::Scan => "Finding photos and videos",
+            Stage::Videos => "Reading videos",
+            Stage::Scan => "Finding photos",
             Stage::Embed => "Understanding photos",
             Stage::Layout => "Laying out the map",
             Stage::Tree => "Linking similar photos",
@@ -67,7 +71,8 @@ impl Stage {
     /// What the stage does and why, in plain words, for the card of a map being made.
     pub fn explain(self) -> &'static str {
         match self {
-            Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on) and videos (MP4, MOV, MKV and so on), counts them and notes where each one is: the map reads them there, and takes no space for them (unless you asked for them to be copied into the map). Each video is one photo on the map: its keyframes are taken out of it (the whole pictures a video file keeps, usually one a second; at most 64, spread over the video; this needs ffmpeg). Nothing is changed in your folders.",
+            Stage::Videos => "Each video (MP4, MOV, MKV and so on) is one photo on the map, and the model looks at its keyframes: the whole pictures a video file keeps, usually one a second (at most 64, spread over the video). They are taken out of every video now, with ffmpeg. Nothing to do if there are no videos.",
+            Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and notes where each one is: the map reads them there, and takes no space for them (unless you asked for them to be copied into the map). Nothing is changed in your folders.",
             Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. A video's frames each go through the model: the video's vector is their average (which places it on the map), its picture the frame closest to that average, and a search finds it by its best-matching frame. This is the slow part, because every photo goes through the model on the graphics card.",
             Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP). Last, photos that would cover each other are moved apart a little, so that every photo can be seen.",
             Stage::Tree => "Joins all the photos into one tree by the shortest links between them (the most similar pairs). A path between two photos (right-click one on the map) follows this tree: of all the ways from one to the other, it is the one whose biggest change from photo to photo is the smallest. Each photo is compared with the photos in the parts of the map nearest to it, not with all of them.",
@@ -201,7 +206,7 @@ pub fn create(maps: &Path, name: &str, sources: &[PathBuf], every: usize, model:
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, sources, created, stage: Stage::Scan, photos: 0, every: every.max(1), model: model.to_string(), copy_photos, photo_side: None }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, sources, created, stage: Stage::Videos, photos: 0, every: every.max(1), model: model.to_string(), copy_photos, photo_side: None }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -233,6 +238,8 @@ pub struct State {
     pub stage: Stage,
     pub done: usize,
     pub total: usize,
+    /// What `done` and `total` count: "photos", or "pictures" when a video's frames count one each.
+    pub unit: &'static str,
     pub message: String,
     pub stage_started: Instant,
     /// Where the current piece of work began (time, count done then): speed and time left are measured from here, so a resumed stage is not fooled by what was already done.
@@ -380,7 +387,7 @@ impl Run {
         let job = Job::read(&dir)?;
         let spec = models::spec(&job.model)?;
         let lock = lock(&dir)?;
-        let state = State { stage: job.stage, done: 0, total: 0, message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false, recent: Default::default(), vector_head: Vec::new() };
+        let state = State { stage: job.stage, done: 0, total: 0, unit: "photos", message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false, recent: Default::default(), vector_head: Vec::new() };
         let shared = Arc::new(Shared { pause: AtomicBool::new(false), state: Mutex::new(state) });
         let ctx = Ctx { dir: dir.clone(), root, job, shared: shared.clone(), hub, spec };
         let handle = std::thread::spawn(move || {
@@ -425,10 +432,12 @@ fn run(mut ctx: Ctx) -> (Arc<Shared>, Result<(), String>) {
                 s.stage = stage;
                 s.done = 0;
                 s.total = 0;
+                s.unit = "photos";
                 s.message.clear();
                 s.stage_started = Instant::now();
             }
             let flow = match stage {
+                Stage::Videos => read_videos(&mut ctx)?,
                 Stage::Scan => scan(&mut ctx)?,
                 Stage::Embed => embed_photos(&mut ctx)?,
                 Stage::Layout => lay_out(&mut ctx)?,
@@ -478,38 +487,65 @@ pub fn is_video(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| VIDEO_TYPES.contains(&e.to_lowercase().as_str()))
 }
 
-/// Takes a video's keyframes out to JPEGs in `dir` (001.jpg, 002.jpg...; at most 1024 px). A keyframe is a whole picture (the
+/// Takes a video's keyframes out to JPEGs in `dir` (001.jpg, 002.jpg...; the longer side at most 1024 px). A keyframe is a whole picture (the
 /// frames between only say what changed), so only they are read (-discard: the others are dropped as the file is read, never
 /// decoded) and decoded: usually one a second, and encoders put one at most cuts. Of
-/// more than MAX_FRAMES, that many are kept, evenly spread. Done once: a folder already there is kept. Needs ffmpeg.
-fn video_frames(video: &Path, dir: &Path) -> Result<(), String> {
+/// more than MAX_FRAMES, that many are kept, evenly spread. Their times (seconds from the start) go to times.txt, a line each, in
+/// order. Done once: a folder already there is kept. Needs ffmpeg. `stop`: asked while ffmpeg runs; true stops it (the folder isn't
+/// made, Ok(false)). Ok(true): done.
+fn video_frames(video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<bool, String> {
     if dir.is_dir() {
-        return Ok(());
+        return Ok(true);
     }
     let part = dir.with_extension("part");
     let _ = fs::remove_dir_all(&part);
     fs::create_dir_all(&part).map_err(|e| e.to_string())?;
-    let out = std::process::Command::new("ffmpeg")
-        .args(["-nostdin", "-loglevel", "error", "-discard", "nokey", "-skip_frame", "nokey", "-i"])
+    // what ffmpeg says goes to a file (a pipe nobody reads while it runs would fill up and stall it)
+    let log_path = part.join("ffmpeg.log");
+    let log_file = fs::File::create(&log_path).map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new("ffmpeg")
+        .args(["-nostdin", "-hide_banner", "-loglevel", "info", "-discard", "nokey", "-skip_frame", "nokey", "-i"])
         .arg(video)
-        .args(["-vf", "scale='min(1024,iw)':-2", "-fps_mode", "passthrough", "-q:v", "3"])
+        // the longer side at most 1024 px (the other follows, kept even)
+        .args(["-vf", "showinfo,scale='if(gte(iw,ih),min(1024,iw),-2)':'if(gte(iw,ih),-2,min(1024,ih))'", "-fps_mode", "passthrough", "-q:v", "3"])
         .arg(part.join("%03d.jpg"))
-        .output()
+        .stdout(std::process::Stdio::null())
+        .stderr(log_file)
+        .spawn()
         .map_err(|e| format!("videos need ffmpeg: {e}"))?;
-    let frames = frame_files(&part);
-    if frames.is_empty() {
-        let _ = fs::remove_dir_all(&part);
-        return Err(format!("{}: no frames ({})", video.display(), String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    if frames.len() > MAX_FRAMES {
-        let keep: std::collections::HashSet<usize> = (0..MAX_FRAMES).map(|k| k * (frames.len() - 1) / (MAX_FRAMES - 1)).collect();
-        for (i, f) in frames.iter().enumerate() {
-            if !keep.contains(&i) {
-                let _ = fs::remove_file(f);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if stop() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&part);
+                return Ok(false);
             }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => return Err(e.to_string()),
         }
     }
-    fs::rename(&part, dir).map_err(|e| e.to_string())
+    // showinfo says each frame's time, in the order they are written: "... n:   3 pts: 90090 pts_time:3.003 ..."
+    let log = fs::read_to_string(&log_path).unwrap_or_default();
+    let _ = fs::remove_file(&log_path);
+    let times: Vec<f32> = log.lines().filter(|l| l.contains("Parsed_showinfo")).filter_map(|l| l.split("pts_time:").nth(1)?.split_whitespace().next()?.parse().ok()).collect();
+    let frames = frame_files(&part);
+    if frames.is_empty() || times.len() != frames.len() {
+        let _ = fs::remove_dir_all(&part);
+        let errors: Vec<&str> = log.lines().filter(|l| !l.contains("Parsed_showinfo")).rev().take(3).collect();
+        return Err(format!("{}: no frames ({})", video.display(), errors.join(" / ")));
+    }
+    let keep: Vec<usize> = if frames.len() > MAX_FRAMES { (0..MAX_FRAMES).map(|k| k * (frames.len() - 1) / (MAX_FRAMES - 1)).collect() } else { (0..frames.len()).collect() };
+    for (i, f) in frames.iter().enumerate() {
+        if !keep.contains(&i) {
+            let _ = fs::remove_file(f);
+        }
+    }
+    let lines: String = keep.iter().map(|&i| format!("{}\n", times[i])).collect();
+    fs::write(part.join("times.txt"), lines).map_err(|e| e.to_string())?;
+    fs::rename(&part, dir).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// A video's frames, in order.
@@ -576,37 +612,51 @@ fn scan(ctx: &mut Ctx) -> Result<Flow, String> {
     link_photos(ctx)
 }
 
-fn find_photos(ctx: &mut Ctx) -> Result<Flow, String> {
-    ctx.progress(0, 0, "looking for photos and videos");
-    let files = collect_photos(&ctx.job.sources, ctx.job.every);
-    let total = files.len();
-    let videos = files.iter().filter(|f| is_video(f)).count();
-    ctx.progress(0, total, match videos {
-        0 => format!("{total} photo files, checking them"),
-        v => format!("{} photo files and {v} videos, checking them and taking frames out of the videos", total - v),
+/// The videos among the sources, in order: video k's frames go to frames/<k, 6 digits>.
+fn videos(sources: &[PathBuf], every: usize) -> Vec<PathBuf> {
+    collect_photos(sources, every).into_iter().filter(|p| is_video(p)).collect()
+}
+
+/// Takes the keyframes out of every video (video_frames), a few videos at a time. A video it can't read is left out of the map.
+fn read_videos(ctx: &mut Ctx) -> Result<Flow, String> {
+    ctx.progress(0, 0, "looking for videos");
+    let videos = videos(&ctx.job.sources, ctx.job.every);
+    shared_state(&ctx.shared).unit = "videos";
+    ctx.progress(0, videos.len(), "");
+    let done = AtomicUsize::new(0);
+    videos.par_iter().enumerate().for_each(|(k, video)| {
+        if ctx.paused() {
+            return;
+        }
+        if let Err(e) = video_frames(video, &ctx.dir.join(format!("frames/{k:06}")), &|| ctx.paused()) {
+            eprintln!("{e}");
+        }
+        ctx.set_done(done.fetch_add(1, Ordering::Relaxed) + 1);
     });
+    Ok(if ctx.paused() { Flow::Paused } else { Flow::Done })
+}
+
+fn find_photos(ctx: &mut Ctx) -> Result<Flow, String> {
+    ctx.progress(0, 0, "looking for photos");
+    let files = collect_photos(&ctx.job.sources, ctx.job.every);
+    // a video's frames, taken out by read_videos: its size is theirs (ffmpeg turns them upright)
+    let videos: std::collections::HashMap<PathBuf, String> = videos(&ctx.job.sources, ctx.job.every).into_iter().enumerate().map(|(k, v)| (v, format!("frames/{k:06}"))).collect();
+    let total = files.len();
+    ctx.progress(0, total, format!("{total} files, checking them"));
     let done = AtomicUsize::new(0);
     let found: Vec<Option<Found>> = files
         .into_par_iter()
-        .enumerate()
-        .map(|(j, src)| {
+        .map(|src| {
             if ctx.paused() {
                 return None;
             }
-            // a video: its frames taken out now; its size is theirs (ffmpeg turns them upright)
-            let frames = is_video(&src).then(|| format!("frames/{j:06}"));
+            let frames = videos.get(&src).cloned();
             let size = match &frames {
-                Some(rel) => match video_frames(&src, &ctx.dir.join(rel)) {
-                    Ok(()) => shown_size(&ctx.dir.join(rel).join("001.jpg")),
-                    Err(e) => {
-                        eprintln!("{e}");
-                        None
-                    }
-                },
+                Some(rel) => frame_files(&ctx.dir.join(rel)).first().and_then(|f| shown_size(f)), // none: the video couldn't be read
                 None => shown_size(&src),
             };
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if d % 64 == 0 || frames.is_some() {
+            if d % 64 == 0 {
                 ctx.set_done(d);
             }
             size.map(|(width, height)| Found { src, width, height, frames })
@@ -617,7 +667,7 @@ fn find_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     }
     let found: Vec<Found> = found.into_iter().flatten().collect();
     if found.is_empty() {
-        return Err(if videos > 0 { "no photos in that folder, and no frames could be taken out of its videos (is ffmpeg installed?)" } else { "no photos in that folder" }.into());
+        return Err(if !videos.is_empty() { "no photos in that folder, and no frames could be taken out of its videos (is ffmpeg installed?)" } else { "no photos in that folder" }.into());
     }
     write_atomic(&ctx.dir.join("files.json"), &serde_json::to_vec(&found).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     ctx.job.photos = found.len();
@@ -746,8 +796,23 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     fs::create_dir_all(ctx.dir.join("vectors")).map_err(|e| e.to_string())?;
     let finished = |k: usize| fs::metadata(shard_path(&ctx.dir, k)).is_ok_and(|m| m.len() as usize == shard_len(n, k) * ctx.dim() * 2);
     let todo: Vec<usize> = (0..shards).filter(|&k| !finished(k)).collect();
-    let already = n - todo.iter().map(|&k| shard_len(n, k)).sum::<usize>();
-    ctx.progress(already, n, "loading the model (the first time it is prepared for this computer: up to a few minutes)");
+    // what each photo is read from: its file, or a video's frames (each embedded; the video's vector is their average). The
+    // progress counts pictures: a frame costs what a photo does
+    let found = read_found(&ctx.dir)?;
+    let photos: Vec<crate::data::Photo> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let frame_dirs: Arc<Vec<Option<PathBuf>>> = Arc::new(found.iter().map(|f| f.frames.as_ref().map(|d| ctx.dir.join(d))).collect());
+    let files: Arc<Vec<Vec<PathBuf>>> = Arc::new(photos.iter().zip(frame_dirs.iter()).map(|(p, d)| match d {
+        Some(d) => frame_files(d),
+        None => vec![p.path(&ctx.dir)],
+    }).collect());
+    drop(photos);
+    let total: usize = files.iter().map(Vec::len).sum();
+    let shard_pictures = |k: usize| (k * SHARD..k * SHARD + shard_len(n, k)).map(|i| files[i].len()).sum::<usize>();
+    let already = total - todo.iter().map(|&k| shard_pictures(k)).sum::<usize>();
+    if frame_dirs.iter().any(Option::is_some) {
+        shared_state(&ctx.shared).unit = "pictures";
+    }
+    ctx.progress(already, total, "loading the model (the first time it is prepared for this computer: up to a few minutes)");
 
     // the model is loaded by the search engine's thread; wait for it (not if every photo has its vector already)
     if !todo.is_empty() && !ctx.wait_for_model()? {
@@ -759,8 +824,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     }
 
     // photos an earlier map already has vectors for (the same file, unchanged): copied, not embedded
-    ctx.progress(already, n, "looking for photos embedded before");
-    let found = read_found(&ctx.dir)?;
+    ctx.progress(already, total, "looking for photos embedded before");
     let mut in_todo = vec![false; n];
     for &k in &todo {
         in_todo[k * SHARD..k * SHARD + shard_len(n, k)].fill(true);
@@ -773,68 +837,98 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let reused: Arc<Vec<bool>> = Arc::new(hits.iter().map(Option::is_some).collect());
     let reused_count = reused.iter().filter(|&&r| r).count();
     // the reused photos cost nothing: they count as done from the start, so the speed and the time left are about the photos the model does
-    ctx.progress(already + reused_count, n, if reused_count > 0 { format!("{reused_count} photos were embedded in earlier maps; embedding the rest") } else { "reading the photos and embedding them".to_string() });
+    ctx.progress(already + reused_count, total, if reused_count > 0 { format!("{reused_count} photos were embedded in earlier maps; embedding the rest") } else { "reading the photos and embedding them".to_string() });
 
-    // CPU side ahead of the GPU: the next shard's photos are decoded and cut into patches while this one is embedded. A photo is
-    // read from its file, a video from its frames (each embedded; the video's vector is their average)
-    let photos: Vec<crate::data::Photo> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let frame_dirs: Arc<Vec<Option<PathBuf>>> = Arc::new(found.iter().map(|f| f.frames.as_ref().map(|d| ctx.dir.join(d))).collect());
-    let files: Arc<Vec<Vec<PathBuf>>> = Arc::new(photos.iter().zip(frame_dirs.iter()).map(|(p, d)| match d {
-        Some(d) => frame_files(d),
-        None => vec![p.path(&ctx.dir)],
-    }).collect());
-    drop((photos, found));
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<Option<(Vec<Prepared>, image::RgbaImage)>>)>(1);
+    // CPU side ahead of the GPU: the next photos are decoded and cut into patches while these are embedded
+    drop(found);
+    // in parts of about AHEAD pictures (a video is many: a whole shard of videos would be gigabytes): (shard, first photo of the
+    // part in the shard, the part's photos, the shard's last part)
+    type Part = (usize, usize, Vec<Option<(Vec<Prepared>, image::RgbaImage)>>, bool);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Part>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let producer = {
         let (todo, files, stop, reused) = (todo.clone(), files.clone(), stop.clone(), reused.clone());
         std::thread::spawn(move || {
+            let cost = |i: usize| if reused[i] { 0 } else { files[i].len() };
             for k in todo {
-                let range = k * SHARD..k * SHARD + shard_len(n, k);
-                let cuts: Vec<Option<(Vec<Prepared>, image::RgbaImage)>> = range
-                    .into_par_iter()
-                    .map(|i| {
-                        if stop.load(Ordering::Relaxed) || reused[i] {
-                            return None;
-                        }
-                        let mut thumb = None;
-                        let cut: Vec<Prepared> = files[i]
-                            .iter()
-                            .filter_map(|f| {
-                                let img = crate::photo::load_for(f, |w, h| spec.longest_side_needed(w, h))?;
-                                thumb.get_or_insert_with(|| thumbnail(&img));
-                                spec.prepare(&img).ok()
-                            })
-                            .collect();
-                        (cut.len() == files[i].len()).then(|| (cut, thumb.expect("a frame was read")))
-                    })
-                    .collect();
-                if stop.load(Ordering::Relaxed) || tx.send((k, cuts)).is_err() {
-                    return;
+                let (start, stop_at) = (k * SHARD, k * SHARD + shard_len(n, k));
+                let mut first = start;
+                while first < stop_at {
+                    let (mut end, mut pictures) = (first + 1, cost(first));
+                    while end < stop_at && pictures + cost(end) <= AHEAD {
+                        pictures += cost(end);
+                        end += 1;
+                    }
+                    // every picture of the part on its own (a video's frames side by side too), then each photo's together
+                    let wanted: Vec<(usize, &PathBuf)> = (first..end).filter(|&i| !reused[i]).flat_map(|i| files[i].iter().map(move |f| (i, f))).collect();
+                    let read: Vec<Option<(Prepared, image::RgbaImage)>> = wanted
+                        .par_iter()
+                        .map(|&(_, f)| {
+                            if stop.load(Ordering::Relaxed) {
+                                return None;
+                            }
+                            let img = crate::photo::load_for(f, |w, h| spec.longest_side_needed(w, h))?;
+                            Some((spec.prepare(&img).ok()?, thumbnail(&img)))
+                        })
+                        .collect();
+                    let mut read = wanted.iter().zip(read).peekable();
+                    let cuts: Vec<Option<(Vec<Prepared>, image::RgbaImage)>> = (first..end)
+                        .map(|i| {
+                            let mut cut = Vec::new();
+                            let mut thumb = None;
+                            let mut all = true;
+                            while let Some((_, r)) = read.next_if(|((j, _), _)| *j == i) {
+                                match r {
+                                    Some((p, t)) => {
+                                        cut.push(p);
+                                        thumb.get_or_insert(t);
+                                    }
+                                    None => all = false,
+                                }
+                            }
+                            // a photo (or a video with a frame) that couldn't be read keeps a zero vector
+                            (all && !cut.is_empty()).then(|| (cut, thumb.expect("a picture was read")))
+                        })
+                        .collect();
+                    if stop.load(Ordering::Relaxed) || tx.send((k, first - start, cuts, end == stop_at)).is_err() {
+                        return;
+                    }
+                    first = end;
                 }
             }
         })
     };
 
     let mut processed = 0usize; // photos that were not reused, seen to so far
+    let mut processed_pictures = 0usize; // ... their pictures (a video's frames)
     let mut embedded = 0usize; // ... and of those, the ones that got a vector
     let mut outcome = Ok(Flow::Done);
-    'shards: for (k, mut cuts) in rx {
-        let mut vectors = vec![0f32; cuts.len() * dim];
-        for i in 0..cuts.len() {
-            if let Some(hit) = hits[k * SHARD + i] {
-                for (slot, b) in vectors[i * dim..(i + 1) * dim].iter_mut().zip(earlier.row(hit).chunks_exact(2)) {
-                    *slot = half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+    let mut vectors = Vec::new(); // the shard's
+    'shards: for (k, part_start, mut cuts, last) in rx {
+        if part_start == 0 {
+            vectors = vec![0f32; shard_len(n, k) * dim];
+            for i in 0..shard_len(n, k) {
+                if let Some(hit) = hits[k * SHARD + i] {
+                    for (slot, b) in vectors[i * dim..(i + 1) * dim].iter_mut().zip(earlier.row(hit).chunks_exact(2)) {
+                        *slot = half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+                    }
                 }
             }
         }
+        let at_shard = k * SHARD + part_start; // the part's first photo
         let mut at = 0;
         while at < cuts.len() {
             if ctx.paused() {
                 outcome = Ok(Flow::Paused);
                 break 'shards;
             }
-            let end = (at + BATCH).min(cuts.len());
+            // about BATCH pictures at a time (a video is many), so that a pause is never far off
+            let mut end = at + 1;
+            let mut pictures = cuts[at].as_ref().map_or(0, |c| c.0.len());
+            while end < cuts.len() && pictures + cuts[end].as_ref().map_or(0, |c| c.0.len()) <= BATCH {
+                pictures += cuts[end].as_ref().map_or(0, |c| c.0.len());
+                end += 1;
+            }
             let group: Vec<(usize, (Vec<Prepared>, image::RgbaImage))> = (at..end).filter_map(|i| cuts[i].take().map(|p| (i, p))).collect();
             if !group.is_empty() {
                 let (idx, cut): (Vec<usize>, Vec<(Vec<Prepared>, image::RgbaImage)>) = group.into_iter().unzip();
@@ -862,19 +956,23 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                     if rows.len() < count {
                         continue;
                     }
-                    let v = match &frame_dirs[k * SHARD + i] {
-                        Some(dir) => video_vector(dir, &files[k * SHARD + i], &rows, dim).map_err(|e| e.to_string())?,
+                    let v = match &frame_dirs[at_shard + i] {
+                        Some(dir) => video_vector(dir, &files[at_shard + i], &rows, dim).map_err(|e| e.to_string())?,
                         None => rows.pop().expect("one row"),
                     };
                     embedded += 1;
-                    vectors[i * dim..(i + 1) * dim].copy_from_slice(&v);
+                    vectors[(part_start + i) * dim..(part_start + i + 1) * dim].copy_from_slice(&v);
                     head = Some(v[..HEAD].to_vec());
                 }
                 ctx.show_recent(thumbs, head);
             }
-            processed += (at..end).filter(|&i| hits[k * SHARD + i].is_none()).count();
+            processed += (at..end).filter(|&i| hits[at_shard + i].is_none()).count();
+            processed_pictures += (at..end).filter(|&i| hits[at_shard + i].is_none()).map(|i| files[at_shard + i].len()).sum::<usize>();
             at = end;
-            ctx.set_done(already + reused_count + processed);
+            ctx.set_done(already + reused_count + processed_pictures);
+        }
+        if !last {
+            continue;
         }
         let bytes: Vec<u8> = vectors.iter().flat_map(|&x| half::f16::from_f32(x).to_le_bytes()).collect();
         write_atomic(&shard_path(&ctx.dir, k), &bytes).map_err(|e| e.to_string())?;
@@ -893,17 +991,10 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         return Err(format!("none of the {processed} photos could be read (the first: {})", files.iter().zip(reused.iter()).find(|(_, r)| !**r).map_or(String::new(), |(f, _)| f.first().map_or(String::new(), |f| f.display().to_string()))));
     }
 
-    // the videos' frames' vectors, all in one file (frames.bin), and whose each one is (frames_of.bin: the photo's number, u32)
-    let (mut frame_rows, mut owners) = (Vec::new(), Vec::new());
-    for (i, dir) in frame_dirs.iter().enumerate() {
-        if let Some(rows) = dir.as_ref().and_then(|d| fs::read(d.join("vectors.f16")).ok()) {
-            owners.extend(std::iter::repeat_n(i as u32, rows.len() / (dim * 2)));
-            frame_rows.extend(rows);
-        }
-    }
-    if !owners.is_empty() {
+    // the videos' frames' vectors, all in one file, video after video (frames.json, written when they are baked, says which is which)
+    let frame_rows: Vec<u8> = frame_dirs.iter().flatten().filter_map(|d| fs::read(d.join("vectors.f16")).ok()).flatten().collect();
+    if !frame_rows.is_empty() {
         write_atomic(&ctx.dir.join("frames.bin"), &frame_rows).map_err(|e| e.to_string())?;
-        write_atomic(&ctx.dir.join("frames_of.bin"), bytemuck::cast_slice(&owners)).map_err(|e| e.to_string())?;
     }
 
     // all the vectors in one file, shard after shard (not gathered in memory first)
@@ -1023,6 +1114,8 @@ fn name_regions(ctx: &mut Ctx) -> Result<Flow, String> {
 /// The small pictures the viewer draws from (bake.rs), made now so that the finished map opens at once.
 fn bake_pages(ctx: &mut Ctx) -> Result<Flow, String> {
     let photos: Vec<crate::data::Photo> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let frames = keep_frames(ctx)?;
+    let pictures: Vec<PathBuf> = photos.iter().map(|p| p.path(&ctx.dir)).chain(frames.iter().map(|f| ctx.dir.join(&f.file))).collect();
     let progress = crate::data::Progress::default();
     let finished = AtomicBool::new(false);
     let result = std::thread::scope(|scope| {
@@ -1033,12 +1126,56 @@ fn bake_pages(ctx: &mut Ctx) -> Result<Flow, String> {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
         });
-        let result = crate::bake::bake(&ctx.dir, &photos, &progress);
+        let result = crate::bake::bake(&ctx.dir, &pictures, &progress);
         finished.store(true, Ordering::Relaxed);
         result
     });
     result.map_err(|e| e.to_string())?;
     Ok(Flow::Done)
+}
+
+/// The videos' frames as the map keeps them: made small (FRAME_SIDE), listed in frames.json in the order of frames.bin's rows
+/// (the videos that got their vectors, in order, each one's frames in order).
+fn keep_frames(ctx: &mut Ctx) -> Result<Vec<crate::data::Frame>, String> {
+    let found = read_found(&ctx.dir)?;
+    let videos: Vec<(usize, &String)> = found.iter().enumerate().filter_map(|(i, f)| Some((i, f.frames.as_ref()?))).filter(|(_, d)| ctx.dir.join(d).join("vectors.f16").exists()).collect();
+    if videos.is_empty() {
+        return Ok(Vec::new());
+    }
+    ctx.progress(0, videos.len(), "making the videos' frames small");
+    let done = AtomicUsize::new(0);
+    let frames: Vec<Vec<crate::data::Frame>> = videos
+        .par_iter()
+        .map(|&(video, rel)| {
+            let dir = ctx.dir.join(rel);
+            let times: Vec<f32> = fs::read_to_string(dir.join("times.txt")).map_err(|e| e.to_string())?.lines().filter_map(|l| l.parse().ok()).collect();
+            let files = frame_files(&dir);
+            if times.len() != files.len() {
+                return Err(format!("{}: {} frames, {} times", dir.display(), files.len(), times.len()));
+            }
+            let mut out = Vec::new();
+            for (file, time) in files.iter().zip(times) {
+                let img = crate::photo::load(file).ok_or_else(|| format!("{}: can't read", file.display()))?;
+                let img = if img.width().max(img.height()) > crate::data::FRAME_SIDE {
+                    let small = crate::photo::fit(&img, crate::data::FRAME_SIDE, false);
+                    let rgb = image::DynamicImage::ImageRgba8(small.clone()).to_rgb8();
+                    let mut bytes = Vec::new();
+                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85).encode_image(&rgb).map_err(|e| e.to_string())?;
+                    write_atomic(file, &bytes).map_err(|e| e.to_string())?;
+                    small
+                } else {
+                    img
+                };
+                let name = file.file_name().expect("a frame's file").to_string_lossy();
+                out.push(crate::data::Frame { video, time, file: format!("{rel}/{name}"), width: img.width(), height: img.height() });
+            }
+            ctx.set_done(done.fetch_add(1, Ordering::Relaxed) + 1);
+            Ok(out)
+        })
+        .collect::<Result<_, String>>()?;
+    let frames: Vec<crate::data::Frame> = frames.into_iter().flatten().collect();
+    write_atomic(&ctx.dir.join("frames.json"), &serde_json::to_vec(&frames).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(frames)
 }
 
 fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
@@ -1057,13 +1194,10 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
     let maps = ctx.dir.parent().ok_or("no maps folder")?;
     let target = finished_dir(maps, &ctx.job.name);
     fs::remove_dir_all(ctx.dir.join("vectors")).map_err(|e| e.to_string())?;
-    // of a video's frames only its poster is kept (their vectors are in frames.bin)
+    // a video's frames' vectors and times are in frames.bin and frames.json now
     for dir in fs::read_dir(ctx.dir.join("frames")).into_iter().flatten().flatten() {
-        for f in fs::read_dir(dir.path()).into_iter().flatten().flatten() {
-            if f.file_name() != "poster.jpg" {
-                let _ = fs::remove_file(f.path());
-            }
-        }
+        let _ = fs::remove_file(dir.path().join("vectors.f16"));
+        let _ = fs::remove_file(dir.path().join("times.txt"));
     }
     let _ = fs::remove_file(ctx.dir.join("files.json"));
     let _ = fs::remove_file(ctx.dir.join("levels.bin"));
@@ -1190,6 +1324,33 @@ mod tests {
         assert_eq!(serde_json::from_str::<Stage>("\"copy\"").unwrap(), Stage::Scan);
     }
 
+    /// A video's keyframes come out with their times (portrait: the longer side 1024 px), once; a stop kills ffmpeg and leaves
+    /// nothing behind. Needs ffmpeg; no model.
+    #[test]
+    fn video_frames_and_their_times() {
+        let temp = std::env::temp_dir().join(format!("photo-map-frames-test-{}", std::process::id()));
+        fs::create_dir_all(&temp).unwrap();
+        let video = temp.join("tall.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=4:size=1080x1920:rate=25", "-g", "25", "-sc_threshold", "0"])
+            .arg(&video)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let dir = temp.join("frames/000000");
+        assert_eq!(video_frames(&video, &dir, &|| true), Ok(false), "stopped");
+        assert!(!dir.exists() && !dir.with_extension("part").exists(), "nothing left of a stopped one");
+        assert_eq!(video_frames(&video, &dir, &|| false), Ok(true));
+        let frames = frame_files(&dir);
+        assert_eq!(frames.len(), 4, "a keyframe a second");
+        assert_eq!(shown_size(&frames[0]), Some((576, 1024)));
+        let times: Vec<f32> = fs::read_to_string(dir.join("times.txt")).unwrap().lines().map(|l| l.parse().unwrap()).collect();
+        assert!(times.len() == 4 && times.iter().enumerate().all(|(k, t)| (t - k as f32).abs() < 0.2), "about a second apart: {times:?}");
+        assert!(!dir.join("ffmpeg.log").exists());
+        assert_eq!(video_frames(&video, &dir, &|| true), Ok(true), "done once: kept");
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
     /// A video is one photo on the map: its vector the average of its frames', its picture the frame nearest that average, its
     /// frames' vectors kept for search. Needs ffmpeg (it makes the videos, too).
     #[test]
@@ -1224,15 +1385,26 @@ mod tests {
         let poster = done.join(photos[video]["file"].as_str().unwrap());
         assert!(poster.ends_with("poster.jpg") && poster.exists(), "{poster:?}");
         assert_eq!((photos[video]["width"].as_u64(), photos[video]["height"].as_u64()), (Some(320), Some(180)));
-        assert_eq!(fs::read_dir(poster.parent().unwrap()).unwrap().count(), 1, "only the poster of the frames is kept");
-        let owners: Vec<u32> = bytemuck::pod_collect_to_vec(&fs::read(done.join("frames_of.bin")).unwrap());
-        assert_eq!(owners, vec![video as u32; 18]);
+        // its 18 keyframes: in frames.json (a second apart, made small) and frames.bin, in the same order
+        let frames: Vec<crate::data::Frame> = serde_json::from_slice(&fs::read(done.join("frames.json")).unwrap()).unwrap();
+        assert_eq!(frames.len(), 18);
+        for (k, f) in frames.iter().enumerate() {
+            assert_eq!(f.video, video);
+            assert!((f.time - k as f32).abs() < 0.2, "frame {k} at {}", f.time);
+            assert_eq!((f.width, f.height), (256, 144));
+            assert!(done.join(&f.file).exists(), "{}", f.file);
+        }
         assert_eq!(fs::metadata(done.join("frames.bin")).unwrap().len() as usize, 18 * DIM * 2);
-        // a search finds the video by its best frame
-        let vectors = crate::search::Vectors::open(&done, 7, DIM).unwrap();
-        let frame: Vec<f32> = fs::read(done.join("frames.bin")).unwrap()[..DIM * 2].chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();
-        let scores = vectors.cosines(&frame);
-        assert!(scores[video] > 0.99, "the first frame against itself: {}", scores[video]);
+        assert_eq!(fs::read_dir(poster.parent().unwrap()).unwrap().count(), 19, "the poster and the frames, nothing else");
+        // the map opens with them, and a search finds the video by its best frame and shows that frame
+        let data = crate::data::MapData::load(&done, &crate::data::Progress::default()).unwrap();
+        assert_eq!(data.pictures(), 7 + 18);
+        let vectors = crate::search::Vectors::open(&done, 7, 18, DIM).unwrap();
+        let frame: Vec<f32> = fs::read(done.join("frames.bin")).unwrap()[3 * DIM * 2..4 * DIM * 2].chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();
+        let mut scores = vectors.cosines(&frame);
+        let shown = crate::search::best_frames(&mut scores, &vectors.frame_cosines(&frame), &data.frames);
+        assert!(scores[video] > 0.99, "frame 3 against itself: {}", scores[video]);
+        assert!(shown[video] >= 7 && data.frames[shown[video] - 7].time < 12.0, "a frame of the test pattern, not of the bars: {}", shown[video]);
         fs::remove_dir_all(&temp).unwrap();
     }
 

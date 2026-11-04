@@ -350,7 +350,7 @@ impl Home {
                         let mut line = format!("{}", b.stage.label());
                         if s.total > 0 {
                             // only these stages count photos; the others count steps of their own (shown as a percentage)
-                            let by_photo = matches!(b.stage, Stage::Scan | Stage::Embed);
+                            let by_photo = matches!(b.stage, Stage::Videos | Stage::Scan | Stage::Embed);
                             if by_photo {
                                 line += &format!(" · {} of {}", thousands(s.done), thousands(s.total));
                             } else {
@@ -358,7 +358,7 @@ impl Home {
                             }
                             let rate = s.rate().unwrap_or(0.0);
                             if rate > 0.0 && by_photo {
-                                line += &format!(" · {rate:.1} photos/s");
+                                line += &format!(" · {rate:.1} {}/s", s.unit);
                             }
                             if rate > 0.0 && s.done < s.total {
                                 line += &format!(" · about {} left", duration((s.total - s.done) as f32 / rate));
@@ -1188,6 +1188,7 @@ fn size_text(mb: u32) -> String {
 /// Plain text on the card, joined by a thin line, so it reads as a path and not as buttons.
 fn step(ui: &mut Ui, step: Stage, current: Stage, last: bool) {
     let short = match step {
+        Stage::Videos => "Videos",
         Stage::Scan => "Find",
         Stage::Embed => "Understand",
         Stage::Layout => "Lay out",
@@ -1321,6 +1322,7 @@ mod shots {
             stage: Stage::Embed,
             done: 4_210,
             total: 12_000,
+            unit: "pictures",
             message: "making the photos' numbers".into(),
             stage_started: now - Duration::from_secs(300),
             base: (now - Duration::from_secs(300), 0),

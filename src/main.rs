@@ -143,8 +143,12 @@ struct OpenMap {
     flags_dirty: bool,
     /// A photo's side in world units (see PHOTO_WORLD_DEFAULT).
     photo_world: f32,
-    /// The last search's cosine with every photo's picture (empty: no search).
+    /// The last search's cosine with every photo's picture (empty: no search); a video's is its best frame's.
     sims: Vec<f32>,
+    /// The picture each photo is shown by among the last search's matches: itself, or a video's best frame (search::best_frames).
+    best: Vec<usize>,
+    /// The picture each copy beside the world shows (in the order of `order`).
+    pictures: Vec<usize>,
     /// The photos that match the search, best first, and which of them the last next/previous step went to.
     order: Vec<usize>,
     at: Option<usize>,
@@ -190,12 +194,14 @@ impl OpenMap {
         t * t * (3.0 - 2.0 * t)
     }
 
-    /// Put copies of these photos beside the world, in this order (the search's matches, or a path).
-    fn show_beside(&mut self, queue: &wgpu::Queue, photos: Vec<usize>) {
+    /// Put copies of these photos beside the world, in this order (the search's matches, or a path). `best`: a video's copy
+    /// shows the frame that matched the search best, else its poster.
+    fn show_beside(&mut self, queue: &wgpu::Queue, photos: Vec<usize>, best: bool) {
         self.order = photos;
         self.at = None;
+        self.pictures = self.order.iter().map(|&i| if best { self.best[i] } else { i }).collect();
         (self.copies, self.copy_side) = beside::place(self.order.len());
-        self.renderer.set_copies(queue, &self.order, &self.copies);
+        self.renderer.set_copies(queue, &self.data, &self.pictures, &self.copies);
     }
 
     /// The box the photos beside the world and their copies span.
@@ -277,7 +283,7 @@ struct Viewer {
     /// The search being worked on: its terms' query numbers (None once answered), their cosines, and how those combine
     /// (NOT: query.rs).
     asked: Vec<Option<u64>>,
-    answers: Vec<Option<Vec<f32>>>,
+    answers: Vec<Option<(Vec<f32>, Vec<f32>)>>,
     logic: query::Logic,
     /// The photos searched for (dropped on the window, or from the photo menu), each with a small picture for the bar. Several are
     /// averaged: what they share counts.
@@ -470,7 +476,7 @@ impl Viewer {
         self.filter_edit = None;
         self.names = None;
         self.shown.clear();
-        let vectors = search::Vectors::open(&path, n, data.manifest.dim());
+        let vectors = search::Vectors::open(&path, n, data.frames.len(), data.manifest.dim());
         let tree = tree::read(&path, n);
         let in_process = vectors.is_some();
         self.asked.clear();
@@ -492,6 +498,8 @@ impl Viewer {
             flags_dirty: true,
             photo_world,
             sims: Vec::new(),
+            best: (0..n).collect(),
+            pictures: Vec::new(),
             order: Vec::new(),
             at: None,
             copies: Vec::new(),
@@ -832,7 +840,7 @@ impl Viewer {
                     m.flags_dirty = true;
                     m.sims.clear();
                     m.trail = None;
-                    m.show_beside(&self.gpu.queue, Vec::new());
+                    m.show_beside(&self.gpu.queue, Vec::new(), false);
                     self.status = if unknown {
                         "this map knows no cameras, dates or places: make it again to read them".into()
                     } else {
@@ -841,7 +849,9 @@ impl Viewer {
                     return;
                 }
                 let n = photos.len();
-                self.map.as_mut().unwrap().sims = vec![0.0; n];
+                let m = self.map.as_mut().unwrap();
+                m.sims = vec![0.0; n];
+                m.best = (0..n).collect();
                 self.apply_search(); // the camera stays where it is: the marks light up where they are
                 return;
             }
@@ -852,7 +862,7 @@ impl Viewer {
             m.flags_dirty = true;
             m.sims.clear();
             m.trail = None;
-            m.show_beside(&self.gpu.queue, Vec::new());
+            m.show_beside(&self.gpu.queue, Vec::new(), false);
             self.shown.clear();
             self.status.clear();
         } else if m.vectors.is_none() {
@@ -960,12 +970,17 @@ impl Viewer {
             let Some(m) = &mut self.map else { continue };
             match (vector, &m.vectors) {
                 (Ok(v), Some(vectors)) => {
-                    self.answers[k] = Some(vectors.cosines(&v));
+                    self.answers[k] = Some((vectors.cosines(&v), vectors.frame_cosines(&v)));
                     if self.asked.iter().any(Option::is_some) {
                         continue; // the other terms are still on their way
                     }
-                    let cos: Vec<Vec<f32>> = std::mem::take(&mut self.answers).into_iter().flatten().collect();
+                    // the photos' scores, and the frames' the same way (a video then scores as its best frame)
+                    let (cos, frame_cos): (Vec<Vec<f32>>, Vec<Vec<f32>>) = std::mem::take(&mut self.answers).into_iter().flatten().unzip();
                     m.sims = self.logic.combine(&cos);
+                    m.best = (0..m.sims.len()).collect();
+                    if !m.data.frames.is_empty() {
+                        m.best = search::best_frames(&mut m.sims, &self.logic.combine(&frame_cos), &m.data.frames);
+                    }
                     self.apply_search(); // the camera stays where it is: the marks light up where they are
                     if let Some(note) = note {
                         self.status = format!("{} - {note}", self.status);
@@ -996,14 +1011,14 @@ impl Viewer {
         if shown == 0 && self.names.is_some() {
             m.flags.fill(0);
             m.flags_dirty = true;
-            m.show_beside(&self.gpu.queue, Vec::new());
+            m.show_beside(&self.gpu.queue, Vec::new(), false);
             self.status = "no photo fits the filters".into();
             return None;
         }
         if shown == 0 {
             m.flags.fill(0);
             m.flags_dirty = true;
-            m.show_beside(&self.gpu.queue, Vec::new());
+            m.show_beside(&self.gpu.queue, Vec::new(), false);
             self.status = "every photo is hidden".into();
             return None;
         }
@@ -1020,7 +1035,7 @@ impl Viewer {
         let mut order: Vec<usize> = (0..n).filter(|&i| m.flags[i] > 0).collect();
         order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
         m.trail = None;
-        m.show_beside(&self.gpu.queue, order);
+        m.show_beside(&self.gpu.queue, order, true);
         // how many is already in "6 of 100" beside it
         self.status = if self.names_only { format!("{}: {shown} photos", self.shown) } else { format!("{}: similarity {cut:.2} to {best:.2}", self.shown) };
         m.flags_dirty = true;
@@ -1116,7 +1131,7 @@ impl Viewer {
             None => format!("a path of {} steps", path.len() - 1),
         };
         m.trail = Some((a, b));
-        m.show_beside(&self.gpu.queue, path);
+        m.show_beside(&self.gpu.queue, path, false);
         self.camera.fly_to(self.camera.fit(m.beside_box().0, m.beside_box().1));
     }
 
@@ -1448,7 +1463,7 @@ impl Viewer {
                     m.renderer.upload_flags(&self.gpu.queue, &flags);
                     m.flags_dirty = false;
                 }
-                let copies = (&m.order[..], &m.copies[..], cam.copy_px);
+                let copies = (&m.pictures[..], &m.copies[..], cam.copy_px);
                 m.streamer.update(&self.gpu.queue, &m.data, view_min, view_max, self.camera.center, size_px, copies, lens.map(|l| l.1));
                 m.renderer.draw(&self.gpu.queue, &mut encoder, &view, cam, self.smooth, lens.map(|l| l.0));
             }

@@ -94,7 +94,8 @@ pub fn map_bundle(maps: &Path, name: &str, n: usize) -> PathBuf {
     let fine: Vec<_> = clusters.iter().zip(centres).flat_map(|((name, _), (x, y))| [label(&format!("{name}, left"), (x - 400.0, y), 350.0, n / 12), label(&format!("{name}, right"), (x + 400.0, y), 350.0, n / 12)]).collect();
     std::fs::write(bundle.join("region_names.json"), serde_json::json!({ "levels": [coarse, fine] }).to_string()).unwrap();
     let read: Vec<crate::data::Photo> = serde_json::from_slice(&std::fs::read(bundle.join("photos.json")).unwrap()).unwrap();
-    crate::bake::bake(&bundle, &read, &crate::data::Progress::default()).unwrap();
+    let files: Vec<std::path::PathBuf> = read.iter().map(|p| p.path(&bundle)).collect();
+    crate::bake::bake(&bundle, &files, &crate::data::Progress::default()).unwrap();
     bundle
 }
 

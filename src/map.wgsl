@@ -50,7 +50,7 @@ const NONE: u32 = 0xffffffffu;
 @group(0) @binding(5) var<storage, read> table: array<u32>;
 @group(0) @binding(6) var<storage, read> first_page: array<u32>;
 @group(0) @binding(7) var<storage, read> was: array<vec4f>;     // x, y and size before the view changed, unused
-@group(0) @binding(8) var<storage, read> copies: array<vec4f>;   // the matches' copies: x, y, the photo's number (its bits), unused
+@group(0) @binding(8) var<storage, read> copies: array<vec4f>;   // the matches' copies: x, y, the picture's number (its bits), width / height
 
 struct VsOut {
     @builtin(position) pos: vec4f,
@@ -63,9 +63,9 @@ struct VsOut {
     @location(6) @interpolate(flat) shadow: f32,  // px the lifted photo's shadow reaches (0: not lifted)
 }
 
-// One corner of photo `id`'s quad, centred on `at` (world), `shape` times `px` on screen, drawn `grow` times bigger,
-// lifted by `lift` (0 ... 1).
-fn quad(v: u32, id: u32, at: vec2f, shape: vec2f, px: f32, grow: f32, lift: f32) -> VsOut {
+// One corner of picture `id`'s quad (with these flags), centred on `at` (world), `shape` times `px` on screen, drawn `grow`
+// times bigger, lifted by `lift` (0 ... 1).
+fn quad(v: u32, id: u32, flag: u32, at: vec2f, shape: vec2f, px: f32, grow: f32, lift: f32) -> VsOut {
     var corners = array(vec2f(0., 0.), vec2f(1., 0.), vec2f(0., 1.), vec2f(0., 1.), vec2f(1., 0.), vec2f(1., 1.));
     let size = max(px * shape, vec2f(1.0)) * grow * (1.0 + LIFT * lift);  // longer side = px, the other follows the shape; never under 1 px
     let shadow = min(LIFT_SHADOW * max(size.x, size.y), LIFT_SHADOW_MAX) * lift;
@@ -75,7 +75,7 @@ fn quad(v: u32, id: u32, at: vec2f, shape: vec2f, px: f32, grow: f32, lift: f32)
     out.pos = vec4f(screen.x / cam.viewport.x * 2.0 - 1.0, 1.0 - screen.y / cam.viewport.y * 2.0, 0.0, 1.0);
     out.local = local;
     out.id = id;
-    out.flags = flags[id];
+    out.flags = flag;
     out.size = size;
     out.shape = shape / max(shape.x, shape.y);
     out.px = px * max(shape.x, shape.y);
@@ -94,7 +94,7 @@ fn photo_quad(v: u32, id: u32, lift: f32) -> VsOut {
     let f = was[id];
     let size = mix(f.z, max(p.z, p.w), cam.slide);  // its longer side's size; the shape is 1 long times its size
     let shape = p.zw / max(p.z, p.w) * size;
-    return quad(v, id, mix(f.xy, p.xy, cam.slide), shape, cam.size_px, grow(id), lift);
+    return quad(v, id, flags[id], mix(f.xy, p.xy, cam.slide), shape, cam.size_px, grow(id), lift);
 }
 
 @vertex
@@ -107,11 +107,8 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) id: u32) -> V
 // no outline: they are in order, best first, and the tip under the mouse says how close each is).
 fn copy_quad(v: u32, k: u32, lift: f32) -> VsOut {
     let c = copies[k];
-    let id = bitcast<u32>(c.z);
-    let shape = points[id].zw;
-    var out = quad(v, id, c.xy, shape / max(shape.x, shape.y), cam.copy_px, 1.0, lift);  // its shape at size 1
-    out.flags = 0u;
-    return out;
+    let shape = select(vec2f(c.w, 1.0), vec2f(1.0, 1.0 / c.w), c.w >= 1.0);  // its shape, the longer side 1
+    return quad(v, bitcast<u32>(c.z), 0u, c.xy, shape, cam.copy_px, 1.0, lift);
 }
 
 @vertex

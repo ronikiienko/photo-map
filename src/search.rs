@@ -148,53 +148,58 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     lanes.iter().sum::<f32>() + tail
 }
 
-/// A video's score is its best frame's (`owners`: whose each frame is; a video's frames come one after another).
-fn best_frames(out: &mut [f32], frames: &[f32], owners: &[u32]) {
+/// A video's score is its best frame's: `scores` (per photo) get their videos' best of `frame_scores` (frame k is from video
+/// `frames[k].video`; a video's frames come one after another). Returns the picture each photo is shown by among the matches:
+/// itself, or (a video) its best frame (picture n + k).
+pub fn best_frames(scores: &mut [f32], frame_scores: &[f32], frames: &[crate::data::Frame]) -> Vec<usize> {
+    let n = scores.len();
+    let mut shown: Vec<usize> = (0..n).collect();
     let mut last = None;
-    for (&c, &o) in frames.iter().zip(owners) {
-        let o = o as usize;
-        out[o] = if last == Some(o) { out[o].max(c) } else { c };
-        last = Some(o);
+    for (k, (&c, f)) in frame_scores.iter().zip(frames).enumerate() {
+        if last != Some(f.video) || c > scores[f.video] {
+            scores[f.video] = c;
+            shown[f.video] = n + k;
+        }
+        last = Some(f.video);
     }
+    shown
 }
 
 /// A map's vectors, memory-mapped.
 pub struct Vectors {
     images: Mmap,
-    /// The videos' frames (frames.bin), and whose each one is (frames_of.bin: a photo's number, u32): a video's own row is the
-    /// average of its frames, which places it on the map; a search scores it by its best frame.
-    frames: Option<(Mmap, Vec<u32>)>,
+    /// The videos' frames (frames.bin; empty if none): a video's own row is the average of its frames, which places it on the
+    /// map; a search scores it by its best frame (best_frames).
+    frames: Option<Mmap>,
     /// How many numbers each vector has.
     dim: usize,
 }
 
 impl Vectors {
-    /// None if the map has no vectors (embeddings.bin), or they are the wrong size for its photos.
-    pub fn open(bundle: &Path, n: usize, dim: usize) -> Option<Self> {
-        let map = |name: &str| {
+    /// None if the map has no vectors (embeddings.bin), or they are the wrong size for its photos (or frames.bin for its
+    /// `frames` frames).
+    pub fn open(bundle: &Path, n: usize, frames: usize, dim: usize) -> Option<Self> {
+        let map = |name: &str, rows: usize| {
             let file = std::fs::File::open(bundle.join(name)).ok()?;
             // mapped in whole now, while the map opens: the first search would otherwise wait for the disk and the page faults (~50 ms)
             let map = unsafe { memmap2::MmapOptions::new().populate().map(&file) }.ok()?;
-            (map.len() == n * dim * 2).then_some(map)
+            (map.len() == rows * dim * 2).then_some(map)
         };
-        let frames = (|| {
-            let owners: Vec<u32> = bytemuck::pod_collect_to_vec(&std::fs::read(bundle.join("frames_of.bin")).ok()?);
-            let file = std::fs::File::open(bundle.join("frames.bin")).ok()?;
-            let map = unsafe { memmap2::MmapOptions::new().populate().map(&file) }.ok()?;
-            (map.len() == owners.len() * dim * 2 && owners.iter().all(|&o| (o as usize) < n)).then_some((map, owners))
-        })();
-        Some(Self { images: map("embeddings.bin")?, frames, dim })
+        let frames = if frames > 0 { Some(map("frames.bin", frames)?) } else { None };
+        Some(Self { images: map("embeddings.bin", n)?, frames, dim })
     }
 
     /// The query's cosine with every photo's picture (negative ones too). The query is a unit vector, so is each photo's.
     /// Blocks of rows on each thread, each row turned into floats a whole slice at a time (with the CPU's own f16 instructions,
-    /// which one number at a time can't use) and multiplied in eight lanes: 88k photos in ~10 ms instead of ~50.
+    /// which one number at a time can't use) and multiplied in eight lanes: 88k photos in ~10 ms instead of ~50. A video's is its
+    /// average frame's (`frame_cosines` has each frame's).
     pub fn cosines(&self, query: &[f32]) -> Vec<f32> {
-        let mut out = cosines(bytemuck::cast_slice(&self.images), self.dim, query);
-        if let Some((frames, owners)) = &self.frames {
-            best_frames(&mut out, &cosines(bytemuck::cast_slice(frames), self.dim, query), owners);
-        }
-        out
+        cosines(bytemuck::cast_slice(&self.images), self.dim, query)
+    }
+
+    /// The query's cosine with every frame of the videos (empty if there are none).
+    pub fn frame_cosines(&self, query: &[f32]) -> Vec<f32> {
+        self.frames.as_ref().map_or(Vec::new(), |f| cosines(bytemuck::cast_slice(f), self.dim, query))
     }
 
     /// One photo's vector.
@@ -209,9 +214,11 @@ mod tests {
 
     #[test]
     fn a_video_scores_as_its_best_frame() {
+        let frame = |video| crate::data::Frame { video, time: 0.0, file: String::new(), width: 1, height: 1 };
         let mut out = vec![0.5, 0.9, 0.5, 0.2];
-        best_frames(&mut out, &[0.1, 0.3, 0.2, 0.7, 0.6], &[1, 1, 1, 3, 3]);
+        let shown = best_frames(&mut out, &[0.1, 0.3, 0.2, 0.7, 0.6], &[frame(1), frame(1), frame(1), frame(3), frame(3)]);
         assert_eq!(out, vec![0.5, 0.3, 0.5, 0.7], "the video's own row (the average) doesn't count, its best frame does");
+        assert_eq!(shown, vec![0, 4 + 1, 2, 4 + 3], "a photo shows itself, a video its best frame (pictures after the 4 photos)");
     }
 
     #[test]

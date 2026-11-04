@@ -1,4 +1,5 @@
-//! All photo pixels on the GPU, one unified system: every level (1 px ... 1024 px) of every photo is a picture
+//! All pixels on the GPU, one unified system, for every picture (the photos, then the videos' frames: data.rs): every level
+//! (1 px ... 1024 px) of every picture is a picture
 //! in a slot of that level's pool (see pages.rs). A table gives, per photo, how many levels are loaded and the
 //! slot of each. Levels 1 ... 16 px are always loaded (slot = photo id); from 32 px up they are streamed for the photos on
 //! screen (from 16 px on screen, when the 32 px picture starts to fade in), each into a free or least-recently-seen slot of
@@ -118,7 +119,7 @@ pub struct Streamer {
 
 impl Streamer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, data: &MapData) -> Self {
-        let n = data.n();
+        let n = data.pictures();
         let layout = Layout::new(n);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pages"),
@@ -158,7 +159,7 @@ impl Streamer {
         for i in 0..n {
             let e = &mut table_cpu[i * ENTRY..(i + 1) * ENTRY];
             e[0] = RESIDENT as u32;
-            e[1] = data.native_long(i);
+            e[1] = data.picture_long(i);
             e[2] = 0;
             e[3] = 0;
             for l in 0..RESIDENT {
@@ -307,7 +308,7 @@ impl Streamer {
 
     /// Once per frame: take in finished loads, then request what the current view needs.
     /// `view_min`/`view_max`: the visible world box; `size_px`: a photo's longer side on screen at size 1 (data.size). `copies`: the matches' copies
-    /// beside the world (beside.rs), which photo is where, and their longer side on screen. `lens`: what the lens shows, if it is
+    /// beside the world (beside.rs), which picture is where (a photo, or a video's frame), and their longer side on screen. `lens`: what the lens shows, if it is
     /// open; its photos come first.
     pub fn update(&mut self, queue: &wgpu::Queue, data: &MapData, view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32, copies: (&[usize], &[Point], f32), lens: Option<LensRequest>) {
         self.frame += 1;
@@ -402,7 +403,7 @@ impl Streamer {
             if from < BAKED || from > to || self.loading[id] || !retry {
                 continue;
             }
-            if self.jobs.send(Job { id, path: data.path(id), from, to }).is_ok() {
+            if self.jobs.send(Job { id, path: data.picture_path(id), from, to }).is_ok() {
                 self.in_flight += 1;
                 self.loading[id] = true;
             }

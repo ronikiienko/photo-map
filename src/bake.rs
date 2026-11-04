@@ -1,17 +1,17 @@
 //! The baked levels (1 px ... 32 px) as BC7 pages: pages_bc7.bin; 1 ... 16 px are uploaded to the GPU as they are, 32 px pictures
 //! are copied out as they come on screen (stream.rs).
 //! Made as the last step of building a map (build.rs), and kept in the bundle.
-//! Every level L holds each photo in a slot of 2^L px (photo fitted into the top-left corner, real shape kept,
-//! small photos enlarged). Slots sit on PAGE x PAGE pages in a grid of PAGE / 2^L per row; slot = photo index.
+//! Every level L holds each picture (the photos, then the videos' frames) in a slot of 2^L px (fitted into the top-left corner,
+//! real shape kept, small ones enlarged). Slots sit on PAGE x PAGE pages in a grid of PAGE / 2^L per row; slot = picture index.
 //! Smaller levels are averaged from the photo's own pixels only, never from the empty rest of the tile.
 //! Pages are written level 0 first, each as BC7 blocks (16 bytes per 4 x 4 pixels).
 
-use crate::data::{Photo, Progress};
+use crate::data::Progress;
 use crate::pages::{BAKED, PAGE as PAGE_U32};
 use crate::photo;
 use rayon::prelude::*;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -21,8 +21,9 @@ const TOP: usize = 1 << (LEVELS - 1);
 /// Rows compressed per task: a multiple of 4 (a BC7 block row).
 const STRIP: usize = 64;
 
-pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<()> {
-    let n = photos.len();
+/// Bakes the pictures in these files, in this order (picture i: `pictures[i]`).
+pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Result<()> {
+    let n = pictures.len();
     let started = Instant::now();
     let step = |msg: String| eprintln!("[{:5.0}s] {msg}", started.elapsed().as_secs_f32());
     step(format!("{}: baking the small levels of {n} photos", bundle.display()));
@@ -66,7 +67,7 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
         let mut tiles = vec![0u8; (end - first) * TOP * TOP * 4];
         let mut content = vec![(0usize, 0usize); end - first];
         tiles.par_chunks_mut(TOP * TOP * 4).zip(content.par_iter_mut()).enumerate().for_each(|(k, (tile, size))| {
-            if let Some(img) = photo::load_for(&photos[first + k].path(bundle), |_, _| TOP as u32) {
+            if let Some(img) = photo::load_for(&pictures[first + k], |_, _| TOP as u32) {
                 let img = photo::fit(&img, TOP as u32, true);
                 *size = (img.width() as usize, img.height() as usize);
                 for (y, row) in img.as_raw().chunks(img.width() as usize * 4).enumerate() {
@@ -186,11 +187,11 @@ mod tests {
     fn bakes_the_resident_levels() {
         let dir = std::env::temp_dir().join(format!("photo-map-bake-test-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("originals")).unwrap();
-        let photos: Vec<Photo> = (0..5)
+        let photos: Vec<PathBuf> = (0..5)
             .map(|i| {
-                let file = format!("originals/{i}.png");
-                image::RgbaImage::from_pixel(100 + i * 20, 80, image::Rgba([50 * i as u8, 120, 200, 255])).save(dir.join(&file)).unwrap();
-                serde_json::from_value(serde_json::json!({ "file": file, "width": 100 + i * 20, "height": 80, "title": "t" })).unwrap()
+                let file = dir.join(format!("originals/{i}.png"));
+                image::RgbaImage::from_pixel(100 + i * 20, 80, image::Rgba([50 * i as u8, 120, 200, 255])).save(&file).unwrap();
+                file
             })
             .collect();
         bake(&dir, &photos, &Progress::default()).unwrap();

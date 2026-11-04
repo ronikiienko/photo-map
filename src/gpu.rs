@@ -179,7 +179,8 @@ pub struct MapRenderer {
     points: wgpu::Buffer,
     /// Per photo: x, y and size where it was before the view changed, unused.
     from: wgpu::Buffer,
-    /// The matches' copies beside the world: x, y, the photo's number (its bits), unused; and how many there are now.
+    /// The matches' copies beside the world: x, y, the picture's number (its bits; a photo, or a video's frame), its width over its
+    /// height; and how many there are now.
     copies: wgpu::Buffer,
     n_copies: u32,
     n: u32,
@@ -311,9 +312,16 @@ impl MapRenderer {
         Self { pipeline, copy_pipeline, disc_pipeline, lift_pipeline, bind_groups, camera, lens_camera, flags, points, from, copies, n_copies: 0, n: n as u32 }
     }
 
-    /// The matches' copies beside the world: photo `photos[k]` at `at[k]`.
-    pub fn set_copies(&mut self, queue: &wgpu::Queue, photos: &[usize], at: &[crate::data::Point]) {
-        let copies: Vec<[f32; 4]> = photos.iter().zip(at).map(|(&i, p)| [p.x, p.y, f32::from_bits(i as u32), 0.0]).collect();
+    /// The matches' copies beside the world: picture `pictures[k]` (a photo, or a video's frame) at `at[k]`.
+    pub fn set_copies(&mut self, queue: &wgpu::Queue, data: &MapData, pictures: &[usize], at: &[crate::data::Point]) {
+        let copies: Vec<[f32; 4]> = pictures
+            .iter()
+            .zip(at)
+            .map(|(&i, p)| {
+                let form = data.picture_form(i);
+                [p.x, p.y, f32::from_bits(i as u32), form.x / form.y.max(1e-6)]
+            })
+            .collect();
         if !copies.is_empty() {
             queue.write_buffer(&self.copies, 0, bytemuck::cast_slice(&copies));
         }
