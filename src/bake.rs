@@ -1,4 +1,5 @@
-//! The always-loaded levels (1 px ... 32 px) as BC7 pages: pages_bc7.bin, uploaded to the GPU as it is.
+//! The baked levels (1 px ... 32 px) as BC7 pages: pages_bc7.bin; 1 ... 16 px are uploaded to the GPU as they are, 32 px pictures
+//! are copied out as they come on screen (stream.rs).
 //! Made as the last step of building a map (build.rs), and kept in the bundle.
 //! Every level L holds each photo in a slot of 2^L px (photo fitted into the top-left corner, real shape kept,
 //! small photos enlarged). Slots sit on PAGE x PAGE pages in a grid of PAGE / 2^L per row; slot = photo index.
@@ -6,7 +7,7 @@
 //! Pages are written level 0 first, each as BC7 blocks (16 bytes per 4 x 4 pixels).
 
 use crate::data::{Photo, Progress};
-use crate::pages::{PAGE as PAGE_U32, RESIDENT};
+use crate::pages::{BAKED, PAGE as PAGE_U32};
 use crate::photo;
 use rayon::prelude::*;
 use std::io::{self, Write};
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 const PAGE: usize = PAGE_U32 as usize;
-const LEVELS: usize = RESIDENT; // 1, 2, 4, ... 32 px
+const LEVELS: usize = BAKED; // 1, 2, 4, ... 32 px
 const TOP: usize = 1 << (LEVELS - 1);
 /// Rows compressed per task: a multiple of 4 (a BC7 block row).
 const STRIP: usize = 64;
@@ -24,7 +25,7 @@ pub fn bake(bundle: &Path, photos: &[Photo], progress: &Progress) -> io::Result<
     let n = photos.len();
     let started = Instant::now();
     let step = |msg: String| eprintln!("[{:5.0}s] {msg}", started.elapsed().as_secs_f32());
-    step(format!("{}: baking the always-loaded levels of {n} photos", bundle.display()));
+    step(format!("{}: baking the small levels of {n} photos", bundle.display()));
     progress.stage("preparing small pictures (reading every photo, then compressing)", n);
 
     // what the encoder makes of a block of zeros (transparent black), the same wherever it is
@@ -180,7 +181,7 @@ mod tests {
         assert_eq!(size, (1, 1));
     }
 
-    /// Baking a few photos writes the always-loaded levels, in pages.rs's size.
+    /// Baking a few photos writes the baked levels, in pages.rs's size.
     #[test]
     fn bakes_the_resident_levels() {
         let dir = std::env::temp_dir().join(format!("photo-map-bake-test-{}", std::process::id()));
@@ -194,7 +195,7 @@ mod tests {
             .collect();
         bake(&dir, &photos, &Progress::default()).unwrap();
         let len = std::fs::metadata(dir.join("pages_bc7.bin")).unwrap().len() as usize;
-        assert_eq!(len, crate::pages::resident_bytes(photos.len()));
+        assert_eq!(len, crate::pages::baked_bytes(photos.len()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -8,7 +8,7 @@
 //!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
 //!     embeddings.bin  per photo: float16 vector of the picture (search and Groups)
 //!     tree.bin        per photo: its parent in the tree that paths between photos follow (tree.rs)
-//!     pages_bc7.bin   the always-loaded levels, made while the map is built (bake.rs)
+//!     pages_bc7.bin   the baked levels (1 ... 32 px), made while the map is built (bake.rs)
 
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
@@ -173,8 +173,8 @@ pub struct MapData {
     pub sizes: Vec<f32>,
     /// A photo's longer side on the map (world units): the median distance to the nearest photo before they were spread.
     pub side: f32,
-    /// The always-loaded levels as BC7 pages (bake.rs), uploaded to the GPU as they are.
-    pub pages: Mmap,
+    /// The baked levels as BC7 pages (bake.rs): 1 ... 16 px uploaded to the GPU as they are, 32 px copied out as needed (stream.rs).
+    pub pages: std::sync::Arc<Mmap>,
     pub grid: Grid,
     /// Empty if the bundle has no regions.json.
     pub regions: Regions,
@@ -192,7 +192,7 @@ impl MapData {
             return Err(std::io::Error::other("bundle files don't match"));
         }
         let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
-        if pages.len() != crate::pages::resident_bytes(n) {
+        if pages.len() != crate::pages::baked_bytes(n) {
             return Err(std::io::Error::other("pages_bc7.bin is not the size of the photos"));
         }
         let (side, points) = match manifest.photo_side {
@@ -207,7 +207,7 @@ impl MapData {
         for level in &mut regions.levels {
             level.sort_by(|a, b| b.photos.cmp(&a.photos));
         }
-        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, sizes: Vec::new(), side, pages, grid, regions })
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, points, sizes: Vec::new(), side, pages: std::sync::Arc::new(pages), grid, regions })
     }
 
     pub fn n(&self) -> usize {

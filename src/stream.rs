@@ -1,40 +1,59 @@
 //! All photo pixels on the GPU, one unified system: every level (1 px ... 1024 px) of every photo is a picture
 //! in a slot of that level's pool (see pages.rs). A table gives, per photo, how many levels are loaded and the
-//! slot of each. Only level 0 (1 px, the photo's colour) is always loaded; levels from 64 px up are streamed for the photos on
-//! screen (from 32 px, when the 64 px picture starts to fade in):
-//! worker threads decode the original file, fit each wanted level and BC7-compress it, and the main thread copies
-//! the blocks into a free or least-recently-seen slot. A photo's streamed levels are always contiguous from 64 px up, so
-//! evicting a level also drops the ones above it. The table's first entry is the loaded level count: 1 (just the colour),
-//! or the top streamed level + 1 (levels 1 ... 5 never exist). Only the entries that changed are uploaded again.
+//! slot of each. Levels 1 ... 16 px are always loaded (slot = photo id); from 32 px up they are streamed for the photos on
+//! screen (from 16 px on screen, when the 32 px picture starts to fade in), each into a free or least-recently-seen slot of
+//! its level: 32 px is read from the baked file (pages_bc7.bin) by reader threads (it may have to come from disk); from 64 px up, worker threads decode
+//! the original file, fit each wanted level and BC7-compress it, and the main thread copies the blocks in. A photo's
+//! streamed levels are always contiguous from 32 px up, so evicting a level also drops the ones above it. The table's first
+//! entry is the loaded level count (levels 0 ... count - 1 are there). Only the entries that changed are uploaded again.
 
 use crate::data::{MapData, Point};
 use crate::photo;
-use crate::pages::{LEVELS, Layout, PAGE, RESIDENT, STREAMED, slot_size};
+use crate::pages::{BAKED, LEVELS, Layout, PAGE, RESIDENT, slot_size};
 use glam::Vec2;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 
 const WORKERS: usize = 6;
 const MAX_IN_FLIGHT: usize = 24;
+/// Threads reading baked 32 px pictures (a KB each, in 8 rows of blocks: from disk, a few reads at once are faster).
+const READERS: usize = 4;
+/// Baked 32 px pictures asked for and not back yet, at most (few enough that a zoom elsewhere doesn't wait behind them).
+const MAX_READS: usize = 1024;
 /// u32s per photo in the table: loaded level count, original's longer side, 2 unused, then one slot per level.
 pub const ENTRY: usize = 4 + LEVELS;
 const NONE: u32 = u32::MAX;
 /// A photo whose file couldn't be read is tried again after this many frames (a disk may be plugged in meanwhile).
 const RETRY_FRAMES: u64 = 300;
 
-/// Slot bookkeeping of one streamed level.
+/// Slot bookkeeping of one streamed level (32 px up).
 struct Pool {
     holder: Vec<u32>,
     last_seen: Vec<u64>,
+    /// Slots no photo holds.
+    free: Vec<usize>,
+    /// Slots not on screen this frame, the one seen longest ago last (listed once a frame, when the first is needed).
+    old: Vec<usize>,
+    old_frame: u64,
 }
 
 impl Pool {
+    fn new(slots: usize) -> Self {
+        Self { holder: vec![NONE; slots], last_seen: vec![0; slots], free: (0..slots).rev().collect(), old: Vec::new(), old_frame: 0 }
+    }
+
     /// A free slot, else the one seen longest ago that isn't on screen this frame.
-    fn take(&self, frame: u64) -> Option<usize> {
-        if let Some(s) = self.holder.iter().position(|&h| h == NONE) {
+    fn take(&mut self, frame: u64) -> Option<usize> {
+        if let Some(s) = self.free.pop() {
             return Some(s);
         }
-        (0..self.holder.len()).filter(|&s| self.last_seen[s] < frame).min_by_key(|&s| self.last_seen[s])
+        if self.old_frame != frame {
+            self.old = (0..self.holder.len()).filter(|&s| self.last_seen[s] < frame).collect();
+            self.old.sort_unstable_by_key(|&s| std::cmp::Reverse(self.last_seen[s]));
+            self.old_frame = frame;
+        }
+        // taken since it was listed: seen this frame now
+        std::iter::from_fn(|| self.old.pop()).find(|&s| self.last_seen[s] < frame)
     }
 }
 
@@ -89,6 +108,11 @@ pub struct Streamer {
     in_flight: usize,
     jobs: mpsc::Sender<Job>,
     results: mpsc::Receiver<Loaded>,
+    /// 32 px pictures to read from the baked file, and those read: the photo and its BC7 blocks.
+    reads: mpsc::Sender<usize>,
+    read: mpsc::Receiver<(usize, Vec<u8>)>,
+    reading: Vec<bool>,
+    reads_in_flight: usize,
     frame: u64,
 }
 
@@ -111,11 +135,11 @@ impl Streamer {
             ..Default::default()
         });
 
-        // the always-loaded levels, baked as whole pages, straight from the file
+        // the always-loaded levels, baked as whole pages, straight from the file (the 32 px pages after them are copied from as needed)
         let started = std::time::Instant::now();
         let page_bytes = (PAGE * PAGE) as usize; // BC7: 1 byte per pixel
-        let resident: u32 = (0..STREAMED).map(|l| layout.pages[l]).sum();
-        assert_eq!(data.pages.len(), resident as usize * page_bytes, "pages_bc7.bin doesn't match the photos: delete it, the viewer bakes it again");
+        let resident: u32 = (0..RESIDENT).map(|l| layout.pages[l]).sum();
+        assert_eq!(data.pages.len(), crate::pages::baked_bytes(n), "pages_bc7.bin doesn't match the photos: delete it, the viewer bakes it again");
         for page in 0..resident {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: page }, aspect: wgpu::TextureAspect::All },
@@ -154,11 +178,8 @@ impl Streamer {
             contents: bytemuck::cast_slice(&first),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let pools = (STREAMED..LEVELS)
-            .map(|l| {
-                let slots = layout.slots(l) as usize;
-                Pool { holder: vec![NONE; slots], last_seen: vec![0; slots] }
-            })
+        let pools = (RESIDENT..LEVELS)
+            .map(|l| Pool::new(layout.slots(l) as usize))
             .collect();
 
         let (jobs, job_rx) = mpsc::channel::<Job>();
@@ -175,7 +196,41 @@ impl Streamer {
                 }
             });
         }
-        Self { texture, view, table, first_pages, layout, table_cpu, upload_all: true, changed: Vec::new(), pools, loading: vec![false; n], missing: vec![0; n], in_flight: 0, jobs, results, frame: 1 }
+        let (reads, read_rx) = mpsc::channel::<usize>();
+        let (read_tx, read) = mpsc::channel();
+        let read_rx = Arc::new(Mutex::new(read_rx));
+        for _ in 0..READERS {
+            let (read_rx, read_tx, pages) = (read_rx.clone(), read_tx.clone(), data.pages.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let Ok(id) = read_rx.lock().unwrap().recv() else { return };
+                    if read_tx.send((id, read_baked(&pages, n, id))).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        Self {
+            texture,
+            view,
+            table,
+            first_pages,
+            layout,
+            table_cpu,
+            upload_all: true,
+            changed: Vec::new(),
+            pools,
+            loading: vec![false; n],
+            missing: vec![0; n],
+            in_flight: 0,
+            jobs,
+            results,
+            reads,
+            read,
+            reading: vec![false; n],
+            reads_in_flight: 0,
+            frame: 1,
+        }
     }
 
     pub fn in_flight(&self) -> usize {
@@ -187,7 +242,7 @@ impl Streamer {
         self.pools
             .iter()
             .enumerate()
-            .map(|(k, p)| (slot_size(STREAMED + k), p.holder.iter().filter(|&&h| h != NONE).count(), p.holder.len()))
+            .map(|(k, p)| (slot_size(RESIDENT + k), p.holder.iter().filter(|&&h| h != NONE).count(), p.holder.len()))
             .collect()
     }
 
@@ -198,10 +253,10 @@ impl Streamer {
         (slot_size(e[0] as usize - 1).min(long), long)
     }
 
-    /// The sharpest level worth having: the one whose slot size is closest to the original's longer side.
+    /// The sharpest level worth having: the one whose slot size is closest to the original's longer side (at least 64 px).
     fn max_level(&self, id: usize) -> usize {
         let long = self.table_cpu[id * ENTRY + 1].max(1) as f32;
-        (long.log2().round() as usize).clamp(STREAMED, LEVELS - 1)
+        (long.log2().round() as usize).clamp(BAKED, LEVELS - 1)
     }
 
     /// The photo's file couldn't be read the last time it was wanted at full size (moved, deleted, or on a disk not plugged in).
@@ -212,15 +267,42 @@ impl Streamer {
     /// Drop levels `from..` of a photo (keeps its loaded levels contiguous).
     fn drop_levels(&mut self, id: usize, from: usize) {
         let count = self.table_cpu[id * ENTRY] as usize;
-        for l in from.max(STREAMED)..count {
+        let from = from.max(RESIDENT);
+        for l in from..count {
             let slot = self.table_cpu[id * ENTRY + 4 + l];
-            self.pools[l - STREAMED].holder[slot as usize] = NONE;
+            self.pools[l - RESIDENT].holder[slot as usize] = NONE;
+            self.pools[l - RESIDENT].free.push(slot as usize);
             self.table_cpu[id * ENTRY + 4 + l] = NONE;
         }
         if from < count {
-            self.table_cpu[id * ENTRY] = if from <= STREAMED { RESIDENT as u32 } else { from as u32 };
+            self.table_cpu[id * ENTRY] = from as u32;
             self.changed.push(id as u32);
         }
+    }
+
+    /// Put a level of a photo into a free or least-recently-seen slot of its pool (the level below must be loaded): its BC7
+    /// blocks, `w` x `h` px, `bytes_per_row` apart. False if every slot is on screen this frame.
+    fn place(&mut self, queue: &wgpu::Queue, id: usize, level: usize, blocks: &[u8], w: u32, h: u32, bytes_per_row: u32) -> bool {
+        let pool = level - RESIDENT;
+        let Some(slot) = self.pools[pool].take(self.frame) else { return false };
+        let old = self.pools[pool].holder[slot];
+        if old != NONE {
+            self.drop_levels(old as usize, level);
+            self.pools[pool].free.pop(); // `slot` itself, freed last in this pool
+        }
+        let (page, x, y) = self.layout.place(level, slot as u32);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &self.texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: page }, aspect: wgpu::TextureAspect::All },
+            blocks,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(h / 4) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.pools[pool].holder[slot] = id as u32;
+        self.pools[pool].last_seen[slot] = self.frame;
+        self.table_cpu[id * ENTRY + 4 + level] = slot as u32;
+        self.table_cpu[id * ENTRY] = level as u32 + 1;
+        self.changed.push(id as u32);
+        true
     }
 
     /// Once per frame: take in finished loads, then request what the current view needs.
@@ -237,17 +319,17 @@ impl Streamer {
         // how soon (the lens's first, then nearest the middle)
         let mut visible: Vec<(usize, usize, (u8, f32))> = Vec::new();
         let mut look = |view_min: Vec2, view_max: Vec2, center: Vec2, size_px: f32, copy_px: f32, group: u8| {
-            if level(size_px * data.max_size()) >= STREAMED {
+            if level(size_px * data.max_size()) >= RESIDENT {
                 data.grid.within(&data.points, view_min, view_max, |i| {
                     let want = level(size_px * data.size(i));
-                    if want >= STREAMED {
+                    if want >= RESIDENT {
                         visible.push((i, want, (group, Vec2::new(data.points[i].x, data.points[i].y).distance_squared(center))));
                     }
                 });
             }
             let (photos, at, _) = copies;
             let want = level(copy_px);
-            if want >= STREAMED {
+            if want >= RESIDENT {
                 for (&i, p) in photos.iter().zip(at) {
                     let p = Vec2::new(p.x, p.y);
                     if p.cmpge(view_min).all() && p.cmple(view_max).all() {
@@ -260,21 +342,20 @@ impl Streamer {
             look(l.min, l.max, l.center, l.size_px, l.copy_px, 0);
         }
         look(view_min, view_max, center, size_px, copies.2, 1);
-        let mut wanted: Vec<((u8, f32), usize, usize, usize)> = Vec::new();
+        let mut wanted: Vec<((u8, f32), usize, usize)> = Vec::new();
         for (i, want, soon) in visible {
             let count = self.table_cpu[i * ENTRY] as usize;
-            for l in STREAMED..count {
+            for l in RESIDENT..count {
                 let slot = self.table_cpu[i * ENTRY + 4 + l] as usize;
-                self.pools[l - STREAMED].last_seen[slot] = frame;
+                self.pools[l - RESIDENT].last_seen[slot] = frame;
             }
             let need = want.min(self.max_level(i));
-            let retry = self.missing[i] == 0 || frame >= self.missing[i] + RETRY_FRAMES;
-            if need >= STREAMED && count <= need && !self.loading[i] && retry {
-                wanted.push((soon, i, count, need));
+            if count <= need {
+                wanted.push((soon, i, need));
             }
         }
         // a photo wanted twice (itself and its copy): once, at the bigger of the two
-        wanted.sort_by(|a, b| a.1.cmp(&b.1).then(b.3.cmp(&a.3)).then(a.0.0.cmp(&b.0.0)));
+        wanted.sort_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)).then(a.0.0.cmp(&b.0.0)));
         wanted.dedup_by_key(|w| w.1);
 
         // finished loads, level by level from the bottom: each into a free or least-recently-seen slot
@@ -283,38 +364,45 @@ impl Streamer {
             self.loading[done.id] = false;
             self.missing[done.id] = if done.found { 0 } else { frame };
             for lv in done.levels {
-                let id = done.id;
-                if self.table_cpu[id * ENTRY].max(STREAMED as u32) as usize != lv.level {
-                    break; // a level below went missing meanwhile: the rest would leave a gap
+                // a level below went missing meanwhile (the rest would leave a gap), or every slot is on screen
+                if self.table_cpu[done.id * ENTRY] as usize != lv.level || !self.place(queue, done.id, lv.level, &lv.blocks, lv.w, lv.h, lv.w * 4) {
+                    break;
                 }
-                let pool = lv.level - STREAMED;
-                let Some(slot) = self.pools[pool].take(frame) else { break };
-                let old = self.pools[pool].holder[slot];
-                if old != NONE {
-                    self.drop_levels(old as usize, lv.level);
-                }
-                let (page, x, y) = self.layout.place(lv.level, slot as u32);
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo { texture: &self.texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: page }, aspect: wgpu::TextureAspect::All },
-                    &lv.blocks,
-                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(lv.w * 4), rows_per_image: Some(lv.h / 4) },
-                    wgpu::Extent3d { width: lv.w, height: lv.h, depth_or_array_layers: 1 },
-                );
-                self.pools[pool].holder[slot] = id as u32;
-                self.pools[pool].last_seen[slot] = frame;
-                self.table_cpu[id * ENTRY + 4 + lv.level] = slot as u32;
-                self.table_cpu[id * ENTRY] = lv.level as u32 + 1;
-                self.changed.push(id as u32);
             }
         }
 
-        // the lens's first, then nearest the screen centre; never more than the smallest streamed pool can hold
+        // the lens's first, then nearest the screen centre; never more than the pools can hold
         wanted.sort_by(|a, b| a.0.0.cmp(&b.0.0).then(a.0.1.total_cmp(&b.0.1)));
-        for &(_, id, from, to) in wanted.iter().take(self.pools[0].holder.len() * 3 / 4) {
+        wanted.truncate(self.pools[BAKED - RESIDENT].holder.len() * 3 / 4);
+        // 32 px: read from the baked file by the readers; in as they come back (unless the photo already has it)
+        let s = slot_size(RESIDENT);
+        while let Ok((id, blocks)) = self.read.try_recv() {
+            self.reads_in_flight -= 1;
+            self.reading[id] = false;
+            if self.table_cpu[id * ENTRY] as usize == RESIDENT {
+                self.place(queue, id, RESIDENT, &blocks, s, s, s / 4 * 16);
+            }
+        }
+        for &(_, id, _) in &wanted {
+            if self.reads_in_flight >= MAX_READS {
+                break;
+            }
+            if self.table_cpu[id * ENTRY] as usize == RESIDENT && !self.reading[id] && self.reads.send(id).is_ok() {
+                self.reads_in_flight += 1;
+                self.reading[id] = true;
+            }
+        }
+        // from 64 px: decoded from the original, once the 32 px picture is in
+        for &(_, id, to) in &wanted {
             if self.in_flight >= MAX_IN_FLIGHT {
                 break;
             }
-            if self.jobs.send(Job { id, path: data.path(id), from: from.max(STREAMED), to }).is_ok() {
+            let from = self.table_cpu[id * ENTRY] as usize;
+            let retry = self.missing[id] == 0 || frame >= self.missing[id] + RETRY_FRAMES;
+            if from < BAKED || from > to || self.loading[id] || !retry {
+                continue;
+            }
+            if self.jobs.send(Job { id, path: data.path(id), from, to }).is_ok() {
                 self.in_flight += 1;
                 self.loading[id] = true;
             }
@@ -342,6 +430,13 @@ impl Streamer {
         }
         self.changed.clear();
     }
+}
+
+/// Reader: photo `id`'s 32 px picture from the baked file (`photos` photos), a row of BC7 blocks at a time.
+fn read_baked(pages: &[u8], photos: usize, id: usize) -> Vec<u8> {
+    let row = (slot_size(RESIDENT) / 4 * 16) as usize;
+    let (at, step) = crate::pages::baked_at(RESIDENT, photos, id);
+    (0..slot_size(RESIDENT) as usize / 4).flat_map(|k| &pages[at + k * step..at + k * step + row]).copied().collect()
 }
 
 /// Worker: decode the original once; for each level fit it (longer side = min(slot size, original)), pad to
