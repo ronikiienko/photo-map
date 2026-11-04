@@ -123,6 +123,11 @@ fn map_shots() {
         scroll 1
         wait 60
         shot world-2b-video-marks
+        # its mark plays it: the frame over the tile, the controls along its bottom
+        click 543 495
+        wait 40
+        shot world-2c-video-playing
+        photo 200
         scroll -1
         wait 60
         photo 200

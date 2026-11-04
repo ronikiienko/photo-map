@@ -33,6 +33,7 @@ mod pages;
 mod regions;
 mod reuse;
 mod photo;
+mod player;
 mod places;
 mod query;
 mod screen;
@@ -81,6 +82,49 @@ const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
 const VIDEO_MARK_FROM: (f32, f32) = (36.0, 56.0);
 /// ... and says how long it is (or when a copy's frame is) from this size.
 const VIDEO_TIME_FROM: f32 = 96.0;
+
+/// A video on screen with its mark (Viewer::video_tiles): on the map, or a match's copy beside it (its position).
+struct VideoTile {
+    photo: usize,
+    copy: Option<usize>,
+    /// Where it is on screen, and its longer side (points).
+    rect: egui::Rect,
+    long: f32,
+    /// What its mark says: how long the video is, or when a copy's frame is; and where it starts playing.
+    time: f32,
+    start: f32,
+}
+
+impl VideoTile {
+    /// Where its mark is: a pill in the bottom-left corner, as wide as the play sign and a time.
+    fn pill(&self) -> egui::Rect {
+        let side = (self.rect.width().min(self.rect.height()) * 0.16).clamp(14.0, 22.0);
+        let gap = side * 0.3;
+        let width = if self.long >= VIDEO_TIME_FROM { side * (1.2 + 0.36 * clock(self.time).len() as f32) } else { side };
+        egui::Rect::from_min_size(egui::pos2(self.rect.min.x + gap, self.rect.max.y - gap - side), egui::vec2(width, side))
+    }
+}
+
+/// A video's mark in `pill`: a play sign (two bars while it plays) and the time, faded by `fade`.
+fn draw_pill(painter: &egui::Painter, pill: egui::Rect, time: Option<String>, playing: bool, fade: f32) {
+    let side = pill.height();
+    painter.rect_filled(pill, side * 0.5, egui::Color32::from_black_alpha((150.0 * fade) as u8));
+    let white = egui::Color32::WHITE.gamma_multiply(fade);
+    let c = egui::pos2(pill.min.x + side * 0.53, pill.center().y);
+    let r = side * 0.27;
+    if playing {
+        for dx in [-0.45, 0.45] {
+            painter.rect_filled(egui::Rect::from_center_size(egui::pos2(c.x + dx * r, c.y), egui::vec2(r * 0.55, r * 2.0)), 1.0, white);
+        }
+    } else {
+        let triangle = vec![egui::pos2(c.x - r * 0.8, c.y - r), egui::pos2(c.x + r, c.y), egui::pos2(c.x - r * 0.8, c.y + r)];
+        painter.add(egui::Shape::convex_polygon(triangle, white, egui::Stroke::NONE));
+    }
+    if let Some(text) = time {
+        let galley = painter.layout_no_wrap(text, egui::FontId::proportional(side * 0.62), white);
+        painter.galley(egui::pos2(pill.min.x + side * 0.92, pill.center().y - galley.size().y * 0.5), galley, white);
+    }
+}
 
 /// Seconds as a clock: "0:07", "12:30", "1:02:03".
 fn clock(seconds: f32) -> String {
@@ -269,6 +313,8 @@ struct Viewer {
     /// The window is minimized or covered: no frames are asked for until it is shown again.
     hidden: bool,
     help_open: bool,
+    /// The video playing in its tile, if one is (player.rs).
+    player: Option<player::Player>,
     /// Builds stopped because a map was opened (a build and a map together would not fit on the card): they go on when the Maps page is back.
     paused_for_viewing: Vec<PathBuf>,
     /// Files and folders dropped on the Maps page this frame.
@@ -398,6 +444,7 @@ impl Viewer {
             scroll_gesture: false,
             hidden: false,
             help_open: false,
+            player: None,
             paused_for_viewing: Vec::new(),
             dropped: Vec::new(),
             cursor: None,
@@ -469,6 +516,7 @@ impl Viewer {
     /// The bundle has been read: let go of the old map, put the new one on the GPU and show all of it.
     fn opened(&mut self, path: PathBuf, data: MapData) {
         self.page = Page::Viewer;
+        self.player = None;
         self.map = None; // free the old map's GPU memory first
         let started = Instant::now();
         let streamer = Streamer::new(&self.gpu.device, &self.gpu.queue, &data);
@@ -710,6 +758,7 @@ impl Viewer {
 
     fn go_to_maps(&mut self) {
         self.page = Page::Maps;
+        self.player = None;
         self.map = None; // the Maps page needs none of it: give back its GPU memory
         self.library.refresh();
     }
@@ -1776,10 +1825,13 @@ impl Viewer {
     /// name, it zooms to the region; on a photo, to the photo.
     fn click_at(&mut self) {
         let Some(c) = self.cursor else { return };
+        let ppp = self.screen.scale();
+        if self.click_video_mark(egui::pos2(c.x / ppp, c.y / ppp)) {
+            return;
+        }
         if let Some(k) = self.pick_copy(c) {
             return self.go_to_match(k);
         }
-        let ppp = self.screen.scale();
         let at = egui::pos2(c.x / ppp, c.y / ppp);
         if let Some(&(_, level, index)) = self.label_rects.iter().find(|(rect, _, _)| rect.contains(at)) {
             self.go_to_region(level, index);
@@ -1884,43 +1936,21 @@ impl Viewer {
         });
     }
 
-    /// A video is marked in its bottom-left corner once it is big enough to tell (VIDEO_MARK_FROM): a play sign, and from
-    /// VIDEO_TIME_FROM how long it is. A copy of one beside the world (a search's match) says when its frame is in the video.
-    fn draw_video_marks(&self, ctx: &egui::Context) {
-        let Some(m) = &self.map else { return };
-        let ppp = ctx.pixels_per_point();
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video marks".into()));
-        let screen = ctx.content_rect();
-        // a tile `shape` x `long` points centred on `at` (points), marked with `time` (seconds)
-        let mark = |at: Vec2, shape: Vec2, long: f32, time: Option<f32>| {
+    /// The videos on screen big enough to be marked (VIDEO_MARK_FROM): on the map, and the matches' copies beside it.
+    fn video_tiles(&self, ppp: f32) -> Vec<VideoTile> {
+        let Some(m) = &self.map else { return Vec::new() };
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(self.camera.viewport.x, self.camera.viewport.y) / ppp);
+        let mut tiles = Vec::new();
+        let mut add = |photo: usize, copy: Option<usize>, at: Vec2, form: Vec2, long: f32, time: f32, start: f32| {
             if long < VIDEO_MARK_FROM.0 {
                 return;
             }
-            let (w, h) = (shape.x * long, shape.y * long);
-            let tile = egui::Rect::from_center_size(egui::pos2(at.x, at.y), egui::vec2(w, h));
-            if !screen.intersects(tile) || self.under_lens(tile, ppp) {
-                return;
-            }
-            let fade = ((long - VIDEO_MARK_FROM.0) / (VIDEO_MARK_FROM.1 - VIDEO_MARK_FROM.0)).clamp(0.0, 1.0);
-            let side = (w.min(h) * 0.16).clamp(14.0, 22.0); // the pill's height
-            let gap = side * 0.3;
-            let text = time.filter(|_| long >= VIDEO_TIME_FROM).map(|t| {
-                let font = egui::FontId::proportional(side * 0.62);
-                painter.layout_no_wrap(clock(t), font, egui::Color32::WHITE.gamma_multiply(fade))
-            });
-            let width = side + text.as_ref().map_or(0.0, |g| g.size().x + side * 0.35);
-            let pill = egui::Rect::from_min_size(egui::pos2(tile.min.x + gap, tile.max.y - gap - side), egui::vec2(width, side));
-            painter.rect_filled(pill, side * 0.5, egui::Color32::from_black_alpha((150.0 * fade) as u8));
-            // the play sign: a triangle pointing right, in the pill's round left end
-            let c = egui::pos2(pill.min.x + side * 0.53, pill.center().y);
-            let r = side * 0.27;
-            let triangle = vec![egui::pos2(c.x - r * 0.8, c.y - r), egui::pos2(c.x + r, c.y), egui::pos2(c.x - r * 0.8, c.y + r)];
-            painter.add(egui::Shape::convex_polygon(triangle, egui::Color32::WHITE.gamma_multiply(fade), egui::Stroke::NONE));
-            if let Some(g) = text {
-                painter.galley(egui::pos2(pill.min.x + side * 0.92, pill.center().y - g.size().y * 0.5), g, egui::Color32::WHITE);
+            let rect = egui::Rect::from_center_size(egui::pos2(at.x, at.y), egui::vec2(form.x, form.y) * long);
+            if screen.intersects(rect) && !self.under_lens(rect, ppp) {
+                tiles.push(VideoTile { photo, copy, rect, long, time, start });
             }
         };
-        // on the map: how long each video is
+        // on the map: how long each video is; it plays from the start
         let long = self.size_px() / ppp;
         if long * m.data.max_size() >= VIDEO_MARK_FROM.0 {
             let (view_min, view_max) = (self.camera.to_world(Vec2::ZERO), self.camera.to_world(self.camera.viewport));
@@ -1928,18 +1958,111 @@ impl Viewer {
                 if let Some(duration) = m.data.photos[i].duration.filter(|_| !m.hidden_mask[i]) {
                     let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
                     let shape = m.data.shape(i);
-                    mark(at, shape / shape.max_element(), long * shape.max_element(), Some(duration));
+                    add(i, None, at, shape / shape.max_element(), long * shape.max_element(), duration, 0.0);
                 }
             });
         }
-        // the copies: when the frame is (a video's poster: how long it is)
+        // the copies: when their frame is, and it plays from there (a video's poster: how long it is, from the start)
         let copy_long = m.copy_side * self.camera.scale / ppp;
-        for ((&i, &picture), p) in m.order.iter().zip(&m.pictures).zip(&m.copies) {
+        for (k, ((&i, &picture), p)) in m.order.iter().zip(&m.pictures).zip(&m.copies).enumerate() {
             let Some(duration) = m.data.photos[i].duration else { continue };
-            let time = picture.checked_sub(m.data.n()).map_or(duration, |k| m.data.frames[k].time);
+            let frame = picture.checked_sub(m.data.n()).map(|f| m.data.frames[f].time);
             let at = self.camera.to_screen(Vec2::new(p.x, p.y)) / ppp;
-            mark(at, m.data.picture_form(picture), copy_long, Some(time));
+            add(i, Some(k), at, m.data.picture_form(picture), copy_long, frame.unwrap_or(duration), frame.unwrap_or(0.0));
         }
+        tiles
+    }
+
+    /// A video is marked in its bottom-left corner once it is big enough to tell (VIDEO_MARK_FROM): a play sign, and from
+    /// VIDEO_TIME_FROM how long it is. A copy of one beside the world (a search's match) says when its frame is in the video.
+    /// The one playing has its controls instead (player_ui).
+    fn draw_video_marks(&self, ctx: &egui::Context) {
+        let ppp = ctx.pixels_per_point();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video marks".into()));
+        for t in self.video_tiles(ppp) {
+            if self.player.as_ref().is_some_and(|p| p.photo == t.photo && p.copy == t.copy) {
+                continue;
+            }
+            let fade = ((t.long - VIDEO_MARK_FROM.0) / (VIDEO_MARK_FROM.1 - VIDEO_MARK_FROM.0)).clamp(0.0, 1.0);
+            let time = (t.long >= VIDEO_TIME_FROM).then(|| clock(t.time));
+            draw_pill(&painter, t.pill(), time, false, fade);
+        }
+    }
+
+    /// The video playing: its newest frame over its tile, and its controls along the tile's bottom (play or pause, how far,
+    /// and a bar to go anywhere in it). It stops when its tile leaves the screen or gets too small to mark.
+    fn player_ui(&mut self, ctx: &egui::Context) {
+        let Some(p) = &self.player else { return };
+        let ppp = ctx.pixels_per_point();
+        let Some(tile) = self.video_tiles(ppp).into_iter().find(|t| t.photo == p.photo && t.copy == p.copy) else {
+            self.player = None;
+            return;
+        };
+        let Some(p) = &mut self.player else { return };
+        if let Some(texture) = p.texture(ctx) {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video".into()));
+            let corner = (0.04 * tile.rect.width().min(tile.rect.height())).min(6.0); // as the map's own corners (map.wgsl)
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.add(egui::epaint::RectShape::filled(tile.rect, corner, egui::Color32::WHITE).with_texture(texture, uv));
+        }
+        if p.playing() {
+            ctx.request_repaint();
+        }
+        // the controls: the pill (play or pause, and the time), and the bar beside it
+        let pill = tile.pill();
+        let bar = egui::Rect::from_min_max(egui::pos2(pill.max.x + pill.height() * 0.5, pill.min.y), egui::pos2(tile.rect.max.x - pill.height() * 0.3, pill.max.y));
+        let area = pill.union(bar);
+        let mut toggle = false;
+        let mut seek = None;
+        egui::Area::new(egui::Id::new("video controls")).fixed_pos(area.min).order(egui::Order::Middle).show(ctx, |ui| {
+            let (_, response) = ui.allocate_exact_size(area.size(), egui::Sense::hover());
+            let pill_r = ui.interact(pill, egui::Id::new("video pill"), egui::Sense::click());
+            let bar_r = ui.interact(bar, egui::Id::new("video bar"), egui::Sense::click_and_drag());
+            toggle = pill_r.clicked();
+            let fraction = |x: f32| ((x - bar.min.x) / bar.width().max(1.0)).clamp(0.0, 1.0);
+            let dragging = bar_r.interact_pointer_pos().filter(|_| bar_r.dragged() || bar_r.is_pointer_button_down_on()).map(|at| fraction(at.x));
+            if bar_r.drag_stopped() || bar_r.clicked() {
+                seek = bar_r.interact_pointer_pos().map(|at| fraction(at.x) * p.duration);
+            }
+            let shown = dragging.map_or(p.position(), |f| f * p.duration);
+            let painter = ui.painter();
+            draw_pill(painter, pill, Some(clock(shown)), p.playing(), 1.0);
+            // the bar: a track, how far it is, and a knob there (bigger under the mouse)
+            let y = bar.center().y;
+            let track = egui::Rect::from_min_max(egui::pos2(bar.min.x, y - 2.0), egui::pos2(bar.max.x, y + 2.0));
+            painter.rect_filled(track.expand(3.0), 5.0, egui::Color32::from_black_alpha(130));
+            painter.rect_filled(track, 2.0, egui::Color32::from_white_alpha(70));
+            let x = bar.min.x + bar.width() * (shown / p.duration.max(1e-3)).clamp(0.0, 1.0);
+            painter.rect_filled(egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y)), 2.0, egui::Color32::WHITE);
+            let hot = bar_r.hovered() || dragging.is_some();
+            painter.circle_filled(egui::pos2(x, y), if hot { 7.0 } else { 5.0 }, egui::Color32::WHITE);
+            if pill_r.hovered() || bar_r.hovered() {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let _ = response;
+        });
+        if toggle {
+            if p.playing() { p.pause() } else { p.play() }
+        }
+        if let Some(t) = seek {
+            p.seek(t);
+        }
+    }
+
+    /// A click on a video's mark plays it, there (on the map from the start, a match's copy from its frame); on the one playing,
+    /// nothing (its controls have it). True if the click was on one.
+    fn click_video_mark(&mut self, at: egui::Pos2) -> bool {
+        let ppp = self.screen.scale();
+        let Some(t) = self.video_tiles(ppp).into_iter().find(|t| t.pill().expand(4.0).contains(at)) else { return false };
+        let (Some(m), Some(ffmpeg)) = (&self.map, self.runtime.ffmpeg.clone()) else {
+            self.status = "videos are played with ffmpeg: download it in Runtime (on the Maps page)".into();
+            return true;
+        };
+        let photo = &m.data.photos[t.photo];
+        let video = files::original(&m.data, t.photo);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(self.wake());
+        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, t.time.max(photo.duration.unwrap_or(0.0)), t.start, (photo.width, photo.height), t.long * ppp, wake));
+        true
     }
 
     /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view
@@ -2033,6 +2156,7 @@ impl Viewer {
         }
         self.draw_missing(&ctx);
         self.draw_video_marks(&ctx);
+        self.player_ui(&ctx);
         if SHOW_PHOTO_CAPTIONS {
             self.draw_photo_captions(&ctx);
         }
