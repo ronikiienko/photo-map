@@ -73,9 +73,11 @@ struct NewMap {
     /// Which list of sources `photos` counts (the list as text).
     counted: String,
     /// How many photos the sources hold, and whether any source is on another disk than the maps.
-    count: Option<Receiver<(usize, bool)>>,
-    /// How many photos the sources hold, all of them.
+    count: Option<Receiver<(usize, usize, bool)>>,
+    /// How many photos and videos the sources hold, all of them.
     photos: Option<usize>,
+    /// How many of those are videos.
+    videos: usize,
     /// Some of the sources are on another disk (the note under the copy option says so).
     other_disk: bool,
     /// The photos are copied into the map instead of read where they are.
@@ -134,7 +136,7 @@ impl Home {
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, other_disk: false, copy_photos: false, every: 1, model: crate::models::DEFAULT.to_string() });
+        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, videos: 0, other_disk: false, copy_photos: false, every: 1, model: crate::models::DEFAULT.to_string() });
     }
 
     pub fn set_drag_over(&mut self, over: bool) {
@@ -659,8 +661,9 @@ impl Home {
     fn new_map_dialog(&mut self, ctx: &egui::Context, lib: &Library, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         let Some(nm) = &mut self.new_map else { return };
         if let Some(rx) = &nm.count {
-            if let Ok((n, other_disk)) = rx.try_recv() {
+            if let Ok((n, videos, other_disk)) = rx.try_recv() {
                 nm.photos = Some(n);
+                nm.videos = videos;
                 nm.other_disk = other_disk;
                 nm.count = None;
             }
@@ -698,13 +701,13 @@ impl Home {
             }
             ui.label("Photos");
             if nm.sources.is_empty() {
-                ui.label(theme::muted("Add the folders (their sub-folders are included) or photos to make the map from. You can also drop them on this window."));
+                ui.label(theme::muted("Add the folders (their sub-folders are included), photos or videos to make the map from. Each video is one photo on the map. You can also drop them on this window."));
             } else {
                 let mut remove = None;
                 egui::ScrollArea::vertical().max_height(120.0).auto_shrink([true, true]).show(ui, |ui| {
                     for (i, p) in nm.sources.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(theme::muted(if p.is_dir() { "folder" } else { "photo" }));
+                            ui.label(theme::muted(if p.is_dir() { "folder" } else if build::is_video(p) { "video" } else { "photo" }));
                             if theme::close_button(ui) {
                                 remove = Some(i);
                             }
@@ -722,8 +725,8 @@ impl Home {
                         nm.add(folders);
                     }
                 }
-                if ui.button("Add photos…").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().set_title("Photos").add_filter("Photos", &build::TYPES).pick_files() {
+                if ui.button("Add photos or videos…").clicked() {
+                    if let Some(files) = rfd::FileDialog::new().set_title("Photos or videos").add_filter("Photos and videos", &[&build::TYPES[..], &build::VIDEO_TYPES[..]].concat()).add_filter("Photos", &build::TYPES).add_filter("Videos", &build::VIDEO_TYPES).pick_files() {
                         nm.add(files);
                     }
                 }
@@ -739,7 +742,8 @@ impl Home {
                     let ctx = ui.ctx().clone();
                     let (list, maps) = (sources.clone(), lib.dir().to_path_buf());
                     std::thread::spawn(move || {
-                        let _ = tx.send((build::collect_photos(&list, 1).len(), list.iter().any(|s| !build::same_disk(s, &maps))));
+                        let found = build::collect_photos(&list, 1);
+                        let _ = tx.send((found.len(), found.iter().filter(|p| build::is_video(p)).count(), list.iter().any(|s| !build::same_disk(s, &maps))));
                         ctx.request_repaint();
                     });
                     nm.count = Some(rx);
@@ -756,9 +760,15 @@ impl Home {
             if sources.is_empty() {
                 // nothing to count yet
             } else if nm.count.is_some() {
-                ui.label(theme::muted("Counting photos…"));
+                ui.label(theme::muted("Counting photos and videos…"));
             } else if let Some(n) = nm.photos {
-                ui.label(theme::muted(if nm.every > 1 { format!("{} photos found, {} of them used", thousands(n), thousands(n.div_ceil(nm.every))) } else { format!("{} photos found", thousands(n)) }));
+                let count = |k: usize, one: &str, many: &str| format!("{} {}", thousands(k), if k == 1 { one } else { many });
+                let found = match nm.videos {
+                    0 => count(n, "photo", "photos"),
+                    v if v == n => count(v, "video", "videos"),
+                    v => format!("{} and {}", count(n - v, "photo", "photos"), count(v, "video", "videos")),
+                };
+                ui.label(theme::muted(if nm.every > 1 { format!("{found} found, {} of them used", thousands(n.div_ceil(nm.every))) } else { format!("{found} found") }));
                 if n > 0 {
                     ui.add_space(6.0);
                     ui.checkbox(&mut nm.copy_photos, "Copy the photos into the map").on_hover_text("They take space here as well, and the map shows them at full size whatever happens to the originals.");
@@ -1344,6 +1354,13 @@ mod shots {
         shot("2-narrow", egui::vec2(640.0, 700.0), page(|_, _| {}));
         shot("3-details", size, page(|h, lib| h.details = Some(lib.maps[0].path.clone())));
         shot("4-new-map", size, page(|h, _| h.open_new_map()));
+        shot("4b-new-map-videos", size, page(|h, _| {
+            h.open_new_map();
+            let nm = h.new_map.as_mut().unwrap();
+            nm.sources = vec!["/photos/dogs".into(), "/photos/dogs/walk.mp4".into()];
+            nm.counted = "/photos/dogs\n/photos/dogs/walk.mp4".into();
+            (nm.photos, nm.videos) = (Some(33), 5);
+        }));
         shot("5-runtime", size, page(|h, _| h.runtime_open = true));
         shot("6-models", size, page(|h, _| h.models_open = true));
         shot("7-examples", size, page(|h, _| h.examples_open = true));
