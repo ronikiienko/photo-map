@@ -13,6 +13,8 @@ pub struct Sizes {
     /// Of those, how many can't be reached now (the disk is not plugged in, or the photo was moved).
     pub unreachable: usize,
     pub pictures: u64,
+    /// The videos' posters and small frames (frames/).
+    pub frames: u64,
     pub vectors: u64,
     pub layout: u64,
     pub other: u64,
@@ -29,7 +31,7 @@ pub struct Part {
 impl Sizes {
     /// What the map adds to the disk (linked photos are not counted: they are the originals, here or on another disk).
     pub fn total(&self) -> u64 {
-        self.photos + self.pictures + self.vectors + self.layout + self.other
+        self.photos + self.pictures + self.frames + self.vectors + self.layout + self.other
     }
 
     /// The parts that take space, biggest first.
@@ -37,7 +39,8 @@ impl Sizes {
         let mut parts = vec![
             Part { name: "Photos", bytes: self.photos, about: "Copies of the photos at full size, made because \"Copy the photos into the map\" was ticked: they stay sharp whatever happens to the originals." },
             Part { name: "Small pictures", bytes: self.pictures, about: "Tiny versions of every photo (1 to 32 pixels wide), compressed and kept ready. They are what you see when the map is zoomed out, and they are why the whole map is always visible at once." },
-            Part { name: "Photo vectors", bytes: self.vectors, about: "For each photo, 768 numbers that describe what it shows, made by the AI model. Photos with similar numbers look alike: this is what the layout and the search are built on." },
+            Part { name: "Video frames", bytes: self.frames, about: "For each video, its poster (the picture it has on the map) and its keyframes, small (256 pixels): a search shows a video by the frame that matched best." },
+            Part { name: "Photo vectors", bytes: self.vectors, about: "For each photo (and each frame of a video), 768 numbers that describe what it shows, made by the AI model. Photos with similar numbers look alike: this is what the layout and the search are built on." },
             Part { name: "Layout and names", bytes: self.layout, about: "Where each photo sits on the map, the named regions you see when zooming, and each photo's file name and size." },
             Part { name: "Other", bytes: self.other, about: "The cover picture shown on this page, and leftovers." },
         ];
@@ -70,14 +73,20 @@ pub fn measure(map: &Path) -> Sizes {
                         sizes.photos += m.len();
                     }
                 }
+            } else if name == "frames" {
+                for video in std::fs::read_dir(entry.path()).into_iter().flatten().flatten() {
+                    for f in std::fs::read_dir(video.path()).into_iter().flatten().flatten() {
+                        sizes.frames += f.metadata().map_or(0, |m| m.len());
+                    }
+                }
             }
             continue;
         }
         let bytes = meta.len();
         match name.as_str() {
             "pages_bc7.bin" => sizes.pictures += bytes,
-            "embeddings.bin" => sizes.vectors += bytes,
-            "layout.bin" | "tree.bin" | "photos.json" | "manifest.json" => sizes.layout += bytes,
+            "embeddings.bin" | "frames.bin" => sizes.vectors += bytes,
+            "layout.bin" | "tree.bin" | "photos.json" | "frames.json" | "manifest.json" => sizes.layout += bytes,
             n if n.starts_with("regions") || n.starts_with("region_names") => sizes.layout += bytes,
             _ => sizes.other += bytes,
         }
@@ -132,9 +141,15 @@ mod tests {
         std::fs::write(dir.join("layout.bin"), vec![0u8; 10]).unwrap();
         std::fs::write(dir.join("region_names.json"), vec![0u8; 5]).unwrap();
         std::fs::write(dir.join("cover.png"), vec![0u8; 7]).unwrap();
+        // a video: its frames' vectors and list, its poster and frames
+        std::fs::write(dir.join("frames.bin"), vec![0u8; 40]).unwrap();
+        std::fs::write(dir.join("frames.json"), vec![0u8; 3]).unwrap();
+        std::fs::create_dir_all(dir.join("frames/000000")).unwrap();
+        std::fs::write(dir.join("frames/000000/poster.jpg"), vec![0u8; 60]).unwrap();
+        std::fs::write(dir.join("frames/000000/001.jpg"), vec![0u8; 20]).unwrap();
         let s = measure(&dir);
-        assert_eq!((s.photos, s.linked, s.pictures, s.vectors, s.layout, s.other), (500, 1000, 300, 200, 15, 7));
-        assert_eq!(s.total(), 1022);
+        assert_eq!((s.photos, s.linked, s.pictures, s.frames, s.vectors, s.layout, s.other), (500, 1000, 300, 80, 240, 18, 7));
+        assert_eq!(s.total(), 1145);
         #[cfg(unix)]
         assert_eq!((s.elsewhere, s.unreachable), (2000, 1));
         std::fs::remove_file(&away).unwrap();

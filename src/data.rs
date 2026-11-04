@@ -119,6 +119,9 @@ pub struct Photo {
     /// What its EXIF says that search can pick by (boxed: most photos of a big map have none, and this keeps them small).
     #[serde(default)]
     pub facts: Option<Box<Facts>>,
+    /// A video: how long it is (seconds). None: a photo.
+    #[serde(default)]
+    pub duration: Option<f32>,
 }
 
 /// A photo's camera, when it was taken and where, read from its EXIF when the map was made (files::facts). Empty: not known.

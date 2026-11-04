@@ -473,6 +473,9 @@ struct Found {
     /// A video: the folder in the map its frames were taken out to (frames/<n>), where its poster.jpg goes too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frames: Option<String>,
+    /// A video: how long it is (seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duration: Option<f32>,
 }
 
 /// A photo or a video file.
@@ -491,7 +494,7 @@ pub fn is_video(path: &Path) -> bool {
 /// frames between only say what changed), so only they are read (-discard: the others are dropped as the file is read, never
 /// decoded) and decoded: usually one a second, and encoders put one at most cuts. Of
 /// more than MAX_FRAMES, that many are kept, evenly spread. Their times (seconds from the start) go to times.txt, a line each, in
-/// order. Done once: a folder already there is kept. Needs ffmpeg. `stop`: asked while ffmpeg runs; true stops it (the folder isn't
+/// order; how long the video is (seconds) to duration.txt. Done once: a folder already there is kept. Needs ffmpeg. `stop`: asked while ffmpeg runs; true stops it (the folder isn't
 /// made, Ok(false)). Ok(true): done.
 fn video_frames(video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<bool, String> {
     if dir.is_dir() {
@@ -544,6 +547,12 @@ fn video_frames(video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<boo
     }
     let lines: String = keep.iter().map(|&i| format!("{}\n", times[i])).collect();
     fs::write(part.join("times.txt"), lines).map_err(|e| e.to_string())?;
+    // "  Duration: 00:00:52.49, start: ..." (none known: the last frame's time)
+    let duration = log.lines().find_map(|l| {
+        let hms = l.trim().strip_prefix("Duration:")?.split(',').next()?.trim();
+        hms.split(':').map(|p| p.parse::<f32>().ok()).try_fold(0.0, |sum, p| Some(sum * 60.0 + p?))
+    });
+    fs::write(part.join("duration.txt"), duration.unwrap_or(times[*keep.last().expect("a frame")]).to_string()).map_err(|e| e.to_string())?;
     fs::rename(&part, dir).map_err(|e| e.to_string())?;
     Ok(true)
 }
@@ -651,6 +660,7 @@ fn find_photos(ctx: &mut Ctx) -> Result<Flow, String> {
                 return None;
             }
             let frames = videos.get(&src).cloned();
+            let duration = frames.as_ref().and_then(|rel| fs::read_to_string(ctx.dir.join(rel).join("duration.txt")).ok()?.trim().parse().ok());
             let size = match &frames {
                 Some(rel) => frame_files(&ctx.dir.join(rel)).first().and_then(|f| shown_size(f)), // none: the video couldn't be read
                 None => shown_size(&src),
@@ -659,7 +669,7 @@ fn find_photos(ctx: &mut Ctx) -> Result<Flow, String> {
             if d % 64 == 0 {
                 ctx.set_done(d);
             }
-            size.map(|(width, height)| Found { src, width, height, frames })
+            size.map(|(width, height)| Found { src, width, height, frames, duration })
         })
         .collect();
     if ctx.paused() {
@@ -752,6 +762,8 @@ fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     #[derive(Serialize)]
     struct Entry<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
+        duration: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         facts: Option<Box<crate::data::Facts>>,
         file: String,
         height: u32,
@@ -764,6 +776,7 @@ fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         .iter()
         .enumerate()
         .map(|(i, f)| Entry {
+            duration: f.duration,
             facts: facts[i].take(),
             // a video is drawn from its poster (the frame nearest the average of them all, picked when they are embedded)
             file: match &f.frames {
@@ -1198,6 +1211,7 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
     for dir in fs::read_dir(ctx.dir.join("frames")).into_iter().flatten().flatten() {
         let _ = fs::remove_file(dir.path().join("vectors.f16"));
         let _ = fs::remove_file(dir.path().join("times.txt"));
+        let _ = fs::remove_file(dir.path().join("duration.txt"));
     }
     let _ = fs::remove_file(ctx.dir.join("files.json"));
     let _ = fs::remove_file(ctx.dir.join("levels.bin"));
@@ -1347,6 +1361,8 @@ mod tests {
         let times: Vec<f32> = fs::read_to_string(dir.join("times.txt")).unwrap().lines().map(|l| l.parse().unwrap()).collect();
         assert!(times.len() == 4 && times.iter().enumerate().all(|(k, t)| (t - k as f32).abs() < 0.2), "about a second apart: {times:?}");
         assert!(!dir.join("ffmpeg.log").exists());
+        let duration: f32 = fs::read_to_string(dir.join("duration.txt")).unwrap().parse().unwrap();
+        assert!((duration - 4.0).abs() < 0.1, "{duration}");
         assert_eq!(video_frames(&video, &dir, &|| true), Ok(true), "done once: kept");
         fs::remove_dir_all(&temp).unwrap();
     }
@@ -1385,6 +1401,8 @@ mod tests {
         let poster = done.join(photos[video]["file"].as_str().unwrap());
         assert!(poster.ends_with("poster.jpg") && poster.exists(), "{poster:?}");
         assert_eq!((photos[video]["width"].as_u64(), photos[video]["height"].as_u64()), (Some(320), Some(180)));
+        assert!((photos[video]["duration"].as_f64().unwrap() - 18.0).abs() < 0.1, "a video says how long it is");
+        assert!(photos.iter().filter(|p| p.get("duration").is_some()).count() == 1, "a photo doesn't");
         // its 18 keyframes: in frames.json (a second apart, made small) and frames.bin, in the same order
         let frames: Vec<crate::data::Frame> = serde_json::from_slice(&fs::read(done.join("frames.json")).unwrap()).unwrap();
         assert_eq!(frames.len(), 18);

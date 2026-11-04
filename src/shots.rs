@@ -82,7 +82,11 @@ pub fn map_bundle(maps: &Path, name: &str, n: usize) -> PathBuf {
         points.extend([centres[c].0 + d * a.cos(), centres[c].1 + d * a.sin()]);
         let camera = ["Google Pixel 3", "Xiaomi Redmi Note 7", "Canon EOS 550D"][i % 3];
         let taken = format!("{}-{:02}-{:02} 12:00", 2016 + i % 5, 1 + i % 12, 1 + i % 28);
-        photos.push(serde_json::json!({ "file": file, "width": w, "height": h, "title": format!("{label} {i}"), "facts": { "camera": camera, "taken": taken } }));
+        let mut photo = serde_json::json!({ "file": file, "width": w, "height": h, "title": format!("{label} {i}"), "facts": { "camera": camera, "taken": taken } });
+        if i % 7 == 0 || i == 200 {
+            photo["duration"] = (5.0 + (i * 37 % 300) as f32).into(); // a video (its poster)
+        }
+        photos.push(photo);
     }
     let manifest = serde_json::json!({ "name": name, "photos": n, "created": "2026-11-03 12:00" });
     std::fs::write(bundle.join("manifest.json"), manifest.to_string()).unwrap();
@@ -115,6 +119,13 @@ fn map_shots() {
         photo 200
         wait 20
         shot world-2-zoomed
+        # a step closer: the videos (every 7th photo, and 200) say how long they are; then back
+        scroll 1
+        wait 60
+        shot world-2b-video-marks
+        scroll -1
+        wait 60
+        photo 200
         click right
         shot world-3-right-click
         appkey Escape

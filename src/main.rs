@@ -77,6 +77,16 @@ const SHOW_REGION_NAMES: bool = true;
 const SHOW_PHOTO_CAPTIONS: bool = false;
 /// A photo shows its own caption above it once it is this wide on screen (points), fully from the second size.
 const CAPTION_FROM: (f32, f32) = (130.0, 190.0);
+/// A video's mark (draw_video_marks) fades in as its tile's longer side goes from the first to the second (points) ...
+const VIDEO_MARK_FROM: (f32, f32) = (36.0, 56.0);
+/// ... and says how long it is (or when a copy's frame is) from this size.
+const VIDEO_TIME_FROM: f32 = 96.0;
+
+/// Seconds as a clock: "0:07", "12:30", "1:02:03".
+fn clock(seconds: f32) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
 /// Stepping to a match zooms in until its photo is this wide on screen (points), unless you are already closer.
 const STEP_TO: f32 = 240.0;
 const LABEL_IN: (f32, f32) = (25.0, 50.0);
@@ -1873,6 +1883,64 @@ impl Viewer {
         });
     }
 
+    /// A video is marked in its bottom-left corner once it is big enough to tell (VIDEO_MARK_FROM): a play sign, and from
+    /// VIDEO_TIME_FROM how long it is. A copy of one beside the world (a search's match) says when its frame is in the video.
+    fn draw_video_marks(&self, ctx: &egui::Context) {
+        let Some(m) = &self.map else { return };
+        let ppp = ctx.pixels_per_point();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video marks".into()));
+        let screen = ctx.content_rect();
+        // a tile `shape` x `long` points centred on `at` (points), marked with `time` (seconds)
+        let mark = |at: Vec2, shape: Vec2, long: f32, time: Option<f32>| {
+            if long < VIDEO_MARK_FROM.0 {
+                return;
+            }
+            let (w, h) = (shape.x * long, shape.y * long);
+            let tile = egui::Rect::from_center_size(egui::pos2(at.x, at.y), egui::vec2(w, h));
+            if !screen.intersects(tile) || self.under_lens(tile, ppp) {
+                return;
+            }
+            let fade = ((long - VIDEO_MARK_FROM.0) / (VIDEO_MARK_FROM.1 - VIDEO_MARK_FROM.0)).clamp(0.0, 1.0);
+            let side = (w.min(h) * 0.16).clamp(14.0, 22.0); // the pill's height
+            let gap = side * 0.3;
+            let text = time.filter(|_| long >= VIDEO_TIME_FROM).map(|t| {
+                let font = egui::FontId::proportional(side * 0.62);
+                painter.layout_no_wrap(clock(t), font, egui::Color32::WHITE.gamma_multiply(fade))
+            });
+            let width = side + text.as_ref().map_or(0.0, |g| g.size().x + side * 0.35);
+            let pill = egui::Rect::from_min_size(egui::pos2(tile.min.x + gap, tile.max.y - gap - side), egui::vec2(width, side));
+            painter.rect_filled(pill, side * 0.5, egui::Color32::from_black_alpha((150.0 * fade) as u8));
+            // the play sign: a triangle pointing right, in the pill's round left end
+            let c = egui::pos2(pill.min.x + side * 0.53, pill.center().y);
+            let r = side * 0.27;
+            let triangle = vec![egui::pos2(c.x - r * 0.8, c.y - r), egui::pos2(c.x + r, c.y), egui::pos2(c.x - r * 0.8, c.y + r)];
+            painter.add(egui::Shape::convex_polygon(triangle, egui::Color32::WHITE.gamma_multiply(fade), egui::Stroke::NONE));
+            if let Some(g) = text {
+                painter.galley(egui::pos2(pill.min.x + side * 0.92, pill.center().y - g.size().y * 0.5), g, egui::Color32::WHITE);
+            }
+        };
+        // on the map: how long each video is
+        let long = self.size_px() / ppp;
+        if long * m.data.max_size() >= VIDEO_MARK_FROM.0 {
+            let (view_min, view_max) = (self.camera.to_world(Vec2::ZERO), self.camera.to_world(self.camera.viewport));
+            m.data.grid.within(&m.data.points, view_min, view_max, |i| {
+                if let Some(duration) = m.data.photos[i].duration.filter(|_| !m.hidden_mask[i]) {
+                    let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
+                    let shape = m.data.shape(i);
+                    mark(at, shape / shape.max_element(), long * shape.max_element(), Some(duration));
+                }
+            });
+        }
+        // the copies: when the frame is (a video's poster: how long it is)
+        let copy_long = m.copy_side * self.camera.scale / ppp;
+        for ((&i, &picture), p) in m.order.iter().zip(&m.pictures).zip(&m.copies) {
+            let Some(duration) = m.data.photos[i].duration else { continue };
+            let time = picture.checked_sub(m.data.n()).map_or(duration, |k| m.data.frames[k].time);
+            let at = self.camera.to_screen(Vec2::new(p.x, p.y)) / ppp;
+            mark(at, m.data.picture_form(picture), copy_long, Some(time));
+        }
+    }
+
     /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view
     /// and only when they are big, so it costs nothing when zoomed out. A caption that would overlap one already drawn is skipped.
     fn draw_photo_captions(&self, ctx: &egui::Context) {
@@ -1963,6 +2031,7 @@ impl Viewer {
             self.draw_labels(&ctx);
         }
         self.draw_missing(&ctx);
+        self.draw_video_marks(&ctx);
         if SHOW_PHOTO_CAPTIONS {
             self.draw_photo_captions(&ctx);
         }
