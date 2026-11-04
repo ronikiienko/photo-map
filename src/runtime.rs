@@ -41,6 +41,17 @@ pub const TENSORRT_LIBS: [&str; 3] = ["libnvinfer.so.10", "libnvinfer_plugin.so.
 /// The oldest CUDA the graphics card's driver must support for the CUDA libraries above (13.0), in the driver's own numbering.
 pub const CUDA_DRIVER_NEEDED: u32 = 13000;
 
+/// The ffmpeg that reads videos: the one this program downloaded (runtime/ffmpeg/, packs.rs), else one on the PATH. None: videos
+/// can't be read.
+pub fn ffmpeg(root: &Path) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let ours = root.join("runtime").join(crate::packs::ffmpeg().id).join(name);
+    if ours.is_file() {
+        return Some(ours);
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(name)).find(|p| p.is_file())
+}
+
 /// Where a set of libraries was found.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {

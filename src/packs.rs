@@ -20,10 +20,12 @@ pub struct Want {
     /// The file's name inside the wheel (the folder it is in does not matter).
     pub member: &'static str,
     pub save_as: &'static str,
+    /// A program (it is made runnable), not a library.
+    pub program: bool,
 }
 
 const fn same(name: &'static str) -> Want {
-    Want { member: name, save_as: name }
+    Want { member: name, save_as: name, program: false }
 }
 
 pub struct Wheel {
@@ -52,7 +54,7 @@ pub const ONNXRUNTIME: Pack = Pack {
     wheels: &[Wheel {
         url: "https://files.pythonhosted.org/packages/6c/44/1e9e762b95b7da0a8424913a1ed7c38cdaf88624a3c41ddba24ebac88bc9/onnxruntime-1.31.0-cp312-cp312-manylinux_2_28_x86_64.whl",
         pin: "c65e5b3e56e6181244335676c560d23d31198ab55c59fc63813ef9c95bf22aa8",
-        wants: &[Want { member: "libonnxruntime.so.1.31.0", save_as: "libonnxruntime.so" }],
+        wants: &[Want { member: "libonnxruntime.so.1.31.0", save_as: "libonnxruntime.so", program: false }],
     }],
 };
 
@@ -65,7 +67,7 @@ pub const ONNXRUNTIME_MACOS: Pack = Pack {
     wheels: &[Wheel {
         url: "https://files.pythonhosted.org/packages/b3/bd/2ac094311163b803e3626c3937461d6900934bd56cca7601f6150ff860c3/onnxruntime-1.31.0-cp312-cp312-macosx_14_0_arm64.whl",
         pin: "0c7696a37823ac69e32a3be6cf09e389c4dbeb434af177b0893b191c02624214",
-        wants: &[Want { member: "libonnxruntime.1.31.0.dylib", save_as: "libonnxruntime.dylib" }],
+        wants: &[Want { member: "libonnxruntime.1.31.0.dylib", save_as: "libonnxruntime.dylib", program: false }],
     }],
 };
 
@@ -78,7 +80,7 @@ pub const ONNXRUNTIME_GPU: Pack = Pack {
         url: "https://files.pythonhosted.org/packages/8f/48/6fbfdbce25e5756c7b9ff8f40645d98b166b8022cf00ede58a2bb4571b8e/onnxruntime_gpu-1.31.0-cp312-cp312-manylinux_2_28_x86_64.whl",
         pin: "9e3f1b84ba7baaf3bc5d6e7827a46cbeb8e35785283a31ac2614cd534062ae4e",
         wants: &[
-            Want { member: "libonnxruntime.so.1.31.0", save_as: "libonnxruntime.so" },
+            Want { member: "libonnxruntime.so.1.31.0", save_as: "libonnxruntime.so", program: false },
             same("libonnxruntime_providers_shared.so"),
             same("libonnxruntime_providers_cuda.so"),
             same("libonnxruntime_providers_tensorrt.so"),
@@ -147,8 +149,39 @@ pub const TENSORRT: Pack = Pack {
     }],
 };
 
+/// ffmpeg, which reads the videos (build.rs): a static build of it, out of the imageio-ffmpeg wheel. Fetched apart from the
+/// app (it is under the GPL, the app is not); one already on the computer is used too (runtime.rs).
+pub const FFMPEG: Pack = Pack {
+    id: "ffmpeg",
+    label: "ffmpeg (reads videos)",
+    version: "9.0.2",
+    size_mb: 67,
+    wheels: &[Wheel {
+        url: "https://files.pythonhosted.org/packages/de/0f/49292fbef69ee10ebcf97bb741602521caafcc6966d5fa1a2b868cc15655/imageio_ffmpeg-0.8.1-py3-none-manylinux_2_28_x86_64.whl",
+        pin: "4364409e5b68cf07c64c19d53d161ef5e0f7c383504809de0de35b3ee387b88c",
+        wants: &[Want { member: "ffmpeg-linux-x86_64-v9.0.2", save_as: "ffmpeg", program: true }],
+    }],
+};
+
+pub const FFMPEG_MACOS: Pack = Pack {
+    id: "ffmpeg",
+    label: "ffmpeg (reads videos)",
+    version: "9.0",
+    size_mb: 22,
+    wheels: &[Wheel {
+        url: "https://files.pythonhosted.org/packages/2b/47/9f9b654f853598bae0850fa22bba168103e45d31b5a2a893ed474f28d54a/imageio_ffmpeg-0.8.1-py3-none-macosx_12_0_arm64.whl",
+        pin: "20594af359f96688d6ad25d9afb8d265233a781453e13c9e91e138f3ff27df07",
+        wants: &[Want { member: "ffmpeg-macos-aarch64-v9.0", save_as: "ffmpeg", program: true }],
+    }],
+};
+
+/// This operating system's ffmpeg pack.
+pub fn ffmpeg() -> &'static Pack {
+    if cfg!(target_os = "macos") { &FFMPEG_MACOS } else { &FFMPEG }
+}
+
 #[cfg(test)]
-pub const ALL: [&Pack; 6] = [&ONNXRUNTIME, &ONNXRUNTIME_MACOS, &ONNXRUNTIME_GPU, &CUDA, &CUDNN, &TENSORRT];
+pub const ALL: [&Pack; 8] = [&ONNXRUNTIME, &ONNXRUNTIME_MACOS, &ONNXRUNTIME_GPU, &CUDA, &CUDNN, &TENSORRT, &FFMPEG, &FFMPEG_MACOS];
 
 /// The ONNX Runtime for a machine with no graphics card of the kind the other packs are for: this operating system's own build.
 pub fn onnxruntime_cpu() -> &'static Pack {
@@ -166,6 +199,22 @@ fn wants_for(pack: &Pack, wheel: &Wheel, card: Option<&Nvidia>) -> Vec<(String, 
         wanted.push((name.clone(), name));
     }
     wanted
+}
+
+/// Whether the file a pack saves as `name` is a program.
+fn wanted_program(pack: &Pack, name: &str) -> bool {
+    pack.wheels.iter().flat_map(|w| w.wants).any(|w| w.save_as == name && w.program)
+}
+
+#[cfg(unix)]
+fn make_runnable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("making {} runnable: {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn make_runnable(_: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 /// The id in a folder's `pack.json`, if the folder is a pack this program installed.
@@ -416,6 +465,9 @@ pub fn install(root: &Path, pack: &Pack, card: Option<&Nvidia>, stop: &AtomicBoo
                 }
                 out.flush().map_err(|e| e.to_string())?;
                 drop(out);
+                if wanted_program(pack, &save_as) {
+                    make_runnable(&part)?;
+                }
                 std::fs::rename(&part, &target).map_err(|e| e.to_string())?;
             }
             done += compressed;
@@ -512,6 +564,21 @@ mod tests {
         remove(&root, onnxruntime_cpu().id).unwrap();
         assert!(!dir.join(crate::runtime::ORT_LIB).exists());
         assert!(crate::runtime::Setup::detect(&root).ort.is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Installs ffmpeg for real and runs it (needs the network, 67 MB): cargo test --release installs_ffmpeg -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn installs_ffmpeg() {
+        let root = temp("ffmpeg");
+        let stop = AtomicBool::new(false);
+        install(&root, ffmpeg(), None, &stop, &|_, _| {}).unwrap();
+        let program = crate::runtime::ffmpeg(&root).unwrap();
+        assert_eq!(program, root.join("runtime/ffmpeg/ffmpeg"), "ours, before one on the PATH");
+        let out = std::process::Command::new(&program).arg("-version").output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("ffmpeg version"));
+        remove(&root, ffmpeg().id).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
     }
 

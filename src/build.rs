@@ -496,7 +496,7 @@ pub fn is_video(path: &Path) -> bool {
 /// more than MAX_FRAMES, that many are kept, evenly spread. Their times (seconds from the start) go to times.txt, a line each, in
 /// order; how long the video is (seconds) to duration.txt. Done once: a folder already there is kept. Needs ffmpeg. `stop`: asked while ffmpeg runs; true stops it (the folder isn't
 /// made, Ok(false)). Ok(true): done.
-fn video_frames(video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<bool, String> {
+fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<bool, String> {
     if dir.is_dir() {
         return Ok(true);
     }
@@ -506,7 +506,7 @@ fn video_frames(video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<boo
     // what ffmpeg says goes to a file (a pipe nobody reads while it runs would fill up and stall it)
     let log_path = part.join("ffmpeg.log");
     let log_file = fs::File::create(&log_path).map_err(|e| e.to_string())?;
-    let mut child = std::process::Command::new("ffmpeg")
+    let mut child = std::process::Command::new(ffmpeg)
         .args(["-nostdin", "-hide_banner", "-loglevel", "info", "-discard", "nokey", "-skip_frame", "nokey", "-i"])
         .arg(video)
         // the longer side at most 1024 px (the other follows, kept even)
@@ -515,7 +515,7 @@ fn video_frames(video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<boo
         .stdout(std::process::Stdio::null())
         .stderr(log_file)
         .spawn()
-        .map_err(|e| format!("videos need ffmpeg: {e}"))?;
+        .map_err(|e| format!("{}: {e}", ffmpeg.display()))?;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -630,6 +630,12 @@ fn videos(sources: &[PathBuf], every: usize) -> Vec<PathBuf> {
 fn read_videos(ctx: &mut Ctx) -> Result<Flow, String> {
     ctx.progress(0, 0, "looking for videos");
     let videos = videos(&ctx.job.sources, ctx.job.every);
+    if videos.is_empty() {
+        return Ok(Flow::Done);
+    }
+    let Some(ffmpeg) = crate::runtime::ffmpeg(&ctx.root) else {
+        return Err(format!("{} videos need ffmpeg to be read: download it in Runtime (on the Maps page), then carry on", videos.len()));
+    };
     shared_state(&ctx.shared).unit = "videos";
     ctx.progress(0, videos.len(), "");
     let done = AtomicUsize::new(0);
@@ -637,7 +643,7 @@ fn read_videos(ctx: &mut Ctx) -> Result<Flow, String> {
         if ctx.paused() {
             return;
         }
-        if let Err(e) = video_frames(video, &ctx.dir.join(format!("frames/{k:06}")), &|| ctx.paused()) {
+        if let Err(e) = video_frames(&ffmpeg, video, &ctx.dir.join(format!("frames/{k:06}")), &|| ctx.paused()) {
             eprintln!("{e}");
         }
         ctx.set_done(done.fetch_add(1, Ordering::Relaxed) + 1);
@@ -1345,16 +1351,17 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("photo-map-frames-test-{}", std::process::id()));
         fs::create_dir_all(&temp).unwrap();
         let video = temp.join("tall.mp4");
-        let made = std::process::Command::new("ffmpeg")
+        let made = std::process::Command::new(crate::runtime::ffmpeg(&crate::data_root()).expect("ffmpeg"))
             .args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=4:size=1080x1920:rate=25", "-g", "25", "-sc_threshold", "0"])
             .arg(&video)
             .status()
             .unwrap();
         assert!(made.success());
         let dir = temp.join("frames/000000");
-        assert_eq!(video_frames(&video, &dir, &|| true), Ok(false), "stopped");
+        let ffmpeg = crate::runtime::ffmpeg(&crate::data_root()).expect("ffmpeg");
+        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| true), Ok(false), "stopped");
         assert!(!dir.exists() && !dir.with_extension("part").exists(), "nothing left of a stopped one");
-        assert_eq!(video_frames(&video, &dir, &|| false), Ok(true));
+        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| false), Ok(true));
         let frames = frame_files(&dir);
         assert_eq!(frames.len(), 4, "a keyframe a second");
         assert_eq!(shown_size(&frames[0]), Some((576, 1024)));
@@ -1363,7 +1370,7 @@ mod tests {
         assert!(!dir.join("ffmpeg.log").exists());
         let duration: f32 = fs::read_to_string(dir.join("duration.txt")).unwrap().parse().unwrap();
         assert!((duration - 4.0).abs() < 0.1, "{duration}");
-        assert_eq!(video_frames(&video, &dir, &|| true), Ok(true), "done once: kept");
+        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| true), Ok(true), "done once: kept");
         fs::remove_dir_all(&temp).unwrap();
     }
 
@@ -1381,7 +1388,7 @@ mod tests {
             img.save(source.join(format!("p{i}.png"))).unwrap();
         }
         // 12 s of test pattern then 6 s of colour bars, a keyframe every second: 18 frames
-        let made = std::process::Command::new("ffmpeg")
+        let made = std::process::Command::new(crate::runtime::ffmpeg(&crate::data_root()).expect("ffmpeg"))
             .args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=12:size=320x180:rate=25", "-f", "lavfi", "-i", "smptebars=duration=6:size=320x180:rate=25", "-filter_complex", "[0][1]concat=n=2", "-g", "25", "-sc_threshold", "0"])
             .arg(source.join("clip.mp4"))
             .status()

@@ -63,6 +63,8 @@ pub struct Manager {
     pub failure: Option<String>,
     /// What the models may run on (changes take effect when the program is restarted).
     pub backends: crate::backends::Choice,
+    /// The ffmpeg that reads videos (runtime::ffmpeg), if there is one.
+    pub ffmpeg: Option<PathBuf>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -75,13 +77,15 @@ impl Manager {
         let root_for_choice = root.clone();
         let setup = Setup::detect(&root);
         let wrong = Setup::wrong_versions(&root);
-        Self { root, setup, nvidia: None, probe: Some(rx), wrong, job: None, restart: false, failure: None, backends: crate::backends::Choice::load(&root_for_choice), wake: Arc::new(wake) }
+        let ffmpeg = crate::runtime::ffmpeg(&root);
+        Self { root, setup, nvidia: None, probe: Some(rx), wrong, job: None, restart: false, failure: None, backends: crate::backends::Choice::load(&root_for_choice), ffmpeg, wake: Arc::new(wake) }
     }
 
     /// Look again at what is installed.
     pub fn refresh(&mut self) {
         self.setup = Setup::detect(&self.root);
         self.wrong = Setup::wrong_versions(&self.root);
+        self.ffmpeg = crate::runtime::ffmpeg(&self.root);
     }
 
     /// Call every frame: takes in the card's answer and the end of an install.
@@ -92,13 +96,13 @@ impl Manager {
                 self.probe = None;
             }
         }
-        let finished = self.job.as_ref().and_then(|j| j.state().finished);
-        if let Some(result) = finished {
+        let finished = self.job.as_ref().and_then(|j| j.state().finished.map(|r| (r, j.packs.iter().any(|p| p.id != packs::ffmpeg().id))));
+        if let Some((result, libraries)) = finished {
             self.job = None;
             self.refresh();
             match result {
                 Ok(()) => {
-                    self.restart = true;
+                    self.restart |= libraries; // ffmpeg is a program of its own: it is used at once
                     self.failure = None;
                 }
                 Err(e) if e == "stopped" => self.failure = None,
@@ -175,6 +179,11 @@ impl Manager {
         };
         let title = if self.setup.ort.is_none() { "Download ONNX Runtime and GPU acceleration" } else { "Download GPU acceleration" };
         Advice::Offer(Offer { packs: missing, title, why })
+    }
+
+    /// ffmpeg, to read videos.
+    pub fn ffmpeg_offer() -> Offer {
+        Offer { packs: vec![packs::ffmpeg()], title: "Download ffmpeg", why: "Videos are read with ffmpeg.".into() }
     }
 
     /// Fetch and install the packs of an offer, one after the other, on a thread.
@@ -257,7 +266,7 @@ mod tests {
     use crate::runtime::Gpu;
 
     fn manager(setup: Setup, nvidia: Option<Nvidia>) -> Manager {
-        Manager { root: PathBuf::from("/nonexistent"), setup, nvidia, probe: None, wrong: Vec::new(), job: None, restart: false, failure: None, backends: crate::backends::Choice::load(std::path::Path::new("/nonexistent")), wake: Arc::new(|| {}) }
+        Manager { root: PathBuf::from("/nonexistent"), setup, nvidia, probe: None, wrong: Vec::new(), job: None, restart: false, failure: None, backends: crate::backends::Choice::load(std::path::Path::new("/nonexistent")), ffmpeg: None, wake: Arc::new(|| {}) }
     }
 
     fn place(name: &str) -> Place {

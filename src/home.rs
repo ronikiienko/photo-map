@@ -30,6 +30,8 @@ pub enum Action {
     Resume(bool),
     /// Fetch what the runtime offer says (manager.rs).
     InstallRuntime,
+    /// Download ffmpeg, which reads videos.
+    InstallFfmpeg,
     StopInstall,
     RemoveRuntime,
     /// Close the app and open it again (the runtime libraries it started with can't be changed while it runs).
@@ -769,6 +771,15 @@ impl Home {
                     v => format!("{} and {}", count(n - v, "photo", "photos"), count(v, "video", "videos")),
                 };
                 ui.label(theme::muted(if nm.every > 1 { format!("{found} found, {} of them used", thousands(n.div_ceil(nm.every))) } else { format!("{found} found") }));
+                if nm.videos > 0 && rt.ffmpeg.is_none() {
+                    // like the runtime above: the need, and the way to the window that gets it
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Videos are read with ffmpeg, which hasn't been downloaded.").color(Color32::from_rgb(235, 150, 100)));
+                        if ui.button("Runtime…").on_hover_text("Get it in the Runtime window").clicked() {
+                            open_runtime = true;
+                        }
+                    });
+                }
                 if n > 0 {
                     ui.add_space(6.0);
                     ui.checkbox(&mut nm.copy_photos, "Copy the photos into the map").on_hover_text("They take space here as well, and the map shows them at full size whatever happens to the originals.");
@@ -1062,6 +1073,15 @@ impl Home {
             for note in &rt.wrong {
                 ui.label(theme::muted(format!("{note}, so it is not used.")));
             }
+            let ours = installed.iter().find(|i| i.id == crate::packs::ffmpeg().id);
+            row(ui, "ffmpeg", match (&rt.ffmpeg, ours) {
+                (Some(_), Some(i)) => format!("{}, {:.0} MB (reads videos)", i.version, i.bytes as f64 / 1048576.0),
+                (Some(p), None) => format!("found at {} (reads videos)", p.display()),
+                (None, _) => "not downloaded: maps can't be made from videos".into(),
+            });
+            if rt.ffmpeg.is_none() && !rt.installing() {
+                ffmpeg_button(ui, actions);
+            }
             ui.add_space(8.0);
             runtime_offer(ui, rt, actions);
 
@@ -1173,6 +1193,13 @@ fn runtime_offer(ui: &mut Ui, rt: &Manager, actions: &mut Vec<Action>) {
             });
             ui.add_space(8.0);
         }
+    }
+}
+
+/// The button that downloads ffmpeg, with its size.
+fn ffmpeg_button(ui: &mut Ui, actions: &mut Vec<Action>) {
+    if ui.button(format!("Download ffmpeg ({})", size_text(crate::packs::ffmpeg().size_mb))).clicked() {
+        actions.push(Action::InstallFfmpeg);
     }
 }
 
@@ -1356,13 +1383,15 @@ mod shots {
         shot("2-narrow", egui::vec2(640.0, 700.0), page(|_, _| {}));
         shot("3-details", size, page(|h, lib| h.details = Some(lib.maps[0].path.clone())));
         shot("4-new-map", size, page(|h, _| h.open_new_map()));
-        shot("4b-new-map-videos", size, page(|h, _| {
+        let mut videos = page(|h, _| {
             h.open_new_map();
             let nm = h.new_map.as_mut().unwrap();
             nm.sources = vec!["/photos/dogs".into(), "/photos/dogs/walk.mp4".into()];
             nm.counted = "/photos/dogs\n/photos/dogs/walk.mp4".into();
             (nm.photos, nm.videos) = (Some(33), 5);
-        }));
+        });
+        videos.rt.ffmpeg = None; // as on a computer without it
+        shot("4b-new-map-videos", size, videos);
         shot("5-runtime", size, page(|h, _| h.runtime_open = true));
         shot("6-models", size, page(|h, _| h.models_open = true));
         shot("7-examples", size, page(|h, _| h.examples_open = true));

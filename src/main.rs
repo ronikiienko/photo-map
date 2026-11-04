@@ -684,6 +684,7 @@ impl Viewer {
                     self.runtime.start(&offer);
                 }
             }
+            Action::InstallFfmpeg => self.runtime.start(&manager::Manager::ffmpeg_offer()),
             Action::StopInstall => self.runtime.stop(),
             Action::SetBackend(b) => self.runtime.set_backend(b),
             Action::RemoveRuntime => self.runtime.remove_all(),
