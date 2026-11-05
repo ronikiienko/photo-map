@@ -40,6 +40,7 @@ mod screen;
 mod script;
 #[cfg(test)]
 mod shots;
+mod sound;
 mod search;
 mod searchbar;
 mod siglip;
@@ -123,6 +124,39 @@ fn draw_pill(painter: &egui::Painter, pill: egui::Rect, time: Option<String>, pl
     if let Some(text) = time {
         let galley = painter.layout_no_wrap(text, egui::FontId::proportional(side * 0.62), white);
         painter.galley(egui::pos2(pill.min.x + side * 0.92, pill.center().y - galley.size().y * 0.5), galley, white);
+    }
+}
+
+/// A video's sound button in `rect`: a speaker, with waves (sound on) or a cross (muted), in a dark disc.
+fn draw_speaker(painter: &egui::Painter, rect: egui::Rect, muted: bool, hot: bool) {
+    let side = rect.height();
+    painter.circle_filled(rect.center(), side * 0.5, egui::Color32::from_black_alpha(if hot { 210 } else { 150 }));
+    let white = egui::Color32::WHITE;
+    let c = rect.center() - egui::vec2(side * 0.12, 0.0);
+    let u = side * 0.1; // a unit
+    let body = vec![
+        egui::pos2(c.x - 2.2 * u, c.y - 1.0 * u),
+        egui::pos2(c.x - 0.8 * u, c.y - 1.0 * u),
+        egui::pos2(c.x + 0.9 * u, c.y - 2.6 * u),
+        egui::pos2(c.x + 0.9 * u, c.y + 2.6 * u),
+        egui::pos2(c.x - 0.8 * u, c.y + 1.0 * u),
+        egui::pos2(c.x - 2.2 * u, c.y + 1.0 * u),
+    ];
+    painter.add(egui::Shape::convex_polygon(body, white, egui::Stroke::NONE));
+    let stroke = egui::Stroke::new((side * 0.08).max(1.2), white);
+    let x = c.x + 2.6 * u;
+    if muted {
+        let r = 1.1 * u;
+        painter.line_segment([egui::pos2(x - r, c.y - r), egui::pos2(x + r, c.y + r)], stroke);
+        painter.line_segment([egui::pos2(x - r, c.y + r), egui::pos2(x + r, c.y - r)], stroke);
+    } else {
+        for r in [1.6 * u, 3.0 * u] {
+            let arc: Vec<egui::Pos2> = (0..=8).map(|i| {
+                let a = (i as f32 / 8.0 - 0.5) * 1.6;
+                egui::pos2(c.x + 0.9 * u + r * a.cos(), c.y + r * a.sin())
+            }).collect();
+            painter.add(egui::Shape::line(arc, stroke));
+        }
     }
 }
 
@@ -375,6 +409,8 @@ struct Viewer {
     player: Option<player::Player>,
     /// A video's frame kept in the map (frames.json), shown while its player goes to a time: which frame, and its picture.
     still: Option<(usize, egui::TextureHandle)>,
+    /// Videos play without sound (one setting for all, kept: `muted_file`).
+    muted: bool,
     /// Builds stopped because a map was opened (a build and a map together would not fit on the card): they go on when the Maps page is back.
     paused_for_viewing: Vec<PathBuf>,
     /// Files and folders dropped on the Maps page this frame.
@@ -509,6 +545,7 @@ impl Viewer {
             help_open: false,
             player: None,
             still: None,
+            muted: muted_file().exists(),
             paused_for_viewing: Vec::new(),
             dropped: Vec::new(),
             cursor: None,
@@ -2157,15 +2194,21 @@ impl Viewer {
         let mut toggle = false;
         let mut seek = None;
         let mut dragging = None;
+        let mut mute = false;
         if hovered || !p.playing() {
             let pill = tile.pill();
-            let bar = egui::Rect::from_min_max(egui::pos2(pill.max.x + pill.height() * 0.5, pill.min.y), egui::pos2(tile.rect.max.x - pill.height() * 0.3, pill.max.y));
-            let area = pill.union(bar);
+            let side = pill.height();
+            let speaker = egui::Rect::from_min_size(egui::pos2(tile.rect.max.x - side * 1.3, pill.min.y), egui::vec2(side, side));
+            let bar = egui::Rect::from_min_max(egui::pos2(pill.max.x + side * 0.5, pill.min.y), egui::pos2(speaker.min.x - side * 0.5, pill.max.y));
+            let area = pill.union(speaker);
+            let muted = self.muted;
             egui::Area::new(egui::Id::new("video controls")).fixed_pos(area.min).order(egui::Order::Middle).show(ctx, |ui| {
                 let (_, response) = ui.allocate_exact_size(area.size(), egui::Sense::hover());
                 let pill_r = ui.interact(pill, egui::Id::new("video pill"), egui::Sense::click());
                 let bar_r = ui.interact(bar, egui::Id::new("video bar"), egui::Sense::click_and_drag());
+                let speaker_r = ui.interact(speaker, egui::Id::new("video sound"), egui::Sense::click());
                 toggle = pill_r.clicked();
+                mute = speaker_r.clicked();
                 let fraction = |x: f32| ((x - bar.min.x) / bar.width().max(1.0)).clamp(0.0, 1.0);
                 dragging = bar_r.interact_pointer_pos().filter(|_| bar_r.dragged() || bar_r.is_pointer_button_down_on()).map(|at| fraction(at.x));
                 if bar_r.drag_stopped() || bar_r.clicked() {
@@ -2174,6 +2217,7 @@ impl Viewer {
                 let shown = dragging.map_or(p.position(), |f| f * p.duration);
                 let painter = ui.painter();
                 draw_pill(painter, pill, Some(clock(shown)), p.playing(), 1.0);
+                draw_speaker(painter, speaker, muted, speaker_r.hovered());
                 // the bar: a track, how far it is, and a knob there (bigger under the mouse)
                 let y = bar.center().y;
                 let track = egui::Rect::from_min_max(egui::pos2(bar.min.x, y - 2.0), egui::pos2(bar.max.x, y + 2.0));
@@ -2183,7 +2227,7 @@ impl Viewer {
                 painter.rect_filled(egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y)), 2.0, egui::Color32::WHITE);
                 let hot = bar_r.hovered() || dragging.is_some();
                 painter.circle_filled(egui::pos2(x, y), if hot { 7.0 } else { 5.0 }, egui::Color32::WHITE);
-                if pill_r.hovered() || bar_r.hovered() {
+                if pill_r.hovered() || bar_r.hovered() || speaker_r.hovered() {
                     ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 let _ = response;
@@ -2194,6 +2238,12 @@ impl Viewer {
         }
         if let Some(t) = seek {
             p.seek(t);
+        }
+        if mute {
+            self.muted = !self.muted;
+            p.mute(self.muted);
+            let file = muted_file();
+            let _ = if self.muted { std::fs::create_dir_all(file.parent().unwrap()).and_then(|_| std::fs::write(&file, "")) } else { std::fs::remove_file(&file) };
         }
         // until ffmpeg's frame from a new time comes, and while the bar is dragged: the map's own frame nearest that time (made
         // small when the map was), at once
@@ -2229,7 +2279,7 @@ impl Viewer {
         let photo = &m.data.photos[t.photo];
         let video = files::original(&m.data, t.photo);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(self.wake());
-        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, photo.video.map_or((photo.width, photo.height), |v| (v.width, v.height)), wake));
+        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, photo.video.map_or((photo.width, photo.height), |v| (v.width, v.height)), self.muted, wake));
     }
 
     /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view
@@ -2618,6 +2668,11 @@ fn photo_path(text: &str) -> Option<PathBuf> {
 /// Where the app keeps everything it makes and downloads (maps/, runtime/, .cache/): the folder named by PHOTO_MAP_HOME if set, else
 /// the system's place for an app's data: ~/.local/share/photo-map on Linux, ~/Library/Application Support/photo-map on macOS,
 /// %APPDATA%\photo-map\data on Windows. Tests use it too (the models and maps they need are there).
+/// There when videos play without sound.
+fn muted_file() -> PathBuf {
+    data_root().join(".cache/muted")
+}
+
 pub fn data_root() -> PathBuf {
     if let Some(home) = std::env::var_os("PHOTO_MAP_HOME") {
         return PathBuf::from(home);
