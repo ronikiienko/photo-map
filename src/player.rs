@@ -212,7 +212,8 @@ impl Player {
         let frame = self.shared.frame.lock().unwrap().take();
         self.shown |= frame.is_some();
         let hd = self.shared.fps.get().and_then(|f| f.1).unwrap_or(self.hd);
-        self.shown.then(|| egui_wgpu::Callback::new_paint_callback(rect, Paint { frame: Mutex::new(frame), rect, corner, hd }).into())
+        // its edge fades out a pixel past the tile's (video.wgsl): room for it
+        self.shown.then(|| egui_wgpu::Callback::new_paint_callback(rect.expand(2.0), Paint { frame: Mutex::new(frame), rect, corner, hd }).into())
     }
 }
 

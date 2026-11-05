@@ -2144,7 +2144,7 @@ impl Viewer {
         };
         let Some(p) = &mut self.player else { return };
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video".into()));
-        let corner = (0.04 * tile.rect.width().min(tile.rect.height())).min(6.0); // as the map's own corners (map.wgsl)
+        let corner = (0.04 * tile.rect.width().min(tile.rect.height())).min(10.0 / ppp); // as the map's own corners (map.wgsl)
         if let Some(frame) = p.paint(tile.rect, corner) {
             painter.add(frame);
         }
@@ -2208,7 +2208,9 @@ impl Viewer {
                 }
                 if let Some((_, tex)) = &self.still {
                     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                    painter.add(egui::epaint::RectShape::filled(tile.rect, corner, egui::Color32::WHITE).with_texture(tex.id(), uv));
+                    // a pixel bigger, as the video (video.wgsl): over the poster's soft edge
+                    let px = 1.0 / ppp;
+                    painter.add(egui::epaint::RectShape::filled(tile.rect.expand(px), corner + px, egui::Color32::WHITE).with_texture(tex.id(), uv));
                 }
             }
         }

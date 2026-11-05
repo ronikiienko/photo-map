@@ -38,10 +38,11 @@ fn fs_video(@builtin(position) at: vec4f) -> @location(0) vec4f {
     } else {
         rgb = vec3f(y + 1.402 * c.y, y - 0.344136 * c.x - 0.714136 * c.y, y + 1.772 * c.x);
     }
-    // rounded corners, antialiased (premultiplied)
+    // rounded corners, antialiased (premultiplied); a pixel past the tile's edge, so the poster's own soft edge under it is
+    // covered (else it shows through the video's as a thin light line)
     let half = v.size * 0.5;
     let q = abs(local - half) - half + v.corner;
     let d = length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - v.corner;
-    let a = clamp(0.5 - d, 0.0, 1.0);
+    let a = clamp(1.5 - d, 0.0, 1.0);
     return vec4f(clamp(rgb, vec3f(0.0), vec3f(1.0)) * a, a);
 }
