@@ -16,6 +16,8 @@ pub struct Sizes {
     /// The videos' posters and small frames (frames/).
     pub frames: u64,
     pub vectors: u64,
+    /// The videos' sound: a vector for each 10 s of it, and where each starts.
+    pub sounds: u64,
     pub layout: u64,
     pub other: u64,
 }
@@ -31,7 +33,7 @@ pub struct Part {
 impl Sizes {
     /// What the map adds to the disk (linked photos are not counted: they are the originals, here or on another disk).
     pub fn total(&self) -> u64 {
-        self.photos + self.pictures + self.frames + self.vectors + self.layout + self.other
+        self.photos + self.pictures + self.frames + self.vectors + self.sounds + self.layout + self.other
     }
 
     /// The parts that take space, biggest first.
@@ -41,6 +43,7 @@ impl Sizes {
             Part { name: "Small pictures", bytes: self.pictures, about: "Tiny versions of every photo (1 to 32 pixels wide), compressed and kept ready. They are what you see when the map is zoomed out, and they are why the whole map is always visible at once." },
             Part { name: "Video frames", bytes: self.frames, about: "For each video, its poster (the picture it has on the map) and its keyframes, small (256 pixels): a search shows a video by the frame that matched best." },
             Part { name: "Photo vectors", bytes: self.vectors, about: "For each photo (and each frame of a video), 768 numbers that describe what it shows, made by the AI model. Photos with similar numbers look alike: this is what the layout and the search are built on." },
+            Part { name: "Sound vectors", bytes: self.sounds, about: "For every 10 seconds of a video's sound, 768 numbers that describe what is said or heard in it, made by the sound model: this is what searching by sound is built on." },
             Part { name: "Layout and names", bytes: self.layout, about: "Where each photo sits on the map, the named regions you see when zooming, and each photo's file name and size." },
             Part { name: "Other", bytes: self.other, about: "The cover picture shown on this page, and leftovers." },
         ];
@@ -86,6 +89,7 @@ pub fn measure(map: &Path) -> Sizes {
         match name.as_str() {
             "pages_bc7.bin" => sizes.pictures += bytes,
             "embeddings.bin" | "frames.bin" => sizes.vectors += bytes,
+            "sounds.bin" | "sounds.json" => sizes.sounds += bytes,
             "layout.bin" | "tree.bin" | "photos.json" | "frames.json" | "manifest.json" => sizes.layout += bytes,
             n if n.starts_with("regions") || n.starts_with("region_names") => sizes.layout += bytes,
             _ => sizes.other += bytes,
@@ -141,6 +145,9 @@ mod tests {
         std::fs::write(dir.join("layout.bin"), vec![0u8; 10]).unwrap();
         std::fs::write(dir.join("region_names.json"), vec![0u8; 5]).unwrap();
         std::fs::write(dir.join("cover.png"), vec![0u8; 7]).unwrap();
+        // its sound
+        std::fs::write(dir.join("sounds.bin"), vec![0u8; 30]).unwrap();
+        std::fs::write(dir.join("sounds.json"), vec![0u8; 4]).unwrap();
         // a video: its frames' vectors and list, its poster and frames
         std::fs::write(dir.join("frames.bin"), vec![0u8; 40]).unwrap();
         std::fs::write(dir.join("frames.json"), vec![0u8; 3]).unwrap();
@@ -148,8 +155,8 @@ mod tests {
         std::fs::write(dir.join("frames/000000/poster.jpg"), vec![0u8; 60]).unwrap();
         std::fs::write(dir.join("frames/000000/000001.jpg"), vec![0u8; 20]).unwrap();
         let s = measure(&dir);
-        assert_eq!((s.photos, s.linked, s.pictures, s.frames, s.vectors, s.layout, s.other), (500, 1000, 300, 80, 240, 18, 7));
-        assert_eq!(s.total(), 1145);
+        assert_eq!((s.photos, s.linked, s.pictures, s.frames, s.vectors, s.sounds, s.layout, s.other), (500, 1000, 300, 80, 240, 34, 18, 7));
+        assert_eq!(s.total(), 1179);
         #[cfg(unix)]
         assert_eq!((s.elsewhere, s.unreachable), (2000, 1));
         std::fs::remove_file(&away).unwrap();

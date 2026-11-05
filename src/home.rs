@@ -1280,7 +1280,7 @@ fn show_in_file_manager(folder: &Path) {
 }
 
 fn part_colour(i: usize) -> Color32 {
-    [theme::ACCENT, theme::OK, Color32::from_rgb(230, 170, 90), Color32::from_rgb(200, 130, 220), Color32::from_rgb(110, 200, 210), theme::MUTED][i % 6]
+    [theme::ACCENT, theme::OK, Color32::from_rgb(230, 170, 90), Color32::from_rgb(200, 130, 220), Color32::from_rgb(110, 200, 210), Color32::from_rgb(235, 215, 110), theme::MUTED][i % 7]
 }
 
 /// 28 014 style grouping.

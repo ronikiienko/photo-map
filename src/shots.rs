@@ -47,6 +47,19 @@ pub fn app_folder(name: &str, maps: &[(&str, usize, usize, &str)]) -> PathBuf {
             image::Rgba([f(tint.0, x), f(tint.1, y), f(tint.2, (x + y) / 2), 255])
         });
         cover.save(map.join("cover.png")).unwrap();
+        if *videos > 0 {
+            // the files a map with videos has, at about their real sizes (empty: sparse files, taking no disk)
+            let sized = |file: &str, bytes: u64| {
+                let path = map.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::File::create(path).unwrap().set_len(bytes).unwrap();
+            };
+            sized("pages_bc7.bin", *photos as u64 * 2_300_000 / 1_000);
+            sized("embeddings.bin", *photos as u64 * 1536);
+            sized("frames/000000/poster.jpg", *videos as u64 * 180_000);
+            sized("sounds.bin", *videos as u64 * 18 * 1536);
+            sized("layout.bin", *photos as u64 * 16);
+        }
     }
     root
 }
