@@ -953,7 +953,7 @@ impl Viewer {
                 .iter()
                 .map(|p| {
                     let name = p.source.get(root..).unwrap_or(&p.source);
-                    filters.iter().all(|f| f.passes(name, p.facts.as_deref()))
+                    filters.iter().all(|f| f.passes(name, p.facts.as_deref(), p.video.is_some()))
                 })
                 .collect();
             let hits = pass.iter().zip(&m.hidden_mask).filter(|&(&p, &h)| p && !h).count();
@@ -1756,6 +1756,15 @@ impl Viewer {
             self.filter_edit = Some(e);
             self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("filter-edit")));
         }
+        if let Some(videos) = actions.set_kind {
+            self.finish_filter();
+            let f = query::Filter::kind(videos);
+            match self.filters.iter().position(|f| f.key == query::Key::Kind) {
+                Some(k) => self.filters[k] = f,
+                None => self.filters.push(f),
+            }
+            self.ask();
+        }
         if let Some(k) = actions.drop_filter {
             if k < self.filters.len() {
                 self.filters.remove(k);
@@ -2438,6 +2447,8 @@ struct UiActions {
     filter_done: bool,
     /// A filter chip's cross: its place in `filters`.
     drop_filter: Option<usize>,
+    /// Only photos or only videos: in place of the one there was.
+    set_kind: Option<bool>,
     /// A photo taken out of the search (its place in `photos`).
     drop_photo: Option<usize>,
     /// A photo searched for, by its place on the map: go to it.

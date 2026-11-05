@@ -143,6 +143,14 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             ui.add(egui::Label::new(theme::muted(line)).wrap_mode(egui::TextWrapMode::Extend));
                         }
                         ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            for (videos, text, tip) in [(false, "Only photos", "leave the videos out"), (true, "Only videos", "leave the photos out")] {
+                                if theme::button(ui, egui::Button::new(text)).on_hover_text(tip).clicked() {
+                                    actions.set_kind = Some(videos);
+                                    ui.close();
+                                }
+                            }
+                        });
                         for (key, tip) in [
                             (query::Key::Name, "a word in the file and folder names, like greece"),
                             (query::Key::Camera, "the camera it was taken with, like pixel"),
@@ -154,7 +162,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                                 ui.close();
                             }
                         }
-                    }).0.on_hover_text("only photos that pass a filter can match: by name, camera, date or place");
+                    }).0.on_hover_text("only photos that pass a filter can match: photos or videos, by name, camera, date or place");
                     });
                     // while in the box with an idea showing: the keys for ideas
                     if focused && (idea.is_some() || whole) {
@@ -305,10 +313,21 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             fits(ui, chip_width(ui, chip_text(f.key, f.not, &f.value_text())));
                             chip(ui, false, |ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                let tip = if f.not { "photos this picks are left out; click to change it" } else { "only photos this picks can match; click to change it" };
+                                let kind = f.key == query::Key::Kind;
+                                let tip = if kind {
+                                    "click for the other ones"
+                                } else if f.not {
+                                    "photos this picks are left out; click to change it"
+                                } else {
+                                    "only photos this picks can match; click to change it"
+                                };
                                 let text = ui.add(egui::Label::new(chip_text(f.key, f.not, &f.value_text())).wrap_mode(egui::TextWrapMode::Extend).sense(egui::Sense::click()));
                                 if text.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked() {
-                                    actions.edit_filter = Some(FilterEdit { at: k, key: f.key, not: f.not, value: f.value_text() });
+                                    if kind {
+                                        actions.set_kind = Some(f.values[0] != "videos");
+                                    } else {
+                                        actions.edit_filter = Some(FilterEdit { at: k, key: f.key, not: f.not, value: f.value_text() });
+                                    }
                                 }
                                 if small_cross(ui).on_hover_text("take this filter out").clicked() {
                                     actions.drop_filter = Some(k);
@@ -615,7 +634,7 @@ mod shots {
         shot("2-typing", State { search: "street at".into(), focus: true, ..state() }, None);
         let results = || State { search: "shopping cart".into(), found: 100, at: Some(0), status: "shopping cart: similarity 0.12 to 0.25".into(), ..state() };
         shot("3-results", results(), None);
-        shot("4-chips", State { filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi"), filter("year:2016..2018")], ..results() }, None);
+        shot("4-chips", State { filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi"), filter("year:2016..2018"), Filter::kind(true)], ..results() }, None);
         shot("4b-chip-hovered", State { filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi")], ..results() }, Some(egui::pos2(100.0, 71.0)));
         shot("5b-editing-a-not-chip", State { filters: vec![filter("place:istanbul")], filter_edit: Some(FilterEdit { at: 1, key: Key::Camera, not: true, value: "pixel".into() }), ..results() }, None);
         shot("5-editing-a-chip", State { filters: vec![filter("place:istanbul")], filter_edit: Some(FilterEdit { at: 1, key: Key::Date, not: false, value: String::new() }), ..results() }, None);

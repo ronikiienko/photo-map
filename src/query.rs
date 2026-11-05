@@ -89,6 +89,8 @@ pub enum Key {
     Camera,
     Date,
     Place,
+    /// Photos or videos ("photos", "videos"): made with a button, not written.
+    Kind,
 }
 
 /// One filter: `camera:pixel`, `name:greece`, `NOT place:kyiv`. Typed in the box, it leaves it for a chip of its own.
@@ -109,6 +111,7 @@ impl Key {
             Key::Camera => "Camera",
             Key::Date => "Date",
             Key::Place => "Place",
+            Key::Kind => "Only",
         }
     }
 
@@ -118,6 +121,7 @@ impl Key {
             Key::Camera => "pixel, redmi",
             Key::Date => "2016..2018",
             Key::Place => "lviv, kyiv",
+            Key::Kind => "",
         }
     }
 }
@@ -141,15 +145,23 @@ impl Filter {
             Key::Camera => "camera",
             Key::Date => "date",
             Key::Place => "place",
+            Key::Kind => "only",
         };
         let value = self.values.join(",");
         let value = if value.contains(' ') { format!("\"{value}\"") } else { value };
         format!("{}{key}:{value}", if self.not { "NOT " } else { "" })
     }
 
-    /// Whether a photo with this name and these facts passes (a NOT passes what it doesn't pick). A date picks by its start.
-    pub fn passes(&self, name: &str, facts: Option<&crate::data::Facts>) -> bool {
+    /// Only photos or only videos.
+    pub fn kind(videos: bool) -> Filter {
+        Filter { key: Key::Kind, values: vec![if videos { "videos" } else { "photos" }.into()], not: false }
+    }
+
+    /// Whether a photo (`video`: a video) with this name and these facts passes (a NOT passes what it doesn't pick). A date
+    /// picks by its start.
+    pub fn passes(&self, name: &str, facts: Option<&crate::data::Facts>, video: bool) -> bool {
         let picks = |value: &str| match (self.key, facts) {
+            (Key::Kind, _) => (value == "videos") == video,
             (Key::Name, _) => has_name(name, value),
             (Key::Camera, Some(f)) => has_name(&f.camera, value),
             (Key::Date, Some(f)) => in_dates(&f.taken, value),
@@ -270,7 +282,7 @@ mod tests {
     #[test]
     fn dates_any_of_and_ranges() {
         let at = |taken: &str| crate::data::Facts { taken: taken.into(), ..Default::default() };
-        let passes = |text: &str, taken: &str| filters(text).1[0].passes("", Some(&at(taken)));
+        let passes = |text: &str, taken: &str| filters(text).1[0].passes("", Some(&at(taken)), false);
         assert!(passes("year:2016,2018", "2018-01-01 10:00"));
         assert!(!passes("year:2016,2018", "2017-01-01 10:00"));
         assert!(passes("year:2016..2018", "2016-01-01"));
@@ -289,12 +301,16 @@ mod tests {
     fn filters_pass_photos() {
         let facts = crate::data::Facts { camera: "Google Pixel 7".into(), taken: "2019-07-04 14:00".into(), place: "Lviv, Lviv Oblast, Ukraine".into(), ..Default::default() };
         let (_, fs) = filters(r#"camera:pixel date:2019-07 place:lviv "trip""#);
-        assert!(fs.iter().all(|f| f.passes("Trip 2019/a.jpg", Some(&facts))));
+        assert!(fs.iter().all(|f| f.passes("Trip 2019/a.jpg", Some(&facts), false)));
         let (_, fs) = filters("date:2019-08");
-        assert!(!fs[0].passes("a.jpg", Some(&facts)));
+        assert!(!fs[0].passes("a.jpg", Some(&facts), false));
         let (_, fs) = filters("NOT camera:canon camera:pixel");
-        assert!(fs[0].passes("a.jpg", None), "nothing known: a NOT lets it through");
-        assert!(!fs[1].passes("a.jpg", None), "nothing known: not picked");
+        assert!(fs[0].passes("a.jpg", None, false), "nothing known: a NOT lets it through");
+        assert!(!fs[1].passes("a.jpg", None, false), "nothing known: not picked");
+        let videos = Filter::kind(true);
+        assert!(videos.passes("a.mp4", None, true) && !videos.passes("a.jpg", None, false));
+        let photos = Filter::kind(false);
+        assert!(photos.passes("a.jpg", None, false) && !photos.passes("a.mp4", None, true));
     }
 
     #[test]
