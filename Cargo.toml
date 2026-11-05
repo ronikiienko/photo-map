@@ -40,6 +40,8 @@ kamadak-exif = "0.6"
 directories = "6.0.0"
 arboard = "3.6"
 cpal = "0.18"
+# the sound model's features (listen.rs): a 512-point FFT per 10 ms of sound
+realfft = "3"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot"] }

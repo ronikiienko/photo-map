@@ -44,9 +44,16 @@ pub fn cuda() -> ep::ExecutionProviderDispatch {
 }
 
 impl Runtime {
+    /// The process's runtime, started the first time it is asked for (ONNX Runtime allows one environment in a process; the photo
+    /// models' hub and the sound step of a build share it). A failure to start is kept too: it would fail the same way again.
+    pub fn shared(root: &Path) -> Result<&'static Runtime> {
+        static RUNTIME: std::sync::OnceLock<Result<Runtime>> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| Runtime::start(root)).as_ref().map_err(|e| e.clone())
+    }
+
     /// Start ONNX Runtime from the libraries `runtime::Setup` finds, with the CUDA libraries loaded by full path (a missing one
     /// means no GPU).
-    pub fn start(root: &Path) -> Result<Self> {
+    fn start(root: &Path) -> Result<Self> {
         let setup = Setup::detect(root);
         let Some(ort_place) = &setup.ort else {
             return Err(format!("ONNX Runtime has not been downloaded (looked in {})", root.join("runtime").display()));

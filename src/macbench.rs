@@ -98,7 +98,7 @@ fn mac_embed_speed() {
 #[ignore]
 fn show_model_edges() {
     let root = crate::data_root();
-    let rt = crate::embed::Runtime::start(&root).unwrap();
+    let rt = crate::embed::Runtime::shared(&root).unwrap();
     for f in std::env::var("BENCH_FILES").unwrap().split(',') {
         let session = ort::session::Session::builder(&rt.env).unwrap().commit_from_file(f).unwrap();
         eprintln!("EDGES {f}");

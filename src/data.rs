@@ -11,6 +11,9 @@
 //!     frames.json     if it has videos: their frames (Frame below), in the order of frames.bin's rows
 //!     frames.bin      if it has videos: per frame, float16 vector (a search scores a video by its best frame)
 //!     frames/<n>/     a video's poster.jpg (its picture on the map) and its frames, small (shown for a search's matches)
+//!     sounds.json     if its videos were listened to (listen.rs): the sound model, and its windows (Sound below), in the order of
+//!                     sounds.bin's rows
+//!     sounds.bin      per window of a video's sound, float16 vector (a search by sound scores a video by its best window)
 //!     pages_bc7.bin   the baked levels (1 ... 32 px) of every picture: the photos', then the frames' (bake.rs)
 
 use memmap2::Mmap;
@@ -179,6 +182,39 @@ pub struct Frame {
     pub height: u32,
 }
 
+/// A 10 s window of a video's sound (sounds.json): searched by what is said and heard in it (listen.rs).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Sound {
+    /// The photo (the video) it is from.
+    pub video: usize,
+    /// Where it starts, seconds from the video's start (it lasts listen::WINDOW).
+    pub time: f32,
+}
+
+/// sounds.json.
+#[derive(Deserialize)]
+pub struct Sounds {
+    pub model: String,
+    pub dim: usize,
+    pub windows: Vec<Sound>,
+}
+
+/// The picture each sound window is shown by: its video's frame nearest the window's middle (picture n + k), or the video itself.
+pub fn sound_pictures(sounds: &[Sound], frames: &[Frame], n: usize) -> Vec<usize> {
+    // a video's frames come one after another
+    let mut of_video: std::collections::HashMap<usize, std::ops::Range<usize>> = std::collections::HashMap::new();
+    for (k, f) in frames.iter().enumerate() {
+        of_video.entry(f.video).and_modify(|r| r.end = k + 1).or_insert(k..k + 1);
+    }
+    sounds
+        .iter()
+        .map(|s| {
+            let middle = s.time + crate::listen::WINDOW / 2.0;
+            of_video.get(&s.video).and_then(|r| r.clone().min_by(|&a, &b| (frames[a].time - middle).abs().total_cmp(&(frames[b].time - middle).abs()))).map_or(s.video, |k| n + k)
+        })
+        .collect()
+}
+
 /// A frame's longer side, as kept in the map (px).
 pub const FRAME_SIDE: u32 = 256;
 
@@ -213,6 +249,11 @@ pub struct MapData {
     pub photos: Vec<Photo>,
     /// The videos' frames (none if the map has no videos).
     pub frames: Vec<Frame>,
+    /// The windows of the videos' sound (none if they weren't listened to), the model that made their vectors and how many numbers
+    /// each has, and the picture each window is shown by: its video's frame nearest its middle (or the video's poster).
+    pub sounds: Vec<Sound>,
+    pub sound_model: Option<(String, usize)>,
+    pub sound_pictures: Vec<usize>,
     pub points: Vec<Point>,
     /// How big each photo is drawn, times `side` (the Groups view: the most typical photos biggest); empty: all 1.
     pub sizes: Vec<f32>,
@@ -243,6 +284,11 @@ impl MapData {
         if frames.iter().any(|f| f.video >= n) {
             return Err(std::io::Error::other("frames.json doesn't match the photos"));
         }
+        let (sounds, sound_model) = match read("sounds.json").ok().and_then(|raw| serde_json::from_slice::<Sounds>(&raw).ok()) {
+            Some(s) if s.windows.iter().all(|w| w.video < n) => (s.windows, Some((s.model, s.dim))),
+            _ => (Vec::new(), None),
+        };
+        let sound_pictures = sound_pictures(&sounds, &frames, n);
         let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
         if pages.len() != crate::pages::baked_bytes(n + frames.len()) {
             return Err(std::io::Error::other("pages_bc7.bin is not the size of the pictures"));
@@ -259,7 +305,7 @@ impl MapData {
         for level in &mut regions.levels {
             level.sort_by(|a, b| b.photos.cmp(&a.photos));
         }
-        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, frames, points, sizes: Vec::new(), side, pages: std::sync::Arc::new(pages), grid, regions })
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, frames, sounds, sound_model, sound_pictures, points, sizes: Vec::new(), side, pages: std::sync::Arc::new(pages), grid, regions })
     }
 
     pub fn n(&self) -> usize {

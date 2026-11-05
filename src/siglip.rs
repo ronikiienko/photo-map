@@ -343,7 +343,7 @@ mod tests {
     fn text_rows_give_the_publishers_vectors() {
         let root = crate::data_root();
         let spec = models::spec(models::SIGLIP_BASE_256).unwrap();
-        let rt = crate::embed::Runtime::start(&root).unwrap();
+        let rt = crate::embed::Runtime::shared(&root).unwrap();
         let mut model = super::Siglip::load(&rt, &root, spec, spec.size).unwrap();
         let mut publisher = ort::session::Session::builder(&rt.env).unwrap().commit_from_file(spec.dir(&root).join(super::TEXT_FILE)).unwrap();
         for text in ["a dog on a beach", "street at night NOT cars", "собака без повідка", "東京の夜景", ""] {

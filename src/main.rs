@@ -17,6 +17,7 @@ mod gpu;
 mod groups;
 mod home;
 mod layout;
+mod listen;
 mod lens;
 mod library;
 #[cfg(test)]
@@ -217,6 +218,8 @@ struct Hidden {
     what: String,
     photos: Vec<usize>,
     words: String,
+    /// The words were searched for in the videos' sound.
+    by_sound: bool,
     searched: Vec<(PathBuf, egui::TextureHandle)>,
     filters: Vec<query::Filter>,
     wanted: f32,
@@ -242,16 +245,20 @@ struct OpenMap {
     flags_dirty: bool,
     /// A photo's side in world units (see PHOTO_WORLD_DEFAULT).
     photo_world: f32,
-    /// The last search's cosine with every photo's picture (empty: no search); a video's is its best frame's.
+    /// The last search's score of every photo (empty: no search): its picture's cosine, a video's best moment's; NEG_INFINITY:
+    /// it can't match (a photo, in a search by sound).
     sims: Vec<f32>,
-    /// The picture each photo is shown by among the last search's matches: itself, or a video's best frame (search::best_frames).
-    best: Vec<usize>,
-    /// The last search's scores of the videos' frames (as `sims`, frame by frame; empty: none), and how many photos it marks
-    /// (the count slider's): a video's moments are as many of its best frames.
+    /// Each photo's best moment in the last search (search::best_moments): none for a photo.
+    best: Vec<Option<usize>>,
+    /// The last search's scores of the videos' moments (empty: none): their frames' (by look), or the windows of their sound's
+    /// (`heard`: by sound). And how many photos it marks (the count slider's): a video's moments are as many of its best ones.
     frame_sims: Vec<f32>,
+    heard: bool,
     wanted: usize,
-    /// The picture each copy beside the world shows: the matches' (in the order of `order`), then the moments'.
+    /// The picture each copy beside the world shows: the matches' (in the order of `order`), then the moments'; and when in its
+    /// video each one plays from (none: a photo, or a video's poster, from the start).
     pictures: Vec<usize>,
+    copy_times: Vec<Option<f32>>,
     /// The photos that match the search, best first, and which of them the last next/previous step went to.
     order: Vec<usize>,
     at: Option<usize>,
@@ -325,25 +332,42 @@ impl OpenMap {
         self.place_copies(queue, best);
     }
 
-    /// The copies beside the world: the matches' (`best`: a video's shows its best frame), then the moments' (show_moments).
+    /// Moment k of the last search (a frame of a video, or by sound a window of its sound): its video, the picture it is shown by
+    /// (a window's: its video's frame nearest its middle), and when it plays from.
+    fn moment_video(&self, k: usize) -> usize {
+        if self.heard { self.data.sounds[k].video } else { self.data.frames[k].video }
+    }
+
+    fn moment_picture(&self, k: usize) -> usize {
+        if self.heard { self.data.sound_pictures[k] } else { self.data.n() + k }
+    }
+
+    fn moment_time(&self, k: usize) -> f32 {
+        if self.heard { self.data.sounds[k].time } else { self.data.frames[k].time }
+    }
+
+    /// The copies beside the world: the matches' (`best`: a video's shows its best moment), then the moments' (show_moments).
     fn place_copies(&mut self, queue: &wgpu::Queue, best: bool) {
-        self.pictures = self.order.iter().map(|&i| if best { self.best[i] } else { i }).collect();
+        let shown: Vec<Option<usize>> = self.order.iter().map(|&i| if best { self.best.get(i).copied().flatten() } else { None }).collect();
+        self.pictures = self.order.iter().zip(&shown).map(|(&i, m)| m.map_or(i, |k| self.moment_picture(k))).collect();
+        self.copy_times = shown.iter().map(|m| m.map(|k| self.moment_time(k))).collect();
         (self.copies, self.copy_side) = beside::place(self.order.len());
         let moments = self.moments.map_or(Vec::new(), |video| self.moments_of(video));
         let right = self.copies.iter().map(|p| p.x).fold(beside::LEFT, f32::max) + self.copy_side / beside::FILL / 2.0;
         self.copies.extend(beside::place_after(moments.len(), self.copy_side, right));
-        self.pictures.extend(moments);
+        let (pictures, times): (Vec<usize>, Vec<Option<f32>>) = moments.iter().map(|&k| (self.moment_picture(k), Some(self.moment_time(k)))).unzip();
+        self.pictures.extend(pictures);
+        self.copy_times.extend(times);
         self.renderer.set_copies(queue, &self.data, &self.pictures, &self.copies);
     }
 
-    /// This video's frames that match the last search best, as many as it marks photos (whether or not they made it into the
-    /// matches), best first: their picture ids.
+    /// This video's moments that match the last search best, as many as it marks photos (whether or not they made it into the
+    /// matches), best first.
     fn moments_of(&self, video: usize) -> Vec<usize> {
-        let n = self.data.n();
-        let mut frames: Vec<usize> = (0..self.frame_sims.len()).filter(|&k| self.data.frames[k].video == video).collect();
-        frames.sort_by(|&a, &b| self.frame_sims[b].total_cmp(&self.frame_sims[a]));
-        frames.truncate(self.wanted);
-        frames.into_iter().map(|k| n + k).collect()
+        let mut moments: Vec<usize> = (0..self.frame_sims.len()).filter(|&k| self.moment_video(k) == video).collect();
+        moments.sort_by(|&a, &b| self.frame_sims[b].total_cmp(&self.frame_sims[a]));
+        moments.truncate(self.wanted);
+        moments
     }
 
     /// "Moments that match": this video's best frames for the search, right of the matches (another video's go).
@@ -352,9 +376,9 @@ impl OpenMap {
         self.place_copies(queue, true);
     }
 
-    /// Can this photo show its moments: a video, while a search by words or photos is on?
+    /// Can this photo show its moments: a video with some, while a search by words or photos is on?
     fn has_moments(&self, photo: usize) -> bool {
-        self.data.photos[photo].video.is_some() && !self.frame_sims.is_empty() && self.trail.is_none() && !self.order.is_empty()
+        self.data.photos[photo].video.is_some() && self.trail.is_none() && !self.order.is_empty() && (0..self.frame_sims.len()).any(|k| self.moment_video(k) == photo)
     }
 
     /// The photo copy `k` beside the world is of: a match, or the video of the moments.
@@ -462,6 +486,10 @@ struct Viewer {
     asked: Vec<Option<u64>>,
     answers: Vec<Option<(Vec<f32>, Vec<f32>)>>,
     logic: query::Logic,
+    /// Search by sound (the switch in the box, on a map whose videos were listened to): the words are looked for in what is said
+    /// and heard in the videos. `asked_by_sound`: the search being worked on is.
+    listening: bool,
+    asked_by_sound: bool,
     /// The photos searched for (dropped on the window, or from the photo menu), each with a small picture for the bar. Several are
     /// averaged: what they share counts.
     photos: Vec<(PathBuf, egui::TextureHandle)>,
@@ -593,6 +621,8 @@ impl Viewer {
             asked: Vec::new(),
             answers: Vec::new(),
             logic: query::Logic::one(),
+            listening: false,
+            asked_by_sound: false,
             photos: Vec::new(),
             status: String::new(),
             groups_text: String::new(),
@@ -659,7 +689,9 @@ impl Viewer {
         self.filter_edit = None;
         self.names = None;
         self.shown.clear();
-        let vectors = search::Vectors::open(&path, n, data.frames.len(), data.manifest.dim());
+        let vectors = search::Vectors::open(&path, n, data.frames.len(), data.manifest.dim(), (data.sounds.len(), data.sound_model.as_ref().map_or(0, |m| m.1)));
+        // a map without its videos' sound is searched by look
+        self.listening &= vectors.as_ref().is_some_and(|v| v.has_sound());
         let tree = tree::read(&path, n);
         let in_process = vectors.is_some();
         self.asked.clear();
@@ -682,9 +714,11 @@ impl Viewer {
             photo_world,
             sims: Vec::new(),
             frame_sims: Vec::new(),
+            heard: false,
             wanted: 0,
-            best: (0..n).collect(),
+            best: vec![None; n],
             pictures: Vec::new(),
+            copy_times: Vec::new(),
             order: Vec::new(),
             at: None,
             copies: Vec::new(),
@@ -960,6 +994,7 @@ impl Viewer {
     /// Take a photo for the search, instead of the photos before it or (`add`) besides them: remember its path and a small picture
     /// of it to show in the bar. False if it can't be read.
     fn set_photo(&mut self, path: PathBuf, add: bool) -> bool {
+        self.listening = false; // photos are searched by look
         let Ok(img) = image::open(&path) else {
             self.status = "can't read that photo".into();
             return false;
@@ -1051,7 +1086,7 @@ impl Viewer {
                 let m = self.map.as_mut().unwrap();
                 m.sims = vec![0.0; n];
                 m.frame_sims.clear();
-                m.best = (0..n).collect();
+                m.best = vec![None; n];
                 self.apply_search(); // the camera stays where it is: the marks light up where they are
                 return;
             }
@@ -1068,6 +1103,31 @@ impl Viewer {
             self.status.clear();
         } else if m.vectors.is_none() {
             self.status = "this map has no search vectors (embeddings.bin)".into();
+        } else if self.listening {
+            // by sound: words only (switching to it takes photos out of the search)
+            let spec = models::sound();
+            if !spec.installed(&self.library.root()) {
+                self.status = format!("{} isn't downloaded (Models, on the Maps page): the videos can't be searched by sound", spec.label);
+                return;
+            }
+            if let search::SoundState::Failed(why) = self.engine.sound() {
+                self.status = format!("search by sound can't start: {why}");
+                return;
+            }
+            let logic = match query::Logic::parse(&rest) {
+                Ok(logic) => logic,
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            };
+            let model = m.data.manifest.model().to_string();
+            self.asked = logic.terms.iter().map(|t| Some(self.engine.ask(&model, search::Query::Sound(t.clone())))).collect();
+            self.answers = vec![None; self.asked.len()];
+            self.asked_by_sound = true;
+            self.logic = logic;
+            self.shown = text;
+            self.status = if matches!(self.engine.sound(), search::SoundState::Ready) { "searching…".into() } else { "loading the sound model, it will run when ready…".into() };
         } else if models::spec(m.data.manifest.model()).is_none() {
             self.status = format!("this map was made with {}, which this version doesn't know", m.data.manifest.model());
         } else if !models::spec(m.data.manifest.model()).is_some_and(|s| s.installed(&self.library.root())) {
@@ -1090,6 +1150,7 @@ impl Viewer {
             };
             self.asked = queries.into_iter().map(|q| Some(self.engine.ask(&model, q))).collect();
             self.answers = vec![None; self.asked.len()];
+            self.asked_by_sound = false;
             self.logic = logic;
             self.shown = shown;
             self.status = if self.engine.ready(&model).is_some() { "searching…".into() } else { "loading the search model, it will run when ready…".into() };
@@ -1171,18 +1232,28 @@ impl Viewer {
             let Some(m) = &mut self.map else { continue };
             match (vector, &m.vectors) {
                 (Ok(v), Some(vectors)) => {
-                    self.answers[k] = Some((vectors.cosines(&v), vectors.frame_cosines(&v)));
+                    // by look: the photos' pictures and the videos' frames; by sound: the windows of the videos' sound
+                    self.answers[k] = Some(if self.asked_by_sound { (Vec::new(), vectors.sound_cosines(&v)) } else { (vectors.cosines(&v), vectors.frame_cosines(&v)) });
                     if self.asked.iter().any(Option::is_some) {
                         continue; // the other terms are still on their way
                     }
-                    // the photos' scores, and the frames' the same way (a video then scores as its best frame)
-                    let (cos, frame_cos): (Vec<Vec<f32>>, Vec<Vec<f32>>) = std::mem::take(&mut self.answers).into_iter().flatten().unzip();
-                    m.sims = self.logic.combine(&cos);
-                    m.best = (0..m.sims.len()).collect();
+                    // the photos' scores, and the moments' the same way (a video then scores as its best moment)
+                    let (cos, moment_cos): (Vec<Vec<f32>>, Vec<Vec<f32>>) = std::mem::take(&mut self.answers).into_iter().flatten().unzip();
+                    let n = m.data.n();
+                    m.heard = self.asked_by_sound;
                     m.frame_sims.clear();
-                    if !m.data.frames.is_empty() {
-                        m.frame_sims = self.logic.combine(&frame_cos);
-                        m.best = search::best_frames(&mut m.sims, &m.frame_sims, &m.data.frames);
+                    m.best = vec![None; n];
+                    if m.heard {
+                        // only videos have a sound to match
+                        m.sims = vec![f32::NEG_INFINITY; n];
+                        m.frame_sims = self.logic.combine(&moment_cos);
+                        m.best = search::best_moments(&mut m.sims, &m.frame_sims, m.data.sounds.iter().map(|s| s.video));
+                    } else {
+                        m.sims = self.logic.combine(&cos);
+                        if !m.data.frames.is_empty() {
+                            m.frame_sims = self.logic.combine(&moment_cos);
+                            m.best = search::best_moments(&mut m.sims, &m.frame_sims, m.data.frames.iter().map(|f| f.video));
+                        }
                     }
                     self.apply_search(); // the camera stays where it is: the marks light up where they are
                     if let Some(note) = note {
@@ -1206,8 +1277,8 @@ impl Viewer {
         if n == 0 || m.sims.len() != n {
             return None;
         }
-        // hidden photos never match, nor ones the filters leave out
-        let out = |i: usize| m.hidden_mask[i] || self.names.as_ref().is_some_and(|p| !p[i]);
+        // hidden photos never match, nor ones the filters leave out, nor ones the search can't score (photos, by sound)
+        let out = |i: usize| m.hidden_mask[i] || self.names.as_ref().is_some_and(|p| !p[i]) || m.sims[i] == f32::NEG_INFINITY;
         let score: Vec<f32> = (0..n).map(|i| if out(i) { f32::NEG_INFINITY } else { m.sims[i] }).collect();
         let shown = (0..n).filter(|&i| !out(i)).count();
         self.can_match = shown;
@@ -1280,7 +1351,9 @@ impl Viewer {
         // with its filters, unless they are the whole search (and so its name already)
         let what = if self.names_only || self.filters.is_empty() { what } else { format!("{what} {}", self.filters.iter().map(query::Filter::text).collect::<Vec<_>>().join(" ")) };
         let words = if self.photos.is_empty() && !self.names_only { self.shown.clone() } else { String::new() };
-        m.hidden.push(Hidden { what, photos: m.order.clone(), words, searched: self.photos.clone(), filters: std::mem::take(&mut self.filters), wanted: self.wanted });
+        let by_sound = m.heard && !self.names_only;
+        let what = if by_sound { format!("sound: {what}") } else { what };
+        m.hidden.push(Hidden { what, photos: m.order.clone(), words, by_sound, searched: self.photos.clone(), filters: std::mem::take(&mut self.filters), wanted: self.wanted });
         m.rehide();
         self.search.clear();
         self.photos.clear();
@@ -1298,6 +1371,7 @@ impl Viewer {
         m.rehide();
         if edit {
             self.search = h.words;
+            self.listening = h.by_sound;
             self.photos = h.searched;
             self.filters = h.filters;
             self.wanted = h.wanted;
@@ -1785,6 +1859,15 @@ impl Viewer {
         if let (Some(a), Some(b)) = (self.path_from, actions.path_to) {
             self.show_path(a, b);
         }
+        if let Some(on) = actions.listen {
+            self.listening = on;
+            if on {
+                self.photos.clear(); // a search by sound is words only
+                self.engine.want_sound();
+            }
+            self.ask(); // the words again, the other way (nothing in the box: the matches go)
+            self.ui.ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-box")));
+        }
         if let Some(i) = actions.like {
             self.ask_like(i, false);
         }
@@ -2162,13 +2245,13 @@ impl Viewer {
                 }
             });
         }
-        // the copies (matches and moments): when their frame is, and it plays from there (a video's poster: how long it is, from
-        // the start)
+        // the copies (matches and moments): when their moment is (a frame, or a window of the sound), and it plays from there (a
+        // video's poster: how long it is, from the start)
         let copy_long = m.copy_side * self.camera.scale / ppp;
         for (k, (&picture, p)) in m.pictures.iter().zip(&m.copies).enumerate() {
             let i = m.copy_photo(k);
             let Some(duration) = m.data.photos[i].video.map(|v| v.duration) else { continue };
-            let frame = picture.checked_sub(m.data.n()).map(|f| m.data.frames[f].time);
+            let frame = m.copy_times.get(k).copied().flatten();
             let at = self.camera.to_screen(Vec2::new(p.x, p.y)) / ppp;
             add(i, Some(k), at, m.data.picture_form(picture), copy_long, frame.unwrap_or(duration), frame.unwrap_or(0.0));
         }
@@ -2415,6 +2498,11 @@ impl Viewer {
 
         // middle: the search box, then (only when there is something) the results, and the hidden searches (searchbar.rs)
         let engine = match &self.map {
+            Some(m) if self.listening && m.vectors.is_some() => match self.engine.sound() {
+                search::SoundState::Ready => searchbar::Engine::Ready,
+                search::SoundState::Failed(why) => searchbar::Engine::Off(why),
+                _ => searchbar::Engine::Loading,
+            },
             _ if self.engine.failed().is_some() => searchbar::Engine::Off(self.engine.failed().unwrap_or_default().to_string()),
             None => searchbar::Engine::NoMap,
             Some(m) if m.vectors.is_none() => searchbar::Engine::NotSearchable,
@@ -2440,6 +2528,7 @@ impl Viewer {
             all_marked: self.names_only,
             hidden: m.map_or(Vec::new(), |m| m.hidden.iter().map(|h| (h.what.clone(), h.photos.len())).collect()),
             moments: m.is_some_and(|m| m.moments.is_some()),
+            listening: m.and_then(|m| m.vectors.as_ref()).filter(|v| v.has_sound()).map(|_| self.listening),
             data: m.map(|m| &m.data),
             thumb: &mut |photo| {
                 let data = &m?.data;
@@ -2519,6 +2608,8 @@ impl Viewer {
 #[derive(Default)]
 struct UiActions {
     ask: bool,
+    /// The box's switch: search by sound (true) or by look.
+    listen: Option<bool>,
     /// The Layout menu: show the photos the way it now says.
     arrange: bool,
     reblend: bool,

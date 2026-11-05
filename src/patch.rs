@@ -12,6 +12,13 @@
 //!   375 MB of SigLIP Base's 565) would sit on the card whole for the few rows a search reads. The patched network takes the rows
 //!   instead (siglip.rs reads them from the publisher's file, mapped, not loaded); its other weights point into the publisher's
 //!   `.onnx` itself (`weight_ranges`), so nothing is copied.
+//! - EmbeddingGemma 2's sound side on TensorRT (`SOUND_AUDIO_TENSORRT`, `SOUND_TEXT_TENSORRT`): the publisher's files use ONNX
+//!   Runtime's own norms (`SimplifiedLayerNormalization`, `SkipSimplifiedLayerNormalization`) and rotary embedding, which TensorRT
+//!   can't read; they become standard operators (opset 23). The audio encoder runs in float16, so each norm's input is divided by
+//!   16 first (and epsilon by 256: the same result; float16 sums of squares overflow). The text model runs in bfloat16 (in float16
+//!   its running sums between layers overflow); its word positions are counted in int64 (counted in float, TensorRT can't make the
+//!   fill under bfloat16 and keeps the whole model in float32: twice as slow), and its photo and video inputs go (TensorRT can't
+//!   take the empty tensors a sound window gives them). docs/audio.md has the measurements.
 //! - SigLIP on CoreML (`SIGLIP_COREML`): the first layer's convolution gets its padding written out (zeros, which is what no padding
 //!   means): ONNX Runtime's CoreML provider refuses a convolution without it. And every matrix product by a weight becomes a `Gemm`
 //!   (`weights_as_gemm`): the provider writes a product's weight into CoreML's program as text, which CoreML parses at every load.
@@ -27,6 +34,10 @@ pub const SIGLIP_COREML: &str = "onnx/vision_model_fp16.coreml.onnx";
 pub const SIGLIP_TENSORRT: &str = "onnx/vision_model_fp16.tensorrt.onnx";
 pub const SIGLIP_PROCESSOR: &str = "onnx/vision_model_fp16.processor.onnx";
 pub const SIGLIP_TEXT_ROWS: &str = "onnx/text_model_fp16.rows.onnx";
+pub const SOUND_AUDIO: &str = "onnx/audio_encoder.onnx";
+pub const SOUND_TEXT: &str = "onnx/model.onnx";
+pub const SOUND_AUDIO_TENSORRT: &str = "onnx/audio_encoder.tensorrt.onnx";
+pub const SOUND_TEXT_TENSORRT: &str = "onnx/model.tensorrt.onnx";
 /// The publisher's text encoder, which SIGLIP_TEXT_ROWS is made from and points into.
 pub const SIGLIP_TEXT: &str = "onnx/text_model_fp16.onnx";
 /// The input of SIGLIP_TEXT_ROWS: the tokens' rows, float32, batch x tokens x width.
@@ -53,6 +64,8 @@ pub fn ensure(dir: &Path, name: &str) -> Result<PathBuf> {
             let location = source.file_name().unwrap_or_default().to_string_lossy().into_owned();
             save(&text_rows(model, &weights, &location)?, &path)?
         }
+        SOUND_AUDIO_TENSORRT => save(&sound_audio_tensorrt(load(&dir.join(SOUND_AUDIO))?)?, &path)?,
+        SOUND_TEXT_TENSORRT => save(&sound_text_tensorrt(load(&dir.join(SOUND_TEXT))?)?, &path)?,
         _ => return Err(format!("no patch is called {name}")),
     }
     Ok(path)
@@ -315,6 +328,172 @@ fn layer_norms(mut model: ModelProto) -> Result<ModelProto> {
     Ok(model)
 }
 
+/// A float32 number on its own (no dimensions).
+fn f32_scalar(name: &str, v: f32) -> TensorProto {
+    TensorProto { name: name.into(), data_type: DataType::FLOAT as i32, raw_data: v.to_le_bytes().to_vec(), ..Default::default() }
+}
+
+/// An int64 number on its own (no dimensions).
+fn i64_scalar(name: &str, v: i64) -> TensorProto {
+    TensorProto { name: name.into(), data_type: DataType::INT64 as i32, raw_data: v.to_le_bytes().to_vec(), ..Default::default() }
+}
+
+fn attribute_f(n: &NodeProto, name: &str) -> Option<f32> {
+    attribute(n, name).map(|a| a.f)
+}
+
+fn attribute_i(n: &NodeProto, name: &str) -> Option<i64> {
+    attribute(n, name).map(|a| a.i)
+}
+
+/// Every model's default opset set to 23 (RMSNormalization is new in it); ONNX Runtime's own domain dropped if nothing uses it.
+fn opset_23(model: &mut ModelProto) {
+    let used: HashSet<String> = model.graph.as_ref().map_or(HashSet::new(), |g| g.node.iter().map(|n| n.domain.clone()).collect());
+    model.opset_import.retain(|o| o.domain.is_empty() || o.domain == "ai.onnx" || used.contains(&o.domain));
+    for o in &mut model.opset_import {
+        if o.domain.is_empty() || o.domain == "ai.onnx" {
+            o.version = 23;
+        }
+    }
+}
+
+/// EmbeddingGemma 2's audio encoder for TensorRT in float16: every `SimplifiedLayerNormalization` (ONNX Runtime's own) becomes a
+/// standard `RMSNormalization`, and every norm (`LayerNormalization` too) gets its input divided by 16 and epsilon by 256 (the same
+/// result; float16 squares of its values would overflow).
+fn sound_audio_tensorrt(mut model: ModelProto) -> Result<ModelProto> {
+    const SHRINK: f32 = 16.0;
+    let g = model.graph.as_mut().ok_or("no graph")?;
+    let mut nodes = Vec::with_capacity(g.node.len() * 2);
+    let mut norms = 0;
+    for n in std::mem::take(&mut g.node) {
+        let simplified = n.op_type == "SimplifiedLayerNormalization";
+        if !simplified && n.op_type != "LayerNormalization" {
+            nodes.push(n);
+            continue;
+        }
+        let name = if n.name.is_empty() { format!("norm{norms}") } else { n.name.clone() };
+        let small = format!("{name}/small");
+        nodes.push(node("Mul", &[&n.input[0], "trt_shrink"], &[&small], &format!("{name}/shrink"), vec![]));
+        let axis = attribute_i(&n, "axis").unwrap_or(-1);
+        if simplified {
+            let epsilon = attribute_f(&n, "epsilon").unwrap_or(1e-6) / (SHRINK * SHRINK);
+            nodes.push(node("RMSNormalization", &[&small, &n.input[1]], &[&n.output[0]], &name, vec![int("axis", axis), float("epsilon", epsilon), int("stash_type", 1)]));
+        } else {
+            let epsilon = attribute_f(&n, "epsilon").unwrap_or(1e-5) / (SHRINK * SHRINK);
+            let inputs: Vec<&str> = std::iter::once(small.as_str()).chain(n.input[1..].iter().map(|s| s.as_str())).collect();
+            let outputs: Vec<&str> = n.output.iter().map(|s| s.as_str()).collect();
+            nodes.push(node("LayerNormalization", &inputs, &outputs, &name, vec![int("axis", axis), float("epsilon", epsilon), int("stash_type", attribute_i(&n, "stash_type").unwrap_or(1))]));
+        }
+        norms += 1;
+    }
+    if norms == 0 {
+        return Err("no norm: this is not the file the patch is for".into());
+    }
+    g.node = nodes;
+    g.initializer.push(f32_scalar("trt_shrink", 1.0 / SHRINK));
+    g.value_info.clear();
+    opset_23(&mut model);
+    Ok(model)
+}
+
+/// EmbeddingGemma 2's text model for TensorRT in bfloat16: its norms and rotary embedding (ONNX Runtime's own) in standard
+/// operators, word positions counted in int64, and the photo and video inputs taken out (only sound and words go in).
+fn sound_text_tensorrt(mut model: ModelProto) -> Result<ModelProto> {
+    const POSITIONS: &str = "/model/positions/Range/output_0";
+    const LENGTH: &str = "/model/shared_dims/root_input/Gather_1/output_0";
+    let not_it = |what: &str| format!("{what}: this is not the file the patch is for");
+    let g = model.graph.as_mut().ok_or("no graph")?;
+    // each rotary table's head size: twice its frequencies (the sliding-window layers' heads are 256 wide, the others 512)
+    let mut heads: HashMap<String, i64> = HashMap::new();
+    for kind in ["sliding_attention", "full_attention"] {
+        if let Some(t) = g.initializer.iter().find(|t| t.name == format!("model.rotary_emb.{kind}_inv_freq")) {
+            heads.insert(format!("/model/rotary_emb/{kind}/Cos/output_0"), 2 * t.dims.last().copied().unwrap_or(0));
+        }
+    }
+    if heads.is_empty() {
+        return Err(not_it("no rotary tables"));
+    }
+    let mut extra = vec![i64_scalar("trt_zero", 0), i64_scalar("trt_one", 1), int64s("trt_axis_m2", &[-2]), int64s("trt_flat", &[0, 0, -1])];
+    let mut sizes: Vec<i64> = heads.values().copied().collect();
+    sizes.sort();
+    sizes.dedup();
+    for size in sizes {
+        extra.push(int64s(&format!("trt_heads{size}"), &[0, 0, -1, size])); // batch, positions, heads, head size
+    }
+    let gone = ["image_features", "video_features"];
+    let (mut rotary, mut positions) = (0, false);
+    let mut nodes = Vec::with_capacity(g.node.len() * 2);
+    for n in std::mem::take(&mut g.node) {
+        let eps = || attribute_f(&n, "epsilon").ok_or_else(|| not_it("a norm without epsilon"));
+        match n.op_type.as_str() {
+            "SimplifiedLayerNormalization" => {
+                nodes.push(node("RMSNormalization", &[&n.input[0], &n.input[1]], &[&n.output[0]], &n.name, vec![int("axis", attribute_i(&n, "axis").unwrap_or(-1)), float("epsilon", eps()?), int("stash_type", 1)]));
+            }
+            "SkipSimplifiedLayerNormalization" => {
+                // the sum (its fourth output, read by the next layer) and the norm of it
+                let sum = n.output.get(3).filter(|o| !o.is_empty()).cloned().unwrap_or_else(|| format!("{}/sum", n.name));
+                nodes.push(node("Add", &[&n.input[0], &n.input[1]], &[&sum], &format!("{}/add", n.name), vec![]));
+                nodes.push(node("RMSNormalization", &[&sum, &n.input[2]], &[&n.output[0]], &n.name, vec![int("axis", -1), float("epsilon", eps()?), int("stash_type", 1)]));
+            }
+            "RotaryEmbedding" => {
+                // x [batch, positions, heads x size]; cos and sin [positions, size / 2], from position 0: per head the first half
+                // x1 cos - x2 sin, the second x2 cos + x1 sin
+                if attribute_i(&n, "interleaved").unwrap_or(0) != 0 || attribute_i(&n, "rotary_embedding_dim").unwrap_or(0) != 0 {
+                    return Err(not_it("an interleaved or partial rotary embedding"));
+                }
+                let (x, cos, sin) = (&n.input[0], &n.input[2], &n.input[3]);
+                let size = heads.get(cos).ok_or_else(|| not_it("a rotary embedding with an unknown table"))?;
+                let p = format!("trt_rot{rotary}/");
+                let t = |s: &str| format!("{p}{s}");
+                nodes.extend([
+                    node("Reshape", &[x, &format!("trt_heads{size}")], &[&t("x")], &t("heads"), vec![]),
+                    node("Split", &[&t("x")], &[&t("x1"), &t("x2")], &t("halves"), vec![int("axis", -1), int("num_outputs", 2)]),
+                    node("Unsqueeze", &[cos, "trt_axis_m2"], &[&t("cos")], &t("cos_of"), vec![]),
+                    node("Unsqueeze", &[sin, "trt_axis_m2"], &[&t("sin")], &t("sin_of"), vec![]),
+                    node("Mul", &[&t("x1"), &t("cos")], &[&t("a")], &t("a_of"), vec![]),
+                    node("Mul", &[&t("x2"), &t("sin")], &[&t("b")], &t("b_of"), vec![]),
+                    node("Sub", &[&t("a"), &t("b")], &[&t("y1")], &t("y1_of"), vec![]),
+                    node("Mul", &[&t("x2"), &t("cos")], &[&t("c")], &t("c_of"), vec![]),
+                    node("Mul", &[&t("x1"), &t("sin")], &[&t("d")], &t("d_of"), vec![]),
+                    node("Add", &[&t("c"), &t("d")], &[&t("y2")], &t("y2_of"), vec![]),
+                    node("Concat", &[&t("y1"), &t("y2")], &[&t("y")], &t("y_of"), vec![int("axis", -1)]),
+                    node("Reshape", &[&t("y"), "trt_flat"], &[&n.output[0]], &n.name, vec![]),
+                ]);
+                rotary += 1;
+            }
+            "Range" if n.output[0] == POSITIONS => {
+                nodes.push(node("Range", &["trt_zero", LENGTH, "trt_one"], &["trt_positions"], &n.name, vec![]));
+                nodes.push(node("Cast", &["trt_positions"], &[&n.output[0]], &format!("{}/float", n.name), vec![int("to", DataType::FLOAT as i64)]));
+                positions = true;
+            }
+            "Concat" if n.input.iter().any(|i| gone.contains(&i.as_str())) => {
+                let inputs: Vec<&str> = n.input.iter().map(|s| s.as_str()).filter(|i| !gone.contains(i)).collect();
+                let outputs: Vec<&str> = n.output.iter().map(|s| s.as_str()).collect();
+                nodes.push(node("Concat", &inputs, &outputs, &n.name, vec![int("axis", attribute_i(&n, "axis").unwrap_or(0))]));
+            }
+            // their token counts: always none (the Gather reading the count is a zero below)
+            "Shape" if gone.contains(&n.input[0].as_str()) => {}
+            "Gather" if gone.iter().any(|x| n.input[0].contains(&format!("/{x}/num_tokens/Shape"))) => {
+                let outputs: Vec<&str> = n.output.iter().map(|s| s.as_str()).collect();
+                nodes.push(node("Identity", &["trt_zero"], &outputs, &n.name, vec![]));
+            }
+            _ => nodes.push(n),
+        }
+    }
+    if rotary == 0 || !positions {
+        return Err(not_it("no rotary embedding or no word positions"));
+    }
+    if nodes.iter().any(|n| n.input.iter().any(|i| gone.contains(&i.as_str()))) {
+        return Err(not_it("the photo or video inputs are read elsewhere too"));
+    }
+    g.node = nodes;
+    g.initializer.extend(extra);
+    g.input.retain(|i| !gone.contains(&i.name.as_str()));
+    g.value_info.clear();
+    opset_23(&mut model);
+    Ok(model)
+}
+
 /// The convolutions get their padding written out as zeros (`pads`), in place of "VALID" (which CoreML does not take) or nothing;
 /// a convolution that pads some other way is left as it is. Then the matrix products by a weight become `Gemm`s (`weights_as_gemm`).
 fn siglip_coreml(mut model: ModelProto) -> Result<ModelProto> {
@@ -502,7 +681,7 @@ mod tests {
         std::fs::create_dir_all(&test).unwrap();
         let full = test.join("vision_model_fp32.onnx");
         save(&to_float32(&dir.join("onnx"), load(&half).unwrap()).unwrap(), &full).unwrap();
-        let rt = crate::embed::Runtime::start(root).unwrap();
+        let rt = crate::embed::Runtime::shared(root).unwrap();
         let pixels: Vec<f32> = (0..4 * 3 * 256 * 256).map(|i| ((i * 7919) % 255) as f32 / 127.5 - 1.0).collect();
         let mut out = Vec::new();
         for (name, file) in [("float16", &half), ("float32", &full)] {
