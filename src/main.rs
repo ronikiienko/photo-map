@@ -201,14 +201,20 @@ struct OpenMap {
     sims: Vec<f32>,
     /// The picture each photo is shown by among the last search's matches: itself, or a video's best frame (search::best_frames).
     best: Vec<usize>,
-    /// The picture each copy beside the world shows (in the order of `order`).
+    /// The last search's scores of the videos' frames (as `sims`, frame by frame; empty: none), and how many photos it marks
+    /// (the count slider's): a video's moments are as many of its best frames.
+    frame_sims: Vec<f32>,
+    wanted: usize,
+    /// The picture each copy beside the world shows: the matches' (in the order of `order`), then the moments'.
     pictures: Vec<usize>,
     /// The photos that match the search, best first, and which of them the last next/previous step went to.
     order: Vec<usize>,
     at: Option<usize>,
-    /// Where each match's copy sits beside the world (in the order of `order`), and a copy's side (world units).
+    /// Where each copy sits beside the world (the matches', then the moments'), and a copy's side (world units).
     copies: Vec<data::Point>,
     copy_side: f32,
+    /// "Moments that match": the video whose frames that match the search are shown right of the matches, best first.
+    moments: Option<usize>,
     /// The block beside the world shows a path between these two photos instead of a search's matches.
     trail: Option<(usize, usize)>,
     /// The tree paths follow (tree.rs), if the map has one.
@@ -253,9 +259,50 @@ impl OpenMap {
     fn show_beside(&mut self, queue: &wgpu::Queue, photos: Vec<usize>, best: bool) {
         self.order = photos;
         self.at = None;
+        if !best || self.order.is_empty() {
+            self.moments = None; // they go with the search
+        }
+        self.place_copies(queue, best);
+    }
+
+    /// The copies beside the world: the matches' (`best`: a video's shows its best frame), then the moments' (show_moments).
+    fn place_copies(&mut self, queue: &wgpu::Queue, best: bool) {
         self.pictures = self.order.iter().map(|&i| if best { self.best[i] } else { i }).collect();
         (self.copies, self.copy_side) = beside::place(self.order.len());
+        let moments = self.moments.map_or(Vec::new(), |video| self.moments_of(video));
+        let right = self.copies.iter().map(|p| p.x).fold(beside::LEFT, f32::max) + self.copy_side / beside::FILL / 2.0;
+        self.copies.extend(beside::place_after(moments.len(), self.copy_side, right));
+        self.pictures.extend(moments);
         self.renderer.set_copies(queue, &self.data, &self.pictures, &self.copies);
+    }
+
+    /// This video's frames that match the last search best, as many as it marks photos (whether or not they made it into the
+    /// matches), best first: their picture ids.
+    fn moments_of(&self, video: usize) -> Vec<usize> {
+        let n = self.data.n();
+        let mut frames: Vec<usize> = (0..self.frame_sims.len()).filter(|&k| self.data.frames[k].video == video).collect();
+        frames.sort_by(|&a, &b| self.frame_sims[b].total_cmp(&self.frame_sims[a]));
+        frames.truncate(self.wanted);
+        frames.into_iter().map(|k| n + k).collect()
+    }
+
+    /// "Moments that match": this video's best frames for the search, right of the matches (another video's go).
+    fn show_moments(&mut self, queue: &wgpu::Queue, video: usize) {
+        self.moments = Some(video);
+        self.place_copies(queue, true);
+    }
+
+    /// Can this photo show its moments: a video, while a search by words or photos is on?
+    fn has_moments(&self, photo: usize) -> bool {
+        self.data.photos[photo].video.is_some() && !self.frame_sims.is_empty() && self.trail.is_none() && !self.order.is_empty()
+    }
+
+    /// The photo copy `k` beside the world is of: a match, or the video of the moments.
+    fn copy_photo(&self, k: usize) -> usize {
+        match self.order.get(k) {
+            Some(&i) => i,
+            None => self.moments.expect("a copy past the matches is a moment"),
+        }
     }
 
     /// The box the photos beside the world and their copies span.
@@ -556,12 +603,15 @@ impl Viewer {
             flags_dirty: true,
             photo_world,
             sims: Vec::new(),
+            frame_sims: Vec::new(),
+            wanted: 0,
             best: (0..n).collect(),
             pictures: Vec::new(),
             order: Vec::new(),
             at: None,
             copies: Vec::new(),
             copy_side: 0.0,
+            moments: None,
             trail: None,
             tree,
             vectors,
@@ -907,6 +957,7 @@ impl Viewer {
                     m.flags.fill(0);
                     m.flags_dirty = true;
                     m.sims.clear();
+                    m.frame_sims.clear();
                     m.trail = None;
                     m.show_beside(&self.gpu.queue, Vec::new(), false);
                     self.status = if unknown {
@@ -919,6 +970,8 @@ impl Viewer {
                 let n = photos.len();
                 let m = self.map.as_mut().unwrap();
                 m.sims = vec![0.0; n];
+                m.frame_sims.clear();
+                m.moments = None;
                 m.best = (0..n).collect();
                 self.apply_search(); // the camera stays where it is: the marks light up where they are
                 return;
@@ -929,6 +982,7 @@ impl Viewer {
             m.flags.fill(0);
             m.flags_dirty = true;
             m.sims.clear();
+            m.frame_sims.clear();
             m.trail = None;
             m.show_beside(&self.gpu.queue, Vec::new(), false);
             self.shown.clear();
@@ -1046,8 +1100,11 @@ impl Viewer {
                     let (cos, frame_cos): (Vec<Vec<f32>>, Vec<Vec<f32>>) = std::mem::take(&mut self.answers).into_iter().flatten().unzip();
                     m.sims = self.logic.combine(&cos);
                     m.best = (0..m.sims.len()).collect();
+                    m.frame_sims.clear();
+                    m.moments = None; // a new search: the moments shown were the last one's
                     if !m.data.frames.is_empty() {
-                        m.best = search::best_frames(&mut m.sims, &self.logic.combine(&frame_cos), &m.data.frames);
+                        m.frame_sims = self.logic.combine(&frame_cos);
+                        m.best = search::best_frames(&mut m.sims, &m.frame_sims, &m.data.frames);
                     }
                     self.apply_search(); // the camera stays where it is: the marks light up where they are
                     if let Some(note) = note {
@@ -1097,6 +1154,7 @@ impl Viewer {
         let (_, &mut cut, _) = sorted.select_nth_unstable_by(n - k, |a, b| a.total_cmp(b));
         let best = score.iter().copied().fold(f32::MIN, f32::max);
         let span = (best - cut).max(1e-4); // red at the cutoff, yellow at the best photo
+        m.wanted = k;
         for i in 0..n {
             m.flags[i] = if score[i] >= cut { 1 + ((score[i] - cut) / span).clamp(0.0, 1.0).mul_add(254.0, 0.5) as u32 } else { 0 };
         }
@@ -1187,6 +1245,7 @@ impl Viewer {
         self.shown.clear();
         self.asked.clear();
         m.sims.clear();
+        m.frame_sims.clear();
         m.flags.fill(0);
         for &i in &path {
             m.flags[i] = 255;
@@ -1205,6 +1264,19 @@ impl Viewer {
 
     /// F over a photo: the same as dropping that photo's file on the window (it goes in the search box and is searched), instead of
     /// the photos searched for or (`add`) besides them.
+    /// "Moments that match": the video's best frames for the search, right of the matches, and the camera on them.
+    fn show_moments(&mut self, video: usize) {
+        let Some(m) = &mut self.map else { return };
+        m.show_moments(&self.gpu.queue, video);
+        let moments = &m.copies[m.order.len()..];
+        if moments.is_empty() {
+            return;
+        }
+        let half = Vec2::splat(m.copy_side / beside::FILL / 2.0);
+        let (lo, hi) = moments.iter().map(|p| Vec2::new(p.x, p.y)).fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), p| (lo.min(p - half), hi.max(p + half)));
+        self.camera.fly_to(self.camera.fit(lo, hi));
+    }
+
     /// Search with this picture (a photo, or a video's frame: data.rs, picture ids).
     fn ask_like(&mut self, picture: usize, add: bool) {
         let Some(file) = self.map.as_ref().map(|m| m.data.picture_path(picture)) else { return };
@@ -1467,7 +1539,7 @@ impl Viewer {
             _ => None,
         };
         self.hovered = match (self.cursor, self.hovered_copy, &self.map) {
-            (_, Some(k), Some(m)) => Some(m.order[k]),
+            (_, Some(k), Some(m)) => Some(m.copy_photo(k)),
             (Some(c), _, _) if self.page == Page::Viewer && !self.camera.dragging() && !over_ui => self.pick(c),
             _ => None,
         };
@@ -1510,7 +1582,7 @@ impl Viewer {
                 _ => NO_LIFT,
             },
             lift_copy: match (self.lifted.0, &self.map) {
-                (Some(Lifted::Copy(k)), Some(m)) if k < m.order.len() => k as u32,
+                (Some(Lifted::Copy(k)), Some(m)) if k < m.copies.len() => k as u32,
                 _ => NO_LIFT,
             },
             pad: [0.0; 2],
@@ -1639,6 +1711,9 @@ impl Viewer {
         }
         if let Some(i) = actions.add_like {
             self.ask_like(i, true);
+        }
+        if let Some(video) = actions.moments {
+            self.show_moments(video);
         }
         if let Some(i) = actions.show_photo {
             self.go_to_photo(i);
@@ -1830,7 +1905,8 @@ impl Viewer {
         self.camera.fly_to((Vec2::new(p.x, p.y), 0.85 * fit.min_element()));
     }
 
-    /// A click on the map (a press that hardly moved): on a match's copy beside the world, it flies to the photo; on a region
+    /// A click on the map (a press that hardly moved): on a match's copy beside the world, it flies to the photo (a moment plays
+    /// from there); on a region
     /// name, it zooms to the region; on a photo, to the photo.
     fn click_at(&mut self) {
         let Some(c) = self.cursor else { return };
@@ -1839,6 +1915,14 @@ impl Viewer {
             return;
         }
         if let Some(k) = self.pick_copy(c) {
+            if self.map.as_ref().is_some_and(|m| k >= m.order.len()) {
+                // a moment: it plays from there (once it is big enough to be marked), else its video is flown to
+                match self.video_tiles(ppp).into_iter().find(|t| t.copy == Some(k)) {
+                    Some(t) => self.play(t),
+                    None => self.go_to_photo(self.map.as_ref().map_or(0, |m| m.copy_photo(k))),
+                }
+                return;
+            }
             return self.go_to_match(k);
         }
         let at = egui::pos2(c.x / ppp, c.y / ppp);
@@ -1883,11 +1967,18 @@ impl Viewer {
         };
         let galley = painter.layout_no_wrap(heading, egui::FontId::proportional(16.0), theme::MUTED);
         painter.galley(egui::pos2(top.x, top.y - galley.size().y - 6.0), galley, theme::MUTED);
+        if let (Some(video), Some(first)) = (m.moments, m.copies.get(m.order.len())) {
+            let top = self.camera.to_screen(Vec2::new(first.x - m.copy_side / 2.0, first.y - m.copy_side / 2.0)) / ppp;
+            let count = m.copies.len() - m.order.len();
+            let heading = format!("{count} {} of {}, best first", if count == 1 { "moment" } else { "moments" }, m.data.photos[video].title);
+            let galley = painter.layout_no_wrap(heading, egui::FontId::proportional(16.0), theme::MUTED);
+            painter.galley(egui::pos2(top.x, top.y - galley.size().y - 6.0), galley, theme::MUTED);
+        }
         if let Some(k) = m.at {
             outline(m.order[k], to_screen(m.copies[k]), copy_side, 2.0, true);
         }
         match (self.hovered_copy, self.hovered) {
-            (Some(k), _) => outline(m.order[k], to_screen(m.data.points[m.order[k]]), photo_side, 2.0, false),
+            (Some(k), _) => outline(m.copy_photo(k), to_screen(m.data.points[m.copy_photo(k)]), photo_side, 2.0, false),
             (None, Some(i)) => {
                 if let Some(k) = m.order.iter().position(|&o| o == i) {
                     outline(i, to_screen(m.copies[k]), copy_side, 2.0, true);
@@ -1971,9 +2062,11 @@ impl Viewer {
                 }
             });
         }
-        // the copies: when their frame is, and it plays from there (a video's poster: how long it is, from the start)
+        // the copies (matches and moments): when their frame is, and it plays from there (a video's poster: how long it is, from
+        // the start)
         let copy_long = m.copy_side * self.camera.scale / ppp;
-        for (k, ((&i, &picture), p)) in m.order.iter().zip(&m.pictures).zip(&m.copies).enumerate() {
+        for (k, (&picture, p)) in m.pictures.iter().zip(&m.copies).enumerate() {
+            let i = m.copy_photo(k);
             let Some(duration) = m.data.photos[i].video.map(|v| v.duration) else { continue };
             let frame = picture.checked_sub(m.data.n()).map(|f| m.data.frames[f].time);
             let at = self.camera.to_screen(Vec2::new(p.x, p.y)) / ppp;
@@ -2063,15 +2156,21 @@ impl Viewer {
     fn click_video_mark(&mut self, at: egui::Pos2) -> bool {
         let ppp = self.screen.scale();
         let Some(t) = self.video_tiles(ppp).into_iter().find(|t| t.pill().expand(4.0).contains(at)) else { return false };
+        self.play(t);
+        true
+    }
+
+    /// Play this video tile: on the map from the start, a copy beside the world from its frame.
+    fn play(&mut self, t: VideoTile) {
+        let ppp = self.screen.scale();
         let (Some(m), Some(ffmpeg)) = (&self.map, self.runtime.ffmpeg.clone()) else {
             self.status = "videos are played with ffmpeg: download it in Runtime (on the Maps page)".into();
-            return true;
+            return;
         };
         let photo = &m.data.photos[t.photo];
         let video = files::original(&m.data, t.photo);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(self.wake());
         self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, (photo.width, photo.height), t.long * ppp, wake));
-        true
     }
 
     /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view
@@ -2236,13 +2335,14 @@ impl Viewer {
                 at,
                 title: m.data.photos[photo].title.clone(),
                 ends_path: self.path_from.is_some_and(|from| from != photo),
+                moments: m.has_moments(photo),
                 can_add: !self.photos.is_empty() && !self.photos.iter().any(|(p, _)| *p == path),
                 file,
                 file_tip,
             };
             mapui::photo_menu(&ctx, &menu, actions);
         }
-        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.add_like.is_some() || actions.details.is_some() || actions.done {
+        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.add_like.is_some() || actions.moments.is_some() || actions.details.is_some() || actions.done {
             self.menu = None;
         }
         if let (Some((photo, at)), Some(m)) = (actions.details, &self.map) {
@@ -2299,6 +2399,8 @@ struct UiActions {
     path_to: Option<usize>,
     like: Option<usize>,
     add_like: Option<usize>,
+    /// "Moments that match": this video's best frames for the search, beside its matches.
+    moments: Option<usize>,
     /// A filter to write or change: its place (usize::MAX: a new one) and its text.
     edit_filter: Option<FilterEdit>,
     /// The filter being written or changed is done (Enter, or clicked away from).

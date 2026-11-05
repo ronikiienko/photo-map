@@ -1,6 +1,7 @@
 //! The matches of a search together, best first: a copy of each in rows beside the world (to the right of it), bigger than the
 //! photos on the map, while the photos themselves stay where they are. They are seen and zoomed into like the rest of the map;
-//! a click on a copy flies to its photo.
+//! a click on a copy flies to its photo. A video's moments that match (its best frames, as many as the matches) can sit
+//! right of them, the same size; a click on one plays it from there.
 
 use crate::data::{Point, WORLD};
 
@@ -26,6 +27,22 @@ pub fn place(count: usize) -> (Vec<Point>, f32) {
     (points, cell * FILL)
 }
 
+/// Copies of `side` (place's) right of `right` (the block before them: the matches), best first in rows from the world's top: as
+/// wide as the matches may be, wider when that is not tall enough.
+pub fn place_after(count: usize, side: f32, right: f32) -> Vec<Point> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let cell = side / FILL;
+    let most_rows = ((HEIGHT / cell).floor() as usize).max(1);
+    let cols = ((WIDTH / cell).floor() as usize).max(count.div_ceil(most_rows)).clamp(1, count);
+    let left = right + GAP;
+    (0..count).map(|k| Point { x: left + ((k % cols) as f32 + 0.5) * cell, y: ((k / cols) as f32 + 0.5) * cell }).collect()
+}
+
+/// Between the matches and the moments.
+const GAP: f32 = WORLD * 0.04;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +59,24 @@ mod tests {
             for w in points.windows(2) {
                 let (a, b) = (w[0], w[1]);
                 assert!(b.y > a.y || (b.y == a.y && b.x - a.x >= side), "{count}: rows in order, apart");
+            }
+        }
+    }
+
+    /// The moments sit right of the matches, inside the world's height, best first along the rows, and no two overlap.
+    #[test]
+    fn moments_sit_right_of_the_matches() {
+        for (matches, count) in [(1, 1), (5, 40), (100, 3), (2, 5000)] {
+            let (points, side) = place(matches);
+            let right = points.iter().map(|p| p.x).fold(LEFT, f32::max) + side / FILL / 2.0;
+            let moments = place_after(count, side, right);
+            assert_eq!(moments.len(), count);
+            for p in &moments {
+                assert!(p.x - side / 2.0 > right && p.y - side / 2.0 >= 0.0 && p.y + side / 2.0 <= HEIGHT, "{matches}, {count}: {},{}", p.x, p.y);
+            }
+            for w in moments.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                assert!(b.y > a.y || (b.y == a.y && b.x - a.x >= side), "{matches}, {count}: rows in order, apart");
             }
         }
     }

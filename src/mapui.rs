@@ -168,6 +168,8 @@ pub struct PhotoMenu {
     pub ends_path: bool,
     /// Photos are searched for and this isn't one of them: it can be added.
     pub can_add: bool,
+    /// A video, while a search is on: its moments that match can be shown.
+    pub moments: bool,
     /// Its file, and what to say about it (where it is; or that the original is gone and this is the map's copy).
     pub file: PathBuf,
     pub file_tip: String,
@@ -191,6 +193,9 @@ pub fn photo_menu(ctx: &egui::Context, m: &PhotoMenu, actions: &mut UiActions) {
                 }
                 if theme::button(ui, egui::Button::new("Photos like this")).on_hover_text("search with this photo (F)").clicked() {
                     actions.like = Some(m.picture);
+                }
+                if m.moments && theme::button(ui, egui::Button::new("Moments that match")).on_hover_text("this video's frames that match the search best (as many as the matches), right of the matches").clicked() {
+                    actions.moments = Some(photo);
                 }
                 if m.can_add && theme::button(ui, egui::Button::new("Add to search")).on_hover_text("search for what this photo and the ones searched for share").clicked() {
                     actions.add_like = Some(m.picture);
@@ -308,6 +313,7 @@ mod shots {
             title: "IMG_20190612_184455 a rather long name that goes on".into(),
             ends_path,
             can_add,
+            moments: false,
             file: "/photos/2019/IMG_20190612_184455.jpg".into(),
             file_tip: "/photos/2019/IMG_20190612_184455.jpg".into(),
         }
