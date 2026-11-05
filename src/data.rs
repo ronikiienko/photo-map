@@ -134,18 +134,28 @@ pub struct Video {
     pub height: u32,
 }
 
-/// A photo's camera, when it was taken and where, read from its EXIF when the map was made (files::facts). Empty: not known.
+/// What a photo's file says about itself, read once when the map is made (a photo's EXIF: files::facts; a video's container,
+/// as ffmpeg tells it: files::video_facts): search picks by camera, date and place, and Details shows it all. Empty: not known.
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
 pub struct Facts {
     /// "Google Pixel 7", "Canon EOS 550D".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub camera: String,
-    /// "2019-07-04 14:00" (local time, as the camera had it).
+    /// "2019-07-04 14:00" (local time, as the camera had it; a video's as its file says, often UTC).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub taken: String,
     /// The nearest town to where it was taken: "Lviv, Lviv Oblast, Ukraine" (places.rs).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub place: String,
+    /// Where it was taken: latitude, longitude.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f32; 2]>,
+    /// "EF-S 18-55mm".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lens: String,
+    /// "1/120 s, f/1.8, 4.4 mm, ISO 100".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub exposure: String,
 }
 
 impl Photo {

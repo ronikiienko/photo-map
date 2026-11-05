@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn filters_pass_photos() {
-        let facts = crate::data::Facts { camera: "Google Pixel 7".into(), taken: "2019-07-04 14:00".into(), place: "Lviv, Lviv Oblast, Ukraine".into() };
+        let facts = crate::data::Facts { camera: "Google Pixel 7".into(), taken: "2019-07-04 14:00".into(), place: "Lviv, Lviv Oblast, Ukraine".into(), ..Default::default() };
         let (_, fs) = filters(r#"camera:pixel date:2019-07 place:lviv "trip""#);
         assert!(fs.iter().all(|f| f.passes("Trip 2019/a.jpg", Some(&facts))));
         let (_, fs) = filters("date:2019-08");

@@ -2,7 +2,7 @@
 //! are placed and drawn (top right), the help, a photo's menu and its details, the card while a map opens, a notice. Each is drawn
 //! from plain values and says what was asked in `UiActions`, so the tests below can draw them without a map, a window or a GPU.
 
-use crate::{UiActions, View, files, groups, places, theme};
+use crate::{UiActions, View, files, groups, theme};
 use egui::{Align, Align2, Color32, Layout, Margin, RichText, vec2};
 use std::path::PathBuf;
 
@@ -221,12 +221,10 @@ pub fn details(ctx: &egui::Context, at: egui::Pos2, title: &str, details: &files
                     ui.label(theme::muted(name));
                     match details.place {
                         Some((lat, lon)) if name == "Place" => {
-                            let (place, waiting) = places::describe(lat, lon);
-                            if waiting {
-                                ctx.request_repaint_after(std::time::Duration::from_millis(250));
-                            }
                             ui.vertical(|ui| {
-                                ui.add(egui::Label::new(place).wrap()).on_hover_text("the nearest town; place names from GeoNames (geonames.org)");
+                                if !value.is_empty() {
+                                    ui.add(egui::Label::new(value).wrap()).on_hover_text("the nearest town; place names from GeoNames (geonames.org)");
+                                }
                                 ui.label(theme::muted(format!("{lat:.5}, {lon:.5}")));
                             });
                         }

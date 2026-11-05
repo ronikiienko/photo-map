@@ -1,11 +1,11 @@
 //! Naming the place a photo was taken from its coordinates, offline: the nearest town of GeoNames' list of the world's towns of
 //! over 1,000 people (171,731; CC BY 4.0, geonames.org), with its region and country. The list is built into the program
 //! (assets/places.zip, 2.6 MB: one line per town, made by make_the_list from GeoNames' files) and read the first time a place is
-//! asked for.
+//! asked for (as a map is made: data::Facts keeps the town).
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// name, latitude, longitude, "Region, Country": one line per town, in places.tsv inside.
 const PACKED: &[u8] = include_bytes!("../assets/places.zip");
@@ -16,8 +16,10 @@ const CITIES: &str = "https://download.geonames.org/export/dump/cities1000.zip";
 const REGIONS: &str = "https://download.geonames.org/export/dump/admin1CodesASCII.txt";
 #[cfg(test)]
 const COUNTRIES: &str = "https://download.geonames.org/export/dump/countryInfo.txt";
-/// Further than this from the nearest town: "near" it; further than FAR_KM: how far.
+/// Further than this from the nearest town: "near" it (in the tests' names).
+#[cfg(test)]
 const NEAR_KM: f64 = 10.0;
+/// Further than this from any town: no town.
 const FAR_KM: f64 = 100.0;
 
 struct Town {
@@ -28,56 +30,16 @@ struct Town {
     within: String,
 }
 
-enum State {
-    Idle,
-    Reading,
-    Ready(Vec<Town>),
-    Failed(String),
-}
-
-fn state() -> &'static Mutex<State> {
-    static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(State::Idle))
-}
-
-/// The place at lat, lon in words ("Girvan, Scotland, United Kingdom"), or what is happening instead; and whether to ask again
-/// soon (the list is being read: a moment, the first time).
-pub fn describe(lat: f64, lon: f64) -> (String, bool) {
-    let mut now = state().lock().unwrap();
-    if let State::Idle = *now {
-        *now = State::Reading;
-        std::thread::spawn(move || {
-            let loaded = load();
-            *state().lock().unwrap() = match loaded {
-                Ok(towns) => State::Ready(towns),
-                Err(e) => State::Failed(e),
-            };
-        });
-    }
-    match &*now {
-        State::Idle | State::Reading => ("finding the place".into(), true),
-        State::Failed(e) => (format!("couldn't read the list of places: {e}"), false),
-        State::Ready(towns) => (nearest(towns, lat, lon).unwrap_or_default(), false),
-    }
-}
-
+/// The nearest town of all (and how far, if it isn't close): what town_at's grid must agree with.
+#[cfg(test)]
 fn nearest(towns: &[Town], lat: f64, lon: f64) -> Option<String> {
-    static ASKED: OnceLock<Mutex<HashMap<(u64, u64), Option<String>>>> = OnceLock::new();
-    let asked = ASKED.get_or_init(Default::default);
-    asked
-        .lock()
-        .unwrap()
-        .entry((lat.to_bits(), lon.to_bits()))
-        .or_insert_with(|| {
-            let (km, town) = towns.iter().map(|t| (km_between(lat, lon, t.lat, t.lon), t)).min_by(|a, b| a.0.total_cmp(&b.0))?;
-            let near = match km {
-                km if km > FAR_KM => format!("{:.0} km from ", km),
-                km if km > NEAR_KM => "near ".to_string(),
-                _ => String::new(),
-            };
-            Some(format!("{near}{}", town_name(town)))
-        })
-        .clone()
+    let (km, town) = towns.iter().map(|t| (km_between(lat, lon, t.lat, t.lon), t)).min_by(|a, b| a.0.total_cmp(&b.0))?;
+    let near = match km {
+        km if km > FAR_KM => format!("{:.0} km from ", km),
+        km if km > NEAR_KM => "near ".to_string(),
+        _ => String::new(),
+    };
+    Some(format!("{near}{}", town_name(town)))
 }
 
 fn town_name(town: &Town) -> String {

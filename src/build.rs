@@ -494,7 +494,7 @@ pub fn is_video(path: &Path) -> bool {
 /// frames between only say what changed), so only they are read (-discard: the others are dropped as the file is read, never
 /// decoded) and decoded: usually one a second, and encoders put one at most cuts. Of
 /// more than MAX_FRAMES, that many are kept, evenly spread. Their times (seconds from the start) go to times.txt, a line each, in
-/// order; how long the video is and its size (data::Video) to video.json. Done once: a folder already there is kept. Needs ffmpeg. `stop`: asked while ffmpeg runs; true stops it (the folder isn't
+/// order; how long the video is and its size (data::Video) to video.json, what its file says about itself (data::Facts) to facts.json. Done once: a folder already there is kept. Needs ffmpeg. `stop`: asked while ffmpeg runs; true stops it (the folder isn't
 /// made, Ok(false)). Ok(true): done.
 fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<bool, String> {
     if dir.is_dir() {
@@ -568,6 +568,10 @@ fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool
     };
     let video = crate::data::Video { duration: duration.unwrap_or(times[*keep.last().expect("a frame")]), width, height };
     fs::write(part.join("video.json"), serde_json::to_vec(&video).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    // what the file says about itself (its camera, date, place), as a photo's EXIF does
+    if let Some(facts) = crate::files::video_facts(&log) {
+        fs::write(part.join("facts.json"), serde_json::to_vec(&facts).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    }
     fs::rename(&part, dir).map_err(|e| e.to_string())?;
     Ok(true)
 }
@@ -762,7 +766,8 @@ fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
             Ok(()) => {}
         }
     }
-    // what each photo's EXIF says that search picks by: camera, when, where (files::facts; the header only)
+    // what each file says about itself (camera, when, where...: a photo's EXIF, files::facts, the header only; a video's tags, read
+    // with its frames)
     ctx.progress(0, total, "reading when and where the photos were taken");
     let done = AtomicUsize::new(0);
     let facts: Option<Vec<Option<Box<crate::data::Facts>>>> = found
@@ -775,7 +780,10 @@ fn link_photos(ctx: &mut Ctx) -> Result<Flow, String> {
             if d % 256 == 0 {
                 ctx.set_done(d);
             }
-            Some(crate::files::facts(&f.src))
+            Some(match &f.frames {
+                Some(dir) => fs::read(ctx.dir.join(dir).join("facts.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()),
+                None => crate::files::facts(&f.src),
+            })
         })
         .collect();
     let Some(mut facts) = facts else { return Ok(Flow::Paused) };
@@ -1233,6 +1241,7 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
         let _ = fs::remove_file(dir.path().join("vectors.f16"));
         let _ = fs::remove_file(dir.path().join("times.txt"));
         let _ = fs::remove_file(dir.path().join("video.json"));
+        let _ = fs::remove_file(dir.path().join("facts.json"));
     }
     let _ = fs::remove_file(ctx.dir.join("files.json"));
     let _ = fs::remove_file(ctx.dir.join("levels.bin"));
