@@ -126,6 +126,22 @@ fn draw_pill(painter: &egui::Painter, pill: egui::Rect, time: Option<String>, pl
     }
 }
 
+/// A video's big sign in the middle of its tile `rect`: play, or (`playing`) pause, in a dark disc.
+fn draw_big_sign(painter: &egui::Painter, rect: egui::Rect, playing: bool) {
+    let radius = (rect.width().min(rect.height()) * 0.16).clamp(14.0, 34.0);
+    let c = rect.center();
+    painter.circle_filled(c, radius, egui::Color32::from_black_alpha(150));
+    let r = radius * 0.42;
+    if playing {
+        for dx in [-0.45, 0.45] {
+            painter.rect_filled(egui::Rect::from_center_size(egui::pos2(c.x + dx * r, c.y), egui::vec2(r * 0.5, r * 1.9)), 1.5, egui::Color32::WHITE);
+        }
+    } else {
+        let triangle = vec![egui::pos2(c.x - r * 0.7, c.y - r), egui::pos2(c.x + r, c.y), egui::pos2(c.x - r * 0.7, c.y + r)];
+        painter.add(egui::Shape::convex_polygon(triangle, egui::Color32::WHITE, egui::Stroke::NONE));
+    }
+}
+
 /// Seconds as a clock: "0:07", "12:30", "1:02:03".
 fn clock(seconds: f32) -> String {
     let s = seconds.max(0.0).round() as u64;
@@ -374,7 +390,9 @@ struct Viewer {
     /// What is lifted, and how far (0 ... 1): it settles back before the next one lifts.
     lifted: (Option<Lifted>, f32),
     /// The right-click menu: for which photo, and where (points).
-    menu: Option<(usize, usize, egui::Pos2)>,
+    /// The right-click menu: on this photo, showing this picture (data.rs, picture ids), on this copy beside the world (if
+    /// it was opened on one), at this place (points).
+    menu: Option<(usize, usize, Option<usize>, egui::Pos2)>,
     /// "Details" was chosen in the menu: the photo, where the card goes, and its lines (files::details).
     details: Option<(usize, egui::Pos2, files::Details)>,
     /// "Path from here" was chosen on this photo: the path's end is picked next.
@@ -1391,7 +1409,7 @@ impl Viewer {
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } if !over_ui && self.page == Page::Viewer => {
                 let ppp = self.screen.scale();
-                self.menu = self.hovered.zip(self.cursor).map(|(i, c)| (i, self.hovered_picture().unwrap_or(i), egui::pos2(c.x / ppp, c.y / ppp)));
+                self.menu = self.hovered.zip(self.cursor).map(|(i, c)| (i, self.hovered_picture().unwrap_or(i), self.hovered_copy, egui::pos2(c.x / ppp, c.y / ppp)));
             }
             WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
                 ElementState::Pressed if !over_ui && self.page == Page::Viewer => {
@@ -1714,6 +1732,15 @@ impl Viewer {
         if let Some(video) = actions.moments {
             self.show_moments(video);
         }
+        if let Some(k) = actions.go_to_copy {
+            self.go_to_copy(k);
+        }
+        if actions.close_moments
+            && let Some(m) = &mut self.map
+        {
+            m.moments = None;
+            m.place_copies(&self.gpu.queue, m.trail.is_none());
+        }
         if let Some(i) = actions.show_photo {
             self.go_to_photo(i);
         }
@@ -1904,31 +1931,34 @@ impl Viewer {
         self.camera.fly_to((Vec2::new(p.x, p.y), 0.85 * fit.min_element()));
     }
 
-    /// A click on the map (a press that hardly moved): on a match's copy beside the world, it flies to the photo (a moment plays
-    /// from there); on a region
-    /// name, it zooms to the region; on a photo, to the photo.
+    /// A click on the map (a press that hardly moved): on a video (big enough to be marked), it plays or pauses; on a region
+    /// name, it zooms to the region. A photo does nothing: moving is the wheel's, dragging's and N / P's (a match's copy's menu
+    /// has Go to on the map).
     fn click_at(&mut self) {
         let Some(c) = self.cursor else { return };
         let ppp = self.screen.scale();
-        if self.click_video_mark(egui::pos2(c.x / ppp, c.y / ppp)) {
+        let at = egui::pos2(c.x / ppp, c.y / ppp);
+        if let Some(t) = self.video_tiles(ppp).into_iter().find(|t| t.rect.contains(at)) {
+            match &mut self.player {
+                Some(p) if p.photo == t.photo && p.copy == t.copy => {
+                    if p.playing() { p.pause() } else { p.play() }
+                }
+                _ => self.play(t),
+            }
             return;
         }
-        if let Some(k) = self.pick_copy(c) {
-            if self.map.as_ref().is_some_and(|m| k >= m.order.len()) {
-                // a moment: it plays from there (once it is big enough to be marked), else its video is flown to
-                match self.video_tiles(ppp).into_iter().find(|t| t.copy == Some(k)) {
-                    Some(t) => self.play(t),
-                    None => self.go_to_photo(self.map.as_ref().map_or(0, |m| m.copy_photo(k))),
-                }
-                return;
-            }
-            return self.go_to_match(k);
-        }
-        let at = egui::pos2(c.x / ppp, c.y / ppp);
         if let Some(&(_, level, index)) = self.label_rects.iter().find(|(rect, _, _)| rect.contains(at)) {
             self.go_to_region(level, index);
-        } else if let Some(i) = self.pick(c) {
-            self.go_to_photo(i);
+        }
+    }
+
+    /// Fly to copy `k` beside the world's photo: a match (it becomes the current one, as N / P), or a moment's video.
+    fn go_to_copy(&mut self, k: usize) {
+        let Some(m) = &self.map else { return };
+        if k < m.order.len() {
+            self.go_to_match(k);
+        } else if k < m.copies.len() {
+            self.go_to_photo(m.copy_photo(k));
         }
     }
 
@@ -2076,10 +2106,12 @@ impl Viewer {
 
     /// A video is marked in its bottom-left corner once it is big enough to tell (VIDEO_MARK_FROM): a play sign, and from
     /// VIDEO_TIME_FROM how long it is. A copy of one beside the world (a search's match) says when its frame is in the video.
-    /// The one playing has its controls instead (player_ui).
+    /// Under the mouse, a big play sign in its middle: a click anywhere on it plays it. The one playing has its controls
+    /// instead (player_ui).
     fn draw_video_marks(&self, ctx: &egui::Context) {
         let ppp = ctx.pixels_per_point();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video marks".into()));
+        let mouse = self.cursor.map(|c| egui::pos2(c.x / ppp, c.y / ppp));
         for t in self.video_tiles(ppp) {
             if self.player.as_ref().is_some_and(|p| p.photo == t.photo && p.copy == t.copy) {
                 continue;
@@ -2087,11 +2119,15 @@ impl Viewer {
             let fade = ((t.long - VIDEO_MARK_FROM.0) / (VIDEO_MARK_FROM.1 - VIDEO_MARK_FROM.0)).clamp(0.0, 1.0);
             let time = (t.long >= VIDEO_TIME_FROM).then(|| clock(t.time));
             draw_pill(&painter, t.pill(), time, false, fade);
+            if mouse.is_some_and(|m| t.rect.contains(m)) {
+                draw_big_sign(&painter, t.rect, false);
+            }
         }
     }
 
-    /// The video playing: its newest frame over its tile, and its controls along the tile's bottom (play or pause, how far,
-    /// and a bar to go anywhere in it). It stops when its tile leaves the screen or gets too small to mark.
+    /// The video playing: its newest frame over its tile, and, under the mouse or while paused, its controls along the tile's
+    /// bottom (play or pause, how far, and a bar to go anywhere in it); under the mouse also a big pause or play sign in its
+    /// middle (a click on the tile does that). It stops when its tile leaves the screen or gets too small to mark.
     fn player_ui(&mut self, ctx: &egui::Context) {
         let Some(p) = &self.player else { return };
         let ppp = ctx.pixels_per_point();
@@ -2100,14 +2136,21 @@ impl Viewer {
             return;
         };
         let Some(p) = &mut self.player else { return };
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video".into()));
         if let Some(texture) = p.texture(ctx) {
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video".into()));
             let corner = (0.04 * tile.rect.width().min(tile.rect.height())).min(6.0); // as the map's own corners (map.wgsl)
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.add(egui::epaint::RectShape::filled(tile.rect, corner, egui::Color32::WHITE).with_texture(texture, uv));
         }
         if p.playing() {
             ctx.request_repaint();
+        }
+        let hovered = self.cursor.is_some_and(|c| tile.rect.contains(egui::pos2(c.x / ppp, c.y / ppp)));
+        if hovered {
+            draw_big_sign(&painter, tile.rect, p.playing()); // over its picture
+        }
+        if !hovered && p.playing() {
+            return; // watched: nothing over it
         }
         // the controls: the pill (play or pause, and the time), and the bar beside it
         let pill = tile.pill();
@@ -2148,15 +2191,6 @@ impl Viewer {
         if let Some(t) = seek {
             p.seek(t);
         }
-    }
-
-    /// A click on a video's mark plays it, there (on the map from the start, a match's copy from its frame); on the one playing,
-    /// nothing (its controls have it). True if the click was on one.
-    fn click_video_mark(&mut self, at: egui::Pos2) -> bool {
-        let ppp = self.screen.scale();
-        let Some(t) = self.video_tiles(ppp).into_iter().find(|t| t.pill().expand(4.0).contains(at)) else { return false };
-        self.play(t);
-        true
     }
 
     /// Play this video tile: on the map from the start, a copy beside the world from its frame.
@@ -2303,6 +2337,7 @@ impl Viewer {
             most: self.can_match as f32,
             all_marked: self.names_only,
             hidden: m.map_or(Vec::new(), |m| m.hidden.iter().map(|h| (h.what.clone(), h.photos.len())).collect()),
+            moments: m.is_some_and(|m| m.moments.is_some()),
             data: m.map(|m| &m.data),
             thumb: &mut |photo| {
                 let data = &m?.data;
@@ -2323,7 +2358,7 @@ impl Viewer {
         mapui::help(&ctx, &mut self.help_open);
         self.debug_overlay(&ctx);
 
-        if let (Some((photo, picture, at)), Some(m)) = (self.menu, &self.map) {
+        if let (Some((photo, picture, copy, at)), Some(m)) = (self.menu, &self.map) {
             let file = files::original(&m.data, photo);
             let source = &m.data.photos[photo].source;
             let file_tip = if file.as_os_str() == source.as_str() || source.is_empty() { file.display().to_string() } else { format!("{source} is not there any more: the map's own copy, {}", file.display()) };
@@ -2331,6 +2366,7 @@ impl Viewer {
             let menu = mapui::PhotoMenu {
                 photo,
                 picture,
+                copy,
                 at,
                 title: m.data.photos[photo].title.clone(),
                 ends_path: self.path_from.is_some_and(|from| from != photo),
@@ -2341,7 +2377,7 @@ impl Viewer {
             };
             mapui::photo_menu(&ctx, &menu, actions);
         }
-        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.add_like.is_some() || actions.moments.is_some() || actions.details.is_some() || actions.done {
+        if actions.path_from.is_some() || actions.path_to.is_some() || actions.like.is_some() || actions.add_like.is_some() || actions.moments.is_some() || actions.go_to_copy.is_some() || actions.details.is_some() || actions.done {
             self.menu = None;
         }
         if let (Some((photo, at)), Some(m)) = (actions.details, &self.map) {
@@ -2398,8 +2434,11 @@ struct UiActions {
     path_to: Option<usize>,
     like: Option<usize>,
     add_like: Option<usize>,
-    /// "Moments that match": this video's best frames for the search, beside its matches.
+    /// "Moments that match": this video's best frames for the search, beside its matches; or (the chip's cross) no more.
     moments: Option<usize>,
+    close_moments: bool,
+    /// Go to on the map (a copy beside the world's menu): fly to its photo on the map.
+    go_to_copy: Option<usize>,
     /// A filter to write or change: its place (usize::MAX: a new one) and its text.
     edit_filter: Option<FilterEdit>,
     /// The filter being written or changed is done (Enter, or clicked away from).

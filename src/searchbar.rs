@@ -39,6 +39,8 @@ pub struct Bar<'a> {
     pub all_marked: bool,
     /// The hidden searches: what each was and how many photos it hid.
     pub hidden: Vec<(String, usize)>,
+    /// A video's moments are shown beside the matches ("Moments that match"): a chip says so, and its cross ends it.
+    pub moments: bool,
     /// The open map's photos, to find a photo searched for on it.
     pub data: Option<&'a crate::data::MapData>,
     /// A small picture of the map's photo with this number, for the empty box offering it (suggest.rs); None if it can't be read.
@@ -320,6 +322,16 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                 }
                 if found > 0 {
                     ui.horizontal(|ui| {
+                        // a video's moments beside the matches: they stay through new searches, until this cross
+                        if bar.moments {
+                            chip(ui, false, |ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                ui.label(egui::RichText::new("Moments").size(12.5)).on_hover_text("a video's frames that match each search best, right of the matches");
+                                if small_cross(ui).on_hover_text("stop showing them").clicked() {
+                                    actions.close_moments = true;
+                                }
+                            });
+                        }
                         let step = |ui: &mut egui::Ui, text: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(text).size(18.0)).min_size(egui::vec2(28.0, 28.0))).on_hover_text(tip).clicked();
                         if step(ui, "‹", "the previous match (P or [)") {
                             actions.step = -1;
@@ -487,6 +499,7 @@ mod shots {
         found: usize,
         at: Option<usize>,
         hidden: Vec<(String, usize)>,
+        moments: bool,
         width: f32,
         focus: bool,
         /// The empty box offers a (made-up) photo of the map.
@@ -509,6 +522,7 @@ mod shots {
             found: 0,
             at: None,
             hidden: Vec::new(),
+            moments: false,
             width: 620.0,
             focus: false,
             photo_idea: false,
@@ -576,6 +590,7 @@ mod shots {
                     most: 19_000.0,
                     all_marked: false,
                     hidden: s.hidden.clone(),
+                    moments: s.moments,
                     data: None,
                     thumb: &mut |_| idea_tex.clone(),
                 };
@@ -608,6 +623,7 @@ mod shots {
         shot("7-photos", State { photos: 3, search: String::new(), filters: vec![filter("place:lviv")], ..results() }, None);
         shot("7b-photo-hovered", State { photos: 3, search: String::new(), filters: vec![filter("place:lviv")], ..results() }, Some(egui::pos2(105.0, 27.0)));
         shot("8-hidden", State { hidden: vec![("cars".into(), 120), ("like IMG_2041 +2".into(), 40)], hidden_open: true, ..results() }, None);
+        shot("10-moments", State { moments: true, ..results() }, None);
         shot("9-narrow", State { width: 300.0, filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi")], hidden: vec![("cars".into(), 120)], hidden_open: true, ..results() }, None);
         // a photo of the map offered in the empty box; + Filter
         {

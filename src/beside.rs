@@ -1,6 +1,6 @@
 //! The matches of a search together, best first: a copy of each in rows beside the world (to the right of it), bigger than the
 //! photos on the map, while the photos themselves stay where they are. They are seen and zoomed into like the rest of the map;
-//! a click on a copy flies to its photo. A video's moments that match (its best frames, as many as the matches) can sit
+//! Go to on the map, in a copy's menu, flies to its photo. A video's moments that match (its best frames, as many as the matches) can sit
 //! right of them, the same size; a click on one plays it from there.
 
 use crate::data::{Point, WORLD};

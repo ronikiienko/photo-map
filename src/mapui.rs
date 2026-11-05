@@ -134,7 +134,7 @@ pub fn help(ctx: &egui::Context, open: &mut bool) {
                     (&["drag", "W", "A", "S", "D"][..], "move"),
                     (&["F"][..], "photos like the one under the mouse"),
                     (&["Space"][..], "hold: a lens over the map (scroll: how much it magnifies)"),
-                    (&["click"][..], "zoom to a photo, a region's name or a match"),
+                    (&["click"][..], "play or pause a video; zoom to a region's name"),
                     (&["right-click"][..], "a photo's menu: photos like it, a path to another photo, its file"),
                     (&["N", "P"][..], "next / previous match"),
                     (&["F11", "Alt", "Enter"][..], "fullscreen"),
@@ -161,6 +161,8 @@ pub struct PhotoMenu {
     /// The picture it was opened on (data.rs, picture ids): the photo, or the frame a video's match beside the world shows.
     /// "Photos like this" searches with that.
     pub picture: usize,
+    /// The copy beside the world it was opened on (a search's match or a moment), if any: it can be gone to on the map.
+    pub copy: Option<usize>,
     /// Where it was opened (points).
     pub at: egui::Pos2,
     pub title: String,
@@ -184,6 +186,11 @@ pub fn photo_menu(ctx: &egui::Context, m: &PhotoMenu, actions: &mut UiActions) {
                 ui.set_width(210.0);
                 ui.add(egui::Label::new(theme::muted(&m.title)).truncate());
                 ui.add_space(2.0);
+                if let Some(k) = m.copy
+                    && theme::button(ui, egui::Button::new("Go to on the map")).on_hover_text("fly to it where it is on the map").clicked()
+                {
+                    actions.go_to_copy = Some(k);
+                }
                 if m.ends_path {
                     if theme::button(ui, egui::Button::new("Path to here")).on_hover_text("a chain of photos from the start you picked to this one, each like the one before it").clicked() {
                         actions.path_to = Some(photo);
@@ -309,6 +316,7 @@ mod shots {
         PhotoMenu {
             photo: 0,
             picture: 0,
+            copy: None,
             at: egui::pos2(520.0, 300.0),
             title: "IMG_20190612_184455 a rather long name that goes on".into(),
             ends_path,
