@@ -1,16 +1,16 @@
-//! Playing a video in its tile (no sound): ffmpeg decodes it (on the graphics card's decoder when there is one, `-hwaccel
-//! auto`) from a time at its own speed (`-re`) to raw NV12 frames at the video's own size (zoomed out it is rarely
-//! watched, and refitting to the tile on screen lost sharpness), a thread keeps the newest one, and the window uploads it when it is new and turns it into colours on the card
-//! (video.wgsl): 1.5 bytes a pixel instead of RGBA's 4, and no converting on the processor. Pausing stops ffmpeg; playing again,
-//! or going to another time, starts it there again.
+//! Playing a video in its tile (no sound), as players do: ffmpeg decodes it (on the graphics card's decoder when there is one,
+//! `-hwaccel auto`) from a time to raw NV12 frames at the video's own size, as fast as it can, but only a few frames ahead (the
+//! pipe fills and it waits); the reader thread hands them over at the video's frame rate, and the window uploads the newest and
+//! turns it into colours on the card (video.wgsl): 1.5 bytes a pixel instead of RGBA's 4, no converting on the processor.
+//! Pausing holds the reader (ffmpeg waits, its next frame ready: playing on is at once); going to another time starts ffmpeg
+//! there again.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
-
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// A frame: brightness (a byte a pixel), then the two colour channels interleaved at half the size each way (NV12).
 pub struct Frame {
@@ -18,13 +18,26 @@ pub struct Frame {
     bytes: Vec<u8>,
 }
 
-/// What the reader thread hands over: the newest frame, when the first came (the clock starts there, not while ffmpeg starts
-/// up), and whether the video has run out.
+/// Between the player and its reader thread (one per ffmpeg).
 #[derive(Default)]
 struct Shared {
+    /// The newest frame, not yet drawn.
     frame: Mutex<Option<Frame>>,
-    first: OnceLock<Instant>,
+    /// How many frames were handed over: the position is the last one's time.
+    shown: AtomicU32,
+    /// From ffmpeg's own words on the stream: frames a second, and HD colours (BT.709) or SD (BT.601).
+    fps: OnceLock<(f32, Option<bool>)>,
+    /// Held (paused), or let go for good (ffmpeg stopped); the reader waits on it.
+    hold: Mutex<Hold>,
+    go: Condvar,
+    /// The video has run out.
     ended: AtomicBool,
+}
+
+#[derive(Default)]
+struct Hold {
+    paused: bool,
+    stopped: bool,
 }
 
 pub struct Player {
@@ -36,11 +49,11 @@ pub struct Player {
     video: PathBuf,
     /// The frames' size (px): the video's own, upright, even sides (for NV12).
     pub size: (u32, u32),
-    /// HD colours (BT.709), else SD (BT.601): videos rarely say, so by size, as players do.
+    /// HD colours (BT.709), else SD (BT.601), when the video doesn't say: by size, as players do.
     hd: bool,
-    /// Where it was when it last started or stopped, and whether it plays.
+    /// The time ffmpeg was started from, and whether it is to play (else paused).
     at: f32,
-    since: Option<Instant>,
+    playing: bool,
     child: Option<Child>,
     shared: Arc<Shared>,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -55,91 +68,136 @@ impl Player {
         let even = |v: u32| (v / 2).max(1) * 2;
         let size = (even(own.0), even(own.1));
         let hd = own.0.max(own.1) >= 1280 || own.0.min(own.1) > 576;
-        let mut player = Self { photo, copy, duration, ffmpeg: ffmpeg.to_path_buf(), video: video.to_path_buf(), size, hd, at: at.clamp(0.0, duration), since: None, child: None, shared: Arc::new(Shared::default()), wake, shown: false };
-        player.play();
+        let mut player = Self { photo, copy, duration, ffmpeg: ffmpeg.to_path_buf(), video: video.to_path_buf(), size, hd, at: at.clamp(0.0, duration), playing: true, child: None, shared: Arc::new(Shared::default()), wake, shown: false };
+        player.start();
         player
     }
 
-    /// Where it is (seconds).
+    /// Where it is (seconds): the time of the frame shown last.
     pub fn position(&self) -> f32 {
-        let t = self.at + self.since.and(self.shared.first.get()).map_or(0.0, |s| s.elapsed().as_secs_f32());
-        if self.shared.ended.load(Ordering::Relaxed) { self.duration } else { t.min(self.duration) }
+        if self.shared.ended.load(Ordering::Relaxed) {
+            return self.duration;
+        }
+        let shown = self.shared.shown.load(Ordering::Relaxed);
+        let fps = self.shared.fps.get().map_or(30.0, |f| f.0);
+        (self.at + shown.saturating_sub(1) as f32 / fps).min(self.duration)
     }
 
     pub fn playing(&self) -> bool {
-        self.since.is_some() && !self.shared.ended.load(Ordering::Relaxed)
+        self.playing && !self.shared.ended.load(Ordering::Relaxed)
     }
 
-    /// Start ffmpeg where it is (from the start again once it has run out).
+    /// Play on (from the start again once it has run out).
     pub fn play(&mut self) {
-        self.stop_ffmpeg();
-        if self.position() >= self.duration - 0.05 {
-            self.at = 0.0;
+        self.playing = true;
+        if self.shared.ended.load(Ordering::Relaxed) || self.child.is_none() {
+            self.at = if self.shared.ended.load(Ordering::Relaxed) { 0.0 } else { self.position() };
+            self.start();
+        } else {
+            self.shared.hold.lock().unwrap().paused = false;
+            self.shared.go.notify_all();
         }
+    }
+
+    /// Stop where it is: ffmpeg waits with its next frame.
+    pub fn pause(&mut self) {
+        self.playing = false;
+        self.shared.hold.lock().unwrap().paused = true;
+    }
+
+    /// Go to `t` seconds (its frame shows even when paused), playing on if it was playing.
+    pub fn seek(&mut self, t: f32) {
+        self.at = t.clamp(0.0, self.duration);
+        self.start();
+    }
+
+    /// ffmpeg from `at`, and a reader thread handing its frames over in time; paused, it hands over the first and waits.
+    fn start(&mut self) {
+        self.stop_ffmpeg();
         self.shared = Arc::new(Shared::default());
+        self.shared.hold.lock().unwrap().paused = !self.playing;
         let (w, h) = self.size;
         let child = Command::new(&self.ffmpeg)
-            .args(["-nostdin", "-loglevel", "error", "-hwaccel", "auto", "-re", "-ss"])
+            .args(["-nostdin", "-hide_banner", "-nostats", "-loglevel", "info", "-hwaccel", "auto", "-ss"])
             .arg(format!("{:.3}", self.at))
             .arg("-i")
             .arg(&self.video)
             .args(["-an", "-vf"])
             .arg(format!("scale={w}:{h}:out_range=tv"))
-            .args(["-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1"])
+            // a frame every 1/fps (a phone's video may vary): the position is counted in frames
+            .args(["-fps_mode", "cfr", "-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn();
         let Ok(mut child) = child else {
             self.shared.ended.store(true, Ordering::Relaxed);
             return;
         };
-        let mut out = child.stdout.take().expect("piped");
+        let (mut out, err) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
         let (shared, wake) = (self.shared.clone(), self.wake.clone());
-        let size = (w * h * 3 / 2) as usize;
+        let bytes = (w * h * 3 / 2) as usize;
         std::thread::spawn(move || {
-            loop {
-                let mut bytes = vec![0u8; size];
-                if out.read_exact(&mut bytes).is_err() {
+            // what ffmpeg says about the stream it sends (before the first frame), then the rest of what it says, unread
+            let mut err = BufReader::new(err);
+            let mut line = String::new();
+            let mut output = false;
+            while err.read_line(&mut line).is_ok_and(|n| n > 0) {
+                output |= line.starts_with("Output #0");
+                if output && line.contains("Video:") {
+                    let _ = shared.fps.set(stream_facts(&line));
                     break;
                 }
-                shared.first.get_or_init(Instant::now);
-                *shared.frame.lock().unwrap() = Some(Frame { size: (w, h), bytes });
+                line.clear();
+            }
+            std::thread::spawn(move || std::io::copy(&mut err, &mut std::io::sink()));
+            let fps = shared.fps.get().map_or(30.0, |f| f.0);
+            let mut next = Instant::now();
+            loop {
+                let mut frame = vec![0u8; bytes];
+                if out.read_exact(&mut frame).is_err() {
+                    break;
+                }
+                // in time (after the first: it shows at once, even paused, as a time gone to while paused does)
+                let first = shared.shown.load(Ordering::Relaxed) == 0;
+                if !first {
+                    std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                }
+                // handed over under the hold: once pause() is done, nothing more shows
+                let mut hold = shared.hold.lock().unwrap();
+                let mut held = false;
+                while hold.paused && !hold.stopped && !first {
+                    held = true;
+                    hold = shared.go.wait(hold).unwrap();
+                }
+                if hold.stopped {
+                    return;
+                }
+                *shared.frame.lock().unwrap() = Some(Frame { size: (w, h), bytes: frame });
+                shared.shown.fetch_add(1, Ordering::Relaxed);
+                drop(hold);
+                wake();
+                // the next one 1/fps on; after a pause, or behind (a slow decoder), from now, not hurrying to catch up
+                let now = Instant::now();
+                if held || first || next + Duration::from_millis(100) < now {
+                    next = now;
+                }
+                next += Duration::from_secs_f32(1.0 / fps);
+            }
+            if !shared.hold.lock().unwrap().stopped {
+                shared.ended.store(true, Ordering::Relaxed);
                 wake();
             }
-            shared.ended.store(true, Ordering::Relaxed);
-            wake();
         });
         self.child = Some(child);
-        self.since = Some(Instant::now());
-    }
-
-    pub fn pause(&mut self) {
-        self.at = self.position();
-        self.since = None;
-        self.stop_ffmpeg();
-        // the stopped ffmpeg's reader sees its output end: that is not the video running out (play would start it over)
-        self.shared = Arc::new(Shared::default());
-    }
-
-    /// Go to `t` seconds, playing on if it was playing.
-    pub fn seek(&mut self, t: f32) {
-        let playing = self.playing();
-        self.pause();
-        self.shared.ended.store(false, Ordering::Relaxed);
-        self.at = t.clamp(0.0, self.duration);
-        if playing {
-            self.play();
-        }
     }
 
     fn stop_ffmpeg(&mut self) {
+        self.shared.hold.lock().unwrap().stopped = true;
+        self.shared.go.notify_all();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
-        }
-        if self.since.is_some() && self.shared.ended.load(Ordering::Relaxed) {
-            self.at = self.duration;
         }
     }
 
@@ -148,8 +206,23 @@ impl Player {
     pub fn paint(&mut self, rect: egui::Rect, corner: f32) -> Option<egui::Shape> {
         let frame = self.shared.frame.lock().unwrap().take();
         self.shown |= frame.is_some();
-        self.shown.then(|| egui_wgpu::Callback::new_paint_callback(rect, Paint { frame: Mutex::new(frame), rect, corner, hd: self.hd }).into())
+        let hd = self.shared.fps.get().and_then(|f| f.1).unwrap_or(self.hd);
+        self.shown.then(|| egui_wgpu::Callback::new_paint_callback(rect, Paint { frame: Mutex::new(frame), rect, corner, hd }).into())
     }
+}
+
+/// From ffmpeg's line about a video stream (`... nv12(tv, bt709, progressive), 1920x1080 ..., 59.94 fps, ...`): frames a second
+/// (30 if it doesn't say), and whether its colours are HD's (BT.709) or SD's, if it says.
+fn stream_facts(line: &str) -> (f32, Option<bool>) {
+    let fps = line.split(", ").find_map(|part| part.strip_suffix(" fps")?.parse::<f32>().ok()).filter(|f| *f > 0.0).unwrap_or(30.0);
+    let colours = if line.contains("bt709") {
+        Some(true)
+    } else if line.contains("smpte170m") || line.contains("bt470bg") || line.contains("bt601") {
+        Some(false)
+    } else {
+        None
+    };
+    (fps, colours)
 }
 
 /// The video's frame on the card, and how it is drawn (video.wgsl); kept in egui's renderer (its callback resources).
@@ -301,6 +374,14 @@ impl Drop for Player {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reads_the_stream() {
+        let line = "  Stream #0:0(eng): Video: rawvideo (NV12 / 0x3231564E), nv12(tv, bt709, progressive), 1920x1080 [SAR 1:1 DAR 16:9], q=2-31, 1491500 kb/s, 59.94 fps, 59.94 tbn (default)";
+        assert_eq!(stream_facts(line), (59.94, Some(true)));
+        assert_eq!(stream_facts("Video: rawvideo, nv12(tv, smpte170m), 640x480, 25 fps, 25 tbn"), (25.0, Some(false)));
+        assert_eq!(stream_facts("Video: rawvideo, nv12, 640x480"), (30.0, None));
+    }
+
     /// video.wgsl is only compiled when a video plays: parse and validate it here.
     #[test]
     fn shader_is_valid() {
@@ -328,13 +409,26 @@ mod tests {
         let at = p.position();
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert_eq!(p.position(), at, "paused: it stays");
-        assert!(p.child.is_none());
-        std::thread::sleep(std::time::Duration::from_millis(200)); // the stopped ffmpeg's output has ended by now
+        assert!(p.child.is_some(), "paused: ffmpeg waits");
+        let child = p.child.as_ref().map(Child::id);
         p.play();
-        assert!(p.position() >= at && p.position() < at + 0.1, "played again: on from where it was, {at} -> {}", p.position());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(p.child.as_ref().map(Child::id), child, "played on: the same ffmpeg");
+        assert!(p.position() > at && p.position() < at + 0.2, "played on from where it was, at once: {at} -> {}", p.position());
         p.pause();
         p.seek(2.5);
+        assert!(!p.playing(), "a seek while paused stays paused");
+        let started = Instant::now();
+        while p.shared.frame.lock().unwrap().is_none() && started.elapsed().as_secs() < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(p.shared.frame.lock().unwrap().is_some(), "its frame shows");
         assert_eq!(p.position(), 2.5);
+        assert_eq!(p.shared.fps.get().map(|f| f.0), Some(25.0));
+        p.play();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let moved = p.position() - 2.5;
+        assert!((0.3..0.5).contains(&moved), "at the video's speed: 0.4 s on, it moved {moved}");
         std::fs::remove_dir_all(&temp).unwrap();
     }
 }
