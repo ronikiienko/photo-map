@@ -352,14 +352,20 @@ impl Home {
                         let mut line = format!("{}", b.stage.label());
                         if s.total > 0 {
                             // only these stages count photos; the others count steps of their own (shown as a percentage)
-                            let by_photo = matches!(b.stage, Stage::Videos | Stage::Scan | Stage::Embed);
-                            if by_photo {
+                            let by_photo = matches!(b.stage, Stage::Scan | Stage::Embed);
+                            // the videos step counts seconds of video
+                            let by_time = b.stage == Stage::Videos && s.unit == "seconds of video";
+                            if by_time {
+                                line += &format!(" · {} of {} of video", video_time(s.done), video_time(s.total));
+                            } else if by_photo {
                                 line += &format!(" · {} of {}", thousands(s.done), thousands(s.total));
                             } else {
                                 line += &format!(" · {:.0}%", frac * 100.0);
                             }
                             let rate = s.rate().unwrap_or(0.0);
-                            if rate > 0.0 && by_photo {
+                            if rate > 0.0 && by_time {
+                                line += &format!(" · {} of video a second", duration(rate));
+                            } else if rate > 0.0 && by_photo {
                                 line += &format!(" · {rate:.1} {}/s", s.unit);
                             }
                             if rate > 0.0 && s.done < s.total {
@@ -1288,6 +1294,15 @@ fn duration(secs: f32) -> String {
     }
 }
 
+/// An amount of video: "45 s", "38 min", "1 h 54 min".
+fn video_time(secs: usize) -> String {
+    match secs {
+        s if s < 60 => format!("{s} s"),
+        s if s < 3600 => format!("{} min", s / 60),
+        s => format!("{} h {} min", s / 3600, s % 3600 / 60),
+    }
+}
+
 /// The cover of a map: read cover.png if it is there, else make it from the first four photos it can read and keep it.
 fn cover_image(map: &Path) -> Option<egui::ColorImage> {
     let file = map.join("cover.png");
@@ -1397,6 +1412,13 @@ mod shots {
         shot("7-examples", size, page(|h, _| h.examples_open = true));
         shot("8-delete", size, page(|h, lib| h.confirm_delete = Some(lib.maps[1].path.clone())));
         shot("9-building", size, Page { builds: vec![building(true, None)], ..page(|_, _| {}) });
+        let mut videos = building(true, None);
+        if let Some(s) = videos.state.as_mut() {
+            let now = Instant::now();
+            (s.stage, s.done, s.total, s.unit, s.message, s.base) = (Stage::Videos, 2_280, 6_862, "seconds of video", String::new(), (now - Duration::from_secs(10), 0));
+        }
+        videos.stage = Stage::Videos;
+        shot("9b-building-videos", size, Page { builds: vec![videos], ..page(|_, _| {}) });
         shot("10-build-failed", size, Page { builds: vec![building(false, Some("the model ran out of memory on the graphics card"))], ..page(|_, _| {}) });
         shot("11-dragging", size, page(|h, _| h.drag_over = true));
     }

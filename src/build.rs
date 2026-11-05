@@ -496,8 +496,8 @@ pub fn is_video(path: &Path) -> bool {
 /// one kept is decoded (the others are dropped before the decoder: decoding a big keyframe is most of the work); where they are
 /// further apart, each. Their times (seconds from the start) go to times.txt, a line each, in
 /// order; how long the video is and its size (data::Video) to video.json, what its file says about itself (data::Facts) to facts.json. Done once: a folder already there is kept. Needs ffmpeg. `stop`: asked while ffmpeg runs; true stops it (the folder isn't
-/// made, Ok(false)). Ok(true): done.
-fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<bool, String> {
+/// made, Ok(false)). `at`: told how far into the video it has got (seconds), as it goes. Ok(true): done.
+fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool, at: &dyn Fn(f32)) -> Result<bool, String> {
     if dir.is_dir() {
         return Ok(true);
     }
@@ -522,9 +522,28 @@ fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool
         .stderr(log_file)
         .spawn()
         .map_err(|e| format!("{}: {e}", ffmpeg.display()))?;
+    // how far it has got: the newest frame's time in what ffmpeg has written so far
+    let mut reading = fs::File::open(&log_path).map_err(|e| e.to_string())?;
+    let mut tail = String::new();
+    let mut follow = || {
+        use std::io::Read;
+        let mut more = String::new();
+        if reading.read_to_string(&mut more).is_ok() && !more.is_empty() {
+            tail.push_str(&more);
+            if let Some(t) = tail.rsplit("pts_time:").next().filter(|_| tail.contains("pts_time:")).and_then(|r| r.split_whitespace().next()?.parse::<f32>().ok()) {
+                at(t);
+            }
+            let keep = tail.rfind('\n').map_or(0, |i| i + 1);
+            tail.drain(..keep);
+        }
+    };
     loop {
+        follow();
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(_)) => {
+                follow();
+                break;
+            }
             Ok(None) if stop() => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -547,11 +566,7 @@ fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool
     }
     let lines: String = times.iter().map(|t| format!("{t}\n")).collect();
     fs::write(part.join("times.txt"), lines).map_err(|e| e.to_string())?;
-    // "  Duration: 00:00:52.49, start: ..." (none known: the last frame's time)
-    let duration = log.lines().find_map(|l| {
-        let hms = l.trim().strip_prefix("Duration:")?.split(',').next()?.trim();
-        hms.split(':').map(|p| p.parse::<f32>().ok()).try_fold(0.0, |sum, p| Some(sum * 60.0 + p?))
-    });
+    let duration = log_duration(&log); // none known: the last frame's time
     // "    Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuvj420p(pc, ...), 3840x2160 [SAR 1:1 DAR 16:9], ..."
     let stored = log.lines().filter(|l| l.contains("Video:")).find_map(|l| {
         l.split(|c: char| c == ',' || c == ' ').find_map(|w| {
@@ -574,6 +589,20 @@ fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool
     }
     fs::rename(&part, dir).map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// How long a video is, from what ffmpeg says reading it: "  Duration: 00:00:52.49, start: ...".
+fn log_duration(log: &str) -> Option<f32> {
+    log.lines().find_map(|l| {
+        let hms = l.trim().strip_prefix("Duration:")?.split(',').next()?.trim();
+        hms.split(':').map(|p| p.parse::<f32>().ok()).try_fold(0.0, |sum, p| Some(sum * 60.0 + p?))
+    })
+}
+
+/// How long a video is (seconds), from its header (ffmpeg reads it and stops: a few ms).
+fn video_length(ffmpeg: &Path, video: &Path) -> Option<f32> {
+    let out = std::process::Command::new(ffmpeg).args(["-nostdin", "-hide_banner", "-i"]).arg(video).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).output().ok()?;
+    log_duration(&String::from_utf8_lossy(&out.stderr))
 }
 
 /// A video's frames, in order.
@@ -655,17 +684,41 @@ fn read_videos(ctx: &mut Ctx) -> Result<Flow, String> {
     let Some(ffmpeg) = crate::runtime::ffmpeg(&ctx.root) else {
         return Err(format!("{} videos need ffmpeg to be read: download it in Runtime (on the Maps page), then carry on", videos.len()));
     };
-    shared_state(&ctx.shared).unit = "videos";
-    ctx.progress(0, videos.len(), "");
-    let done = AtomicUsize::new(0);
-    videos.par_iter().enumerate().for_each(|(k, video)| {
+    // counted in seconds of video (how much there is to read, more than how many videos): each one's length first, from its
+    // header (one already read: its video.json)
+    ctx.progress(0, 0, format!("{} videos, how long they are", videos.len()));
+    let dirs: Vec<PathBuf> = (0..videos.len()).map(|k| ctx.dir.join(format!("frames/{k:06}"))).collect();
+    let lengths: Vec<f32> = videos
+        .par_iter()
+        .zip(&dirs)
+        .map(|(video, dir)| {
+            let read: Option<crate::data::Video> = fs::read(dir.join("video.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+            read.map(|v| v.duration).or_else(|| video_length(&ffmpeg, video)).unwrap_or(0.0).max(0.0)
+        })
+        .collect();
+    shared_state(&ctx.shared).unit = "seconds of video";
+    ctx.progress(0, lengths.iter().sum::<f32>().round() as usize, "");
+    let done = std::sync::atomic::AtomicU64::new(0); // milliseconds
+    videos.par_iter().zip(&dirs).zip(&lengths).for_each(|((video, dir), &length)| {
         if ctx.paused() {
             return;
         }
-        if let Err(e) = video_frames(&ffmpeg, video, &ctx.dir.join(format!("frames/{k:06}")), &|| ctx.paused()) {
-            eprintln!("{e}");
+        let counted = std::sync::atomic::AtomicU64::new(0);
+        let count = |t: f32| {
+            let t = (t.clamp(0.0, length) * 1000.0) as u64;
+            let before = counted.fetch_max(t, Ordering::Relaxed);
+            if t > before {
+                ctx.set_done(((done.fetch_add(t - before, Ordering::Relaxed) + t - before) / 1000) as usize);
+            }
+        };
+        match video_frames(&ffmpeg, video, dir, &|| ctx.paused(), &count) {
+            Ok(true) => count(length),
+            Ok(false) => {} // paused
+            Err(e) => {
+                eprintln!("{e}");
+                count(length);
+            }
         }
-        ctx.set_done(done.fetch_add(1, Ordering::Relaxed) + 1);
     });
     Ok(if ctx.paused() { Flow::Paused } else { Flow::Done })
 }
@@ -1383,9 +1436,11 @@ mod tests {
         assert!(made.success());
         let dir = temp.join("frames/000000");
         let ffmpeg = crate::runtime::ffmpeg(&crate::data_root()).expect("ffmpeg");
-        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| true), Ok(false), "stopped");
+        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| true, &|_| {}), Ok(false), "stopped");
         assert!(!dir.exists() && !dir.with_extension("part").exists(), "nothing left of a stopped one");
-        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| false), Ok(true));
+        let got_to = std::cell::Cell::new(0.0f32);
+        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| false, &|t| got_to.set(got_to.get().max(t))), Ok(true));
+        assert!((got_to.get() - 2.0).abs() < 0.2, "it says how far it has got: {}", got_to.get());
         let frames = frame_files(&dir);
         assert_eq!(frames.len(), 2, "of a keyframe every 0.4 s, one every 2 s");
         assert_eq!(shown_size(&frames[0]), Some((576, 1024)));
@@ -1395,7 +1450,7 @@ mod tests {
         let info: crate::data::Video = serde_json::from_slice(&fs::read(dir.join("video.json")).unwrap()).unwrap();
         assert!((info.duration - 4.0).abs() < 0.1, "{info:?}");
         assert_eq!((info.width, info.height), (1080, 1920), "the video's own size, upright");
-        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| true), Ok(true), "done once: kept");
+        assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| true, &|_| {}), Ok(true), "done once: kept");
         fs::remove_dir_all(&temp).unwrap();
     }
 
