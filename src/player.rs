@@ -107,6 +107,8 @@ impl Player {
         self.at = self.position();
         self.since = None;
         self.stop_ffmpeg();
+        // the stopped ffmpeg's reader sees its output end: that is not the video running out (play would start it over)
+        self.shared = Arc::new(Shared::default());
     }
 
     /// Go to `t` seconds, playing on if it was playing.
@@ -174,6 +176,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert_eq!(p.position(), at, "paused: it stays");
         assert!(p.child.is_none());
+        std::thread::sleep(std::time::Duration::from_millis(200)); // the stopped ffmpeg's output has ended by now
+        p.play();
+        assert!(p.position() >= at && p.position() < at + 0.1, "played again: on from where it was, {at} -> {}", p.position());
+        p.pause();
         p.seek(2.5);
         assert_eq!(p.position(), 2.5);
         std::fs::remove_dir_all(&temp).unwrap();
