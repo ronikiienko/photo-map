@@ -158,6 +158,9 @@ pub fn help(ctx: &egui::Context, open: &mut bool) {
 /// A photo's right-click menu, as it is drawn.
 pub struct PhotoMenu {
     pub photo: usize,
+    /// The picture it was opened on (data.rs, picture ids): the photo, or the frame a video's match beside the world shows.
+    /// "Photos like this" searches with that.
+    pub picture: usize,
     /// Where it was opened (points).
     pub at: egui::Pos2,
     pub title: String,
@@ -187,10 +190,10 @@ pub fn photo_menu(ctx: &egui::Context, m: &PhotoMenu, actions: &mut UiActions) {
                     actions.path_from = Some(photo);
                 }
                 if theme::button(ui, egui::Button::new("Photos like this")).on_hover_text("search with this photo (F)").clicked() {
-                    actions.like = Some(photo);
+                    actions.like = Some(m.picture);
                 }
                 if m.can_add && theme::button(ui, egui::Button::new("Add to search")).on_hover_text("search for what this photo and the ones searched for share").clicked() {
-                    actions.add_like = Some(photo);
+                    actions.add_like = Some(m.picture);
                 }
                 ui.separator();
                 if theme::button(ui, egui::Button::new("Show in folder")).on_hover_text(&m.file_tip).clicked() {
@@ -300,6 +303,7 @@ mod shots {
     fn menu(ends_path: bool, can_add: bool) -> PhotoMenu {
         PhotoMenu {
             photo: 0,
+            picture: 0,
             at: egui::pos2(520.0, 300.0),
             title: "IMG_20190612_184455 a rather long name that goes on".into(),
             ends_path,

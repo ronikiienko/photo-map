@@ -326,7 +326,7 @@ struct Viewer {
     /// What is lifted, and how far (0 ... 1): it settles back before the next one lifts.
     lifted: (Option<Lifted>, f32),
     /// The right-click menu: for which photo, and where (points).
-    menu: Option<(usize, egui::Pos2)>,
+    menu: Option<(usize, usize, egui::Pos2)>,
     /// "Details" was chosen in the menu: the photo, where the card goes, and its lines (files::details).
     details: Option<(usize, egui::Pos2, files::Details)>,
     /// "Path from here" was chosen on this photo: the path's end is picked next.
@@ -806,6 +806,14 @@ impl Viewer {
         best
     }
 
+    /// The picture under the mouse: the hovered photo's, or what its copy beside the world shows (a video's best frame).
+    fn hovered_picture(&self) -> Option<usize> {
+        match (self.hovered_copy, &self.map) {
+            (Some(k), Some(m)) => m.pictures.get(k).copied(),
+            _ => self.hovered,
+        }
+    }
+
     /// The match whose copy beside the world is under the mouse: its position among the matches.
     fn pick_copy(&self, screen: Vec2) -> Option<usize> {
         let m = self.map.as_ref()?;
@@ -1197,8 +1205,9 @@ impl Viewer {
 
     /// F over a photo: the same as dropping that photo's file on the window (it goes in the search box and is searched), instead of
     /// the photos searched for or (`add`) besides them.
-    fn ask_like(&mut self, photo: usize, add: bool) {
-        let Some(file) = self.map.as_ref().map(|m| m.data.path(photo)) else { return };
+    /// Search with this picture (a photo, or a video's frame: data.rs, picture ids).
+    fn ask_like(&mut self, picture: usize, add: bool) {
+        let Some(file) = self.map.as_ref().map(|m| m.data.picture_path(picture)) else { return };
         if self.set_photo(file, add) {
             self.ask();
         }
@@ -1272,7 +1281,7 @@ impl Viewer {
             }
         }
         if key == KeyCode::KeyF {
-            if let (true, Some(i)) = (down, self.hovered) {
+            if let (true, Some(i)) = (down, self.hovered_picture()) {
                 self.ask_like(i, false);
             }
             return;
@@ -1311,7 +1320,7 @@ impl Viewer {
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } if !over_ui && self.page == Page::Viewer => {
                 let ppp = self.screen.scale();
-                self.menu = self.hovered.zip(self.cursor).map(|(i, c)| (i, egui::pos2(c.x / ppp, c.y / ppp)));
+                self.menu = self.hovered.zip(self.cursor).map(|(i, c)| (i, self.hovered_picture().unwrap_or(i), egui::pos2(c.x / ppp, c.y / ppp)));
             }
             WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
                 ElementState::Pressed if !over_ui && self.page == Page::Viewer => {
@@ -2216,13 +2225,14 @@ impl Viewer {
         mapui::help(&ctx, &mut self.help_open);
         self.debug_overlay(&ctx);
 
-        if let (Some((photo, at)), Some(m)) = (self.menu, &self.map) {
+        if let (Some((photo, picture, at)), Some(m)) = (self.menu, &self.map) {
             let file = files::original(&m.data, photo);
             let source = &m.data.photos[photo].source;
             let file_tip = if file.as_os_str() == source.as_str() || source.is_empty() { file.display().to_string() } else { format!("{source} is not there any more: the map's own copy, {}", file.display()) };
-            let path = m.data.path(photo);
+            let path = m.data.picture_path(picture);
             let menu = mapui::PhotoMenu {
                 photo,
+                picture,
                 at,
                 title: m.data.photos[photo].title.clone(),
                 ends_path: self.path_from.is_some_and(|from| from != photo),
@@ -2284,7 +2294,7 @@ struct UiActions {
     clear_photo: bool,
     /// The cross after the search box: no words, no matches.
     clear_search: bool,
-    /// The right-click menu: a path from or to this photo, photos like it.
+    /// The right-click menu: a path from or to this photo, photos like this picture (a photo, or a video's frame).
     path_from: Option<usize>,
     path_to: Option<usize>,
     like: Option<usize>,
