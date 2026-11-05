@@ -476,7 +476,8 @@ impl Viewer {
         let runtime = manager::Manager::new(library.root(), waker());
         let store = modelstore::ModelStore::new(library.root(), waker());
         let examples = examples::Examples::new(library.root(), waker());
-        let renderer = egui_wgpu::Renderer::new(&gpu.device, gpu.config.format, Default::default());
+        let mut renderer = egui_wgpu::Renderer::new(&gpu.device, gpu.config.format, Default::default());
+        renderer.callback_resources.insert(player::VideoGpu::new(&gpu.device, gpu.config.format));
         let size = screen.size();
         let camera = Camera::new(Vec2::new(size.0 as f32, size.1 as f32));
         let mut viewer = Self {
@@ -824,11 +825,6 @@ impl Viewer {
         self.player = None;
         self.map = None; // the Maps page needs none of it: give back its GPU memory
         self.library.refresh();
-    }
-
-    /// The screen's longer side (px): videos are never decoded bigger.
-    fn screen_long(&self) -> f32 {
-        self.camera.viewport.max_element()
     }
 
     fn size_px(&self) -> f32 {
@@ -2134,14 +2130,11 @@ impl Viewer {
             self.player = None;
             return;
         };
-        let most = self.screen_long();
         let Some(p) = &mut self.player else { return };
-        p.fit(tile.long * ppp, most);
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video".into()));
-        if let Some(texture) = p.texture(ctx) {
-            let corner = (0.04 * tile.rect.width().min(tile.rect.height())).min(6.0); // as the map's own corners (map.wgsl)
-            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-            painter.add(egui::epaint::RectShape::filled(tile.rect, corner, egui::Color32::WHITE).with_texture(texture, uv));
+        let corner = (0.04 * tile.rect.width().min(tile.rect.height())).min(6.0); // as the map's own corners (map.wgsl)
+        if let Some(frame) = p.paint(tile.rect, corner) {
+            painter.add(frame);
         }
         if p.playing() {
             ctx.request_repaint();
@@ -2196,7 +2189,6 @@ impl Viewer {
 
     /// Play this video tile: on the map from the start, a copy beside the world from its frame.
     fn play(&mut self, t: VideoTile) {
-        let ppp = self.screen.scale();
         let (Some(m), Some(ffmpeg)) = (&self.map, self.runtime.ffmpeg.clone()) else {
             self.status = "videos are played with ffmpeg: download it in Runtime (on the Maps page)".into();
             return;
@@ -2204,7 +2196,7 @@ impl Viewer {
         let photo = &m.data.photos[t.photo];
         let video = files::original(&m.data, t.photo);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(self.wake());
-        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, (photo.width, photo.height), t.long * ppp, self.screen_long(), wake));
+        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, photo.video.map_or((photo.width, photo.height), |v| (v.width, v.height)), wake));
     }
 
     /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view

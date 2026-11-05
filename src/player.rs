@@ -1,22 +1,29 @@
-//! Playing a video in its tile (no sound): ffmpeg decodes it from a time at its own speed (`-re`) to raw RGBA frames of the
-//! size it is shown at (up to the screen's and the video's own), a thread keeps the newest one, and the window uploads it when
-//! it is new. Pausing stops ffmpeg; playing again, going to another time, or the tile growing or shrinking a lot on screen
-//! starts it there again.
+//! Playing a video in its tile (no sound): ffmpeg decodes it (on the graphics card's decoder when there is one, `-hwaccel
+//! auto`) from a time at its own speed (`-re`) to raw NV12 frames at the video's own size (zoomed out it is rarely
+//! watched, and refitting to the tile on screen lost sharpness), a thread keeps the newest one, and the window uploads it when it is new and turns it into colours on the card
+//! (video.wgsl): 1.5 bytes a pixel instead of RGBA's 4, and no converting on the processor. Pausing stops ffmpeg; playing again,
+//! or going to another time, starts it there again.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-/// How much the tile's size on screen changes before frames are decoded at its new size.
-const REFIT: f32 = 1.5;
 
-/// What the reader thread hands over: the newest frame, and whether the video has run out.
+/// A frame: brightness (a byte a pixel), then the two colour channels interleaved at half the size each way (NV12).
+pub struct Frame {
+    size: (u32, u32),
+    bytes: Vec<u8>,
+}
+
+/// What the reader thread hands over: the newest frame, when the first came (the clock starts there, not while ffmpeg starts
+/// up), and whether the video has run out.
 #[derive(Default)]
 struct Shared {
-    frame: Mutex<Option<Vec<u8>>>,
+    frame: Mutex<Option<Frame>>,
+    first: OnceLock<Instant>,
     ended: AtomicBool,
 }
 
@@ -27,48 +34,35 @@ pub struct Player {
     pub duration: f32,
     ffmpeg: PathBuf,
     video: PathBuf,
-    /// The video's own size (px, upright).
-    own: (u32, u32),
-    /// The frames' size (px).
+    /// The frames' size (px): the video's own, upright, even sides (for NV12).
     pub size: (u32, u32),
-    /// Where it was when it last started or stopped, and since when it plays (None: paused).
+    /// HD colours (BT.709), else SD (BT.601): videos rarely say, so by size, as players do.
+    hd: bool,
+    /// Where it was when it last started or stopped, and whether it plays.
     at: f32,
     since: Option<Instant>,
     child: Option<Child>,
     shared: Arc<Shared>,
     wake: Arc<dyn Fn() + Send + Sync>,
-    texture: Option<egui::TextureHandle>,
+    /// A frame has come, so there is one on the card to draw.
+    shown: bool,
 }
 
 impl Player {
-    /// Plays `video` (its own size: `own`) from `at` seconds, in frames of about `long` px on their longer side, at most
-    /// `most` (the screen's).
+    /// Plays `video` (its own size: `own`, upright) from `at` seconds.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(ffmpeg: &Path, video: &Path, photo: usize, copy: Option<usize>, duration: f32, at: f32, own: (u32, u32), long: f32, most: f32, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
-        let size = frame_size(own, long, most);
-        let mut player = Self { photo, copy, duration, ffmpeg: ffmpeg.to_path_buf(), video: video.to_path_buf(), own, size, at: at.clamp(0.0, duration), since: None, child: None, shared: Arc::new(Shared::default()), wake, texture: None };
+    pub fn new(ffmpeg: &Path, video: &Path, photo: usize, copy: Option<usize>, duration: f32, at: f32, own: (u32, u32), wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let even = |v: u32| (v / 2).max(1) * 2;
+        let size = (even(own.0), even(own.1));
+        let hd = own.0.max(own.1) >= 1280 || own.0.min(own.1) > 576;
+        let mut player = Self { photo, copy, duration, ffmpeg: ffmpeg.to_path_buf(), video: video.to_path_buf(), size, hd, at: at.clamp(0.0, duration), since: None, child: None, shared: Arc::new(Shared::default()), wake, shown: false };
         player.play();
         player
     }
 
-    /// The tile is now `long` px on its longer side (the screen's: `most`): once that is REFIT times bigger or smaller than
-    /// the frames, they are decoded at the new size, on from where it is (the last frame stays until the first new one).
-    pub fn fit(&mut self, long: f32, most: f32) {
-        let size = frame_size(self.own, long, most);
-        let ratio = size.0.max(size.1) as f32 / self.size.0.max(self.size.1) as f32;
-        if ratio < REFIT && ratio > 1.0 / REFIT {
-            return;
-        }
-        self.size = size;
-        if self.playing() {
-            self.at = self.position();
-            self.play();
-        }
-    }
-
     /// Where it is (seconds).
     pub fn position(&self) -> f32 {
-        let t = self.at + self.since.map_or(0.0, |s| s.elapsed().as_secs_f32());
+        let t = self.at + self.since.and(self.shared.first.get()).map_or(0.0, |s| s.elapsed().as_secs_f32());
         if self.shared.ended.load(Ordering::Relaxed) { self.duration } else { t.min(self.duration) }
     }
 
@@ -85,13 +79,13 @@ impl Player {
         self.shared = Arc::new(Shared::default());
         let (w, h) = self.size;
         let child = Command::new(&self.ffmpeg)
-            .args(["-nostdin", "-loglevel", "error", "-re", "-ss"])
+            .args(["-nostdin", "-loglevel", "error", "-hwaccel", "auto", "-re", "-ss"])
             .arg(format!("{:.3}", self.at))
             .arg("-i")
             .arg(&self.video)
             .args(["-an", "-vf"])
-            .arg(format!("scale={w}:{h}"))
-            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+            .arg(format!("scale={w}:{h}:out_range=tv"))
+            .args(["-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -102,14 +96,15 @@ impl Player {
         };
         let mut out = child.stdout.take().expect("piped");
         let (shared, wake) = (self.shared.clone(), self.wake.clone());
-        let bytes = (w * h * 4) as usize;
+        let size = (w * h * 3 / 2) as usize;
         std::thread::spawn(move || {
             loop {
-                let mut frame = vec![0u8; bytes];
-                if out.read_exact(&mut frame).is_err() {
+                let mut bytes = vec![0u8; size];
+                if out.read_exact(&mut bytes).is_err() {
                     break;
                 }
-                *shared.frame.lock().unwrap() = Some(frame);
+                shared.first.get_or_init(Instant::now);
+                *shared.frame.lock().unwrap() = Some(Frame { size: (w, h), bytes });
                 wake();
             }
             shared.ended.store(true, Ordering::Relaxed);
@@ -148,25 +143,152 @@ impl Player {
         }
     }
 
-    /// The newest frame as a texture (uploaded when a new one came); None until the first one has.
-    pub fn texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureId> {
-        if let Some(frame) = self.shared.frame.lock().unwrap().take() {
-            let image = egui::ColorImage::from_rgba_unmultiplied([self.size.0 as usize, self.size.1 as usize], &frame);
-            match &mut self.texture {
-                Some(t) => t.set(image, egui::TextureOptions::LINEAR),
-                None => self.texture = Some(ctx.load_texture("video", image, egui::TextureOptions::LINEAR)),
-            }
-        }
-        self.texture.as_ref().map(|t| t.id())
+    /// Drawing its newest frame over `rect` (points), corners rounded by `corner`: uploaded first when a new one came. None
+    /// until the first one has.
+    pub fn paint(&mut self, rect: egui::Rect, corner: f32) -> Option<egui::Shape> {
+        let frame = self.shared.frame.lock().unwrap().take();
+        self.shown |= frame.is_some();
+        self.shown.then(|| egui_wgpu::Callback::new_paint_callback(rect, Paint { frame: Mutex::new(frame), rect, corner, hd: self.hd }).into())
     }
 }
 
-/// Frames of about `long` px on their longer side, no bigger than `most` nor the video's own size, even sides (for ffmpeg).
-fn frame_size((width, height): (u32, u32), long: f32, most: f32) -> (u32, u32) {
-    let own = width.max(height).max(1) as f32;
-    let scale = long.min(most).min(own).max(64.0) / own;
-    let even = |v: f32| ((v / 2.0).round() as u32).max(1) * 2;
-    (even(width as f32 * scale), even(height as f32 * scale))
+/// The video's frame on the card, and how it is drawn (video.wgsl); kept in egui's renderer (its callback resources).
+pub struct VideoGpu {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    uniform: wgpu::Buffer,
+    /// The frame's two textures (its size), and their bind group.
+    planes: Option<((u32, u32), wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
+}
+
+impl VideoGpu {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("video"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("video.wgsl").into()),
+        });
+        let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
+        let texture = wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("video"),
+            entries: &[
+                entry(0, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }),
+                entry(1, texture),
+                entry(2, texture),
+                entry(3, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("video"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("video"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_video"), buffers: &[], compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_video"),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("video"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { pipeline, layout, sampler, uniform, planes: None }
+    }
+
+    /// The frame onto the card (new textures when its size changed).
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame) {
+        let (w, h) = frame.size;
+        if self.planes.as_ref().is_none_or(|p| p.0 != frame.size) {
+            let plane = |w, h, format| device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("video"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let (luma, chroma) = (plane(w, h, wgpu::TextureFormat::R8Unorm), plane(w / 2, h / 2, wgpu::TextureFormat::Rg8Unorm));
+            let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("video"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view(&luma)) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view(&chroma)) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.planes = Some((frame.size, luma, chroma, bind_group));
+        }
+        let (_, luma, chroma, _) = self.planes.as_ref().expect("made above");
+        let write = |texture: &wgpu::Texture, bytes: &[u8], row: u32, (w, h): (u32, u32)| {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytes,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            )
+        };
+        let (y, uv) = frame.bytes.split_at((w * h) as usize);
+        write(luma, y, w, (w, h));
+        write(chroma, uv, w, (w / 2, h / 2));
+    }
+}
+
+/// One frame's drawing of the video (egui calls it inside its pass, in order with the rest of the UI).
+struct Paint {
+    frame: Mutex<Option<Frame>>,
+    rect: egui::Rect,
+    corner: f32,
+    hd: bool,
+}
+
+impl egui_wgpu::CallbackTrait for Paint {
+    fn prepare(&self, device: &wgpu::Device, queue: &wgpu::Queue, screen: &egui_wgpu::ScreenDescriptor, _: &mut wgpu::CommandEncoder, resources: &mut egui_wgpu::CallbackResources) -> Vec<wgpu::CommandBuffer> {
+        let Some(gpu) = resources.get_mut::<VideoGpu>() else { return Vec::new() };
+        if let Some(frame) = self.frame.lock().unwrap().take() {
+            gpu.upload(device, queue, &frame);
+        }
+        let ppp = screen.pixels_per_point;
+        let (min, size) = (self.rect.min * ppp, self.rect.size() * ppp);
+        let uniform = [min.x, min.y, size.x, size.y, self.corner * ppp, if self.hd { 1.0 } else { 0.0 }, 0.0, 0.0];
+        queue.write_buffer(&gpu.uniform, 0, bytemuck::cast_slice(&uniform));
+        Vec::new()
+    }
+
+    fn paint(&self, _: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
+        let Some(gpu) = resources.get::<VideoGpu>() else { return };
+        let Some((_, _, _, bind_group)) = &gpu.planes else { return };
+        pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }
 
 impl Drop for Player {
@@ -179,16 +301,14 @@ impl Drop for Player {
 mod tests {
     use super::*;
 
-    /// Frames are the tile's size, but never bigger than the screen or the video itself.
+    /// video.wgsl is only compiled when a video plays: parse and validate it here.
     #[test]
-    fn frames_follow_the_tile() {
-        assert_eq!(frame_size((3840, 2160), 900.0, 2560.0), (900, 506));
-        assert_eq!(frame_size((3840, 2160), 5000.0, 2560.0), (2560, 1440), "the screen's at most");
-        assert_eq!(frame_size((1920, 1080), 5000.0, 2560.0), (1920, 1080), "the video's own at most");
-        assert_eq!(frame_size((1080, 1920), 10.0, 2560.0), (36, 64), "upright, and never tiny");
+    fn shader_is_valid() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("video.wgsl")).expect("video.wgsl does not parse");
+        wgpu::naga::valid::Validator::new(Default::default(), wgpu::naga::valid::Capabilities::all()).validate(&module).expect("video.wgsl is not valid");
     }
 
-    /// Frames come at the size asked for, from the time asked for, and stop when paused. Needs ffmpeg; no window.
+    /// Frames come at the video's size, from the time asked for, and stop when paused. Needs ffmpeg; no window.
     #[test]
     fn plays_and_pauses() {
         let Some(ffmpeg) = crate::runtime::ffmpeg(&crate::data_root()) else { return };
@@ -196,13 +316,13 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
         let video = temp.join("v.mp4");
         assert!(Command::new(&ffmpeg).args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=3:size=320x180:rate=25"]).arg(&video).status().unwrap().success());
-        let mut p = Player::new(&ffmpeg, &video, 0, None, 3.0, 1.0, (320, 180), 160.0, 1920.0, Arc::new(|| {}));
-        assert_eq!(p.size, (160, 90));
+        let mut p = Player::new(&ffmpeg, &video, 0, None, 3.0, 1.0, (320, 180), Arc::new(|| {}));
+        assert_eq!(p.size, (320, 180));
         let started = Instant::now();
         while p.shared.frame.lock().unwrap().is_none() && started.elapsed().as_secs() < 5 {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(p.shared.frame.lock().unwrap().as_ref().map(Vec::len), Some(160 * 90 * 4));
+        assert_eq!(p.shared.frame.lock().unwrap().as_ref().map(|f| f.bytes.len()), Some(320 * 180 * 3 / 2));
         assert!(p.playing() && p.position() >= 1.0);
         p.pause();
         let at = p.position();
