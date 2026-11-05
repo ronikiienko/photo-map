@@ -85,12 +85,17 @@ pub fn details(data: &crate::data::MapData, id: usize) -> Details {
     let photo = &data.photos[id];
     let path = original(data, id);
     let mut lines = vec![("File".to_string(), path.display().to_string())];
+    // a video's own size (the photo's is its poster's), and how long it is
+    let (width, height) = photo.video.map_or((photo.width, photo.height), |v| (v.width, v.height));
     match std::fs::metadata(&path) {
-        Ok(m) => lines.push(("Size".into(), format!("{} x {} px, {}", photo.width, photo.height, bytes(m.len())))),
+        Ok(m) => lines.push(("Size".into(), format!("{width} x {height} px, {}", bytes(m.len())))),
         Err(_) => {
-            lines.push(("Size".into(), format!("{} x {} px", photo.width, photo.height)));
+            lines.push(("Size".into(), format!("{width} x {height} px")));
             lines.push(("".into(), "the file is not there any more".into()));
         }
+    }
+    if let Some(v) = photo.video {
+        lines.push(("Length".into(), crate::clock(v.duration)));
     }
     let mut place = None;
     if let Ok(file) = std::fs::File::open(&path) {

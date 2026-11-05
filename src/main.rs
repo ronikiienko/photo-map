@@ -1955,7 +1955,7 @@ impl Viewer {
         if long * m.data.max_size() >= VIDEO_MARK_FROM.0 {
             let (view_min, view_max) = (self.camera.to_world(Vec2::ZERO), self.camera.to_world(self.camera.viewport));
             m.data.grid.within(&m.data.points, view_min, view_max, |i| {
-                if let Some(duration) = m.data.photos[i].duration.filter(|_| !m.hidden_mask[i]) {
+                if let Some(duration) = m.data.photos[i].video.map(|v| v.duration).filter(|_| !m.hidden_mask[i]) {
                     let at = self.camera.to_screen(Vec2::new(m.data.points[i].x, m.data.points[i].y)) / ppp;
                     let shape = m.data.shape(i);
                     add(i, None, at, shape / shape.max_element(), long * shape.max_element(), duration, 0.0);
@@ -1965,7 +1965,7 @@ impl Viewer {
         // the copies: when their frame is, and it plays from there (a video's poster: how long it is, from the start)
         let copy_long = m.copy_side * self.camera.scale / ppp;
         for (k, ((&i, &picture), p)) in m.order.iter().zip(&m.pictures).zip(&m.copies).enumerate() {
-            let Some(duration) = m.data.photos[i].duration else { continue };
+            let Some(duration) = m.data.photos[i].video.map(|v| v.duration) else { continue };
             let frame = picture.checked_sub(m.data.n()).map(|f| m.data.frames[f].time);
             let at = self.camera.to_screen(Vec2::new(p.x, p.y)) / ppp;
             add(i, Some(k), at, m.data.picture_form(picture), copy_long, frame.unwrap_or(duration), frame.unwrap_or(0.0));
@@ -2061,7 +2061,7 @@ impl Viewer {
         let photo = &m.data.photos[t.photo];
         let video = files::original(&m.data, t.photo);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(self.wake());
-        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, t.time.max(photo.duration.unwrap_or(0.0)), t.start, (photo.width, photo.height), t.long * ppp, wake));
+        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, (photo.width, photo.height), t.long * ppp, wake));
         true
     }
 

@@ -119,9 +119,19 @@ pub struct Photo {
     /// What its EXIF says that search can pick by (boxed: most photos of a big map have none, and this keeps them small).
     #[serde(default)]
     pub facts: Option<Box<Facts>>,
-    /// A video: how long it is (seconds). None: a photo.
+    /// A video: how long it is and its own size (`width` and `height` above are its poster's). None: a photo.
     #[serde(default)]
-    pub duration: Option<f32>,
+    pub video: Option<Video>,
+}
+
+/// What a video is, apart from its poster.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Video {
+    /// Seconds.
+    pub duration: f32,
+    /// Its frames' size as it is shown (turned upright), px.
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A photo's camera, when it was taken and where, read from its EXIF when the map was made (files::facts). Empty: not known.

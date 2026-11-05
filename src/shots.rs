@@ -84,7 +84,7 @@ pub fn map_bundle(maps: &Path, name: &str, n: usize) -> PathBuf {
         let taken = format!("{}-{:02}-{:02} 12:00", 2016 + i % 5, 1 + i % 12, 1 + i % 28);
         let mut photo = serde_json::json!({ "file": file, "width": w, "height": h, "title": format!("{label} {i}"), "facts": { "camera": camera, "taken": taken } });
         if i % 7 == 0 || i == 200 {
-            photo["duration"] = (5.0 + (i * 37 % 300) as f32).into(); // a video (its poster)
+            photo["video"] = serde_json::json!({ "duration": 5.0 + (i * 37 % 300) as f32, "width": w * 40, "height": h * 40 }); // a video (its poster)
         }
         photos.push(photo);
     }
