@@ -213,7 +213,8 @@ struct OpenMap {
     /// Where each copy sits beside the world (the matches', then the moments'), and a copy's side (world units).
     copies: Vec<data::Point>,
     copy_side: f32,
-    /// "Moments that match": the video whose frames that match the search are shown right of the matches, best first.
+    /// "Moments that match": the video whose frames that match the search are shown right of the matches, best first. It stays
+    /// while the search changes (each new one picks its frames again), until the search is cleared.
     moments: Option<usize>,
     /// The block beside the world shows a path between these two photos instead of a search's matches.
     trail: Option<(usize, usize)>,
@@ -260,7 +261,7 @@ impl OpenMap {
         self.order = photos;
         self.at = None;
         if !best || self.order.is_empty() {
-            self.moments = None; // they go with the search
+            self.moments = None; // they stay through new searches (to try them on the same video), and go with the search
         }
         self.place_copies(queue, best);
     }
@@ -971,7 +972,6 @@ impl Viewer {
                 let m = self.map.as_mut().unwrap();
                 m.sims = vec![0.0; n];
                 m.frame_sims.clear();
-                m.moments = None;
                 m.best = (0..n).collect();
                 self.apply_search(); // the camera stays where it is: the marks light up where they are
                 return;
@@ -1101,7 +1101,6 @@ impl Viewer {
                     m.sims = self.logic.combine(&cos);
                     m.best = (0..m.sims.len()).collect();
                     m.frame_sims.clear();
-                    m.moments = None; // a new search: the moments shown were the last one's
                     if !m.data.frames.is_empty() {
                         m.frame_sims = self.logic.combine(&frame_cos);
                         m.best = search::best_frames(&mut m.sims, &m.frame_sims, &m.data.frames);
