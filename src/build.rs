@@ -27,8 +27,8 @@ pub const SHARD: usize = 256;
 pub const TYPES: [&str; 8] = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff"];
 /// The video files a folder is searched for: each is one photo on the map (its frames are read with ffmpeg, see `video_frames`).
 pub const VIDEO_TYPES: [&str; 7] = ["mp4", "mov", "m4v", "mkv", "webm", "avi", "3gp"];
-/// At most this many frames of a video are embedded (a longer one's keyframes are thinned out evenly).
-const MAX_FRAMES: usize = 64;
+/// A video's frames are its keyframes at least this far apart (seconds): about one every 2 s, as many as its length asks.
+const FRAME_GAP: f32 = 2.0;
 /// Photos handed to the model at once.
 const BATCH: usize = 16;
 /// Pictures read and prepared ahead of the model (photos, or a video's frames): about 200 MB with the 256 px model.
@@ -71,7 +71,7 @@ impl Stage {
     /// What the stage does and why, in plain words, for the card of a map being made.
     pub fn explain(self) -> &'static str {
         match self {
-            Stage::Videos => "Each video (MP4, MOV, MKV and so on) is one photo on the map, and the model looks at its keyframes: the whole pictures a video file keeps, usually one a second (at most 64, spread over the video). They are taken out of every video now, with ffmpeg. Nothing to do if there are no videos.",
+            Stage::Videos => "Each video (MP4, MOV, MKV and so on) is one photo on the map, and the model looks at its keyframes: the whole pictures a video file keeps, one about every 2 seconds. They are taken out of every video now, with ffmpeg. Nothing to do if there are no videos.",
             Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and notes where each one is: the map reads them there, and takes no space for them (unless you asked for them to be copied into the map). Nothing is changed in your folders.",
             Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. A video's frames each go through the model: the video's vector is their average (which places it on the map), its picture the frame closest to that average, and a search finds it by its best-matching frame. This is the slow part, because every photo goes through the model on the graphics card.",
             Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP). Last, photos that would cover each other are moved apart a little, so that every photo can be seen.",
@@ -490,10 +490,11 @@ pub fn is_video(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| VIDEO_TYPES.contains(&e.to_lowercase().as_str()))
 }
 
-/// Takes a video's keyframes out to JPEGs in `dir` (001.jpg, 002.jpg...; the longer side at most 1024 px). A keyframe is a whole picture (the
-/// frames between only say what changed), so only they are read (-discard: the others are dropped as the file is read, never
-/// decoded) and decoded: usually one a second, and encoders put one at most cuts. Of
-/// more than MAX_FRAMES, that many are kept, evenly spread. Their times (seconds from the start) go to times.txt, a line each, in
+/// Takes a video's keyframes out to JPEGs in `dir` (000001.jpg, 000002.jpg...; the longer side at most 1024 px). A keyframe is a whole
+/// picture (the frames between only say what changed), so only they are read (-discard: the others are dropped as the file is
+/// read, never decoded): encoders put one every 0.5-2 s or so, and at most cuts. Of them, one at least FRAME_GAP after the last
+/// one kept is decoded (the others are dropped before the decoder: decoding a big keyframe is most of the work); where they are
+/// further apart, each. Their times (seconds from the start) go to times.txt, a line each, in
 /// order; how long the video is and its size (data::Video) to video.json, what its file says about itself (data::Facts) to facts.json. Done once: a folder already there is kept. Needs ffmpeg. `stop`: asked while ffmpeg runs; true stops it (the folder isn't
 /// made, Ok(false)). Ok(true): done.
 fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool) -> Result<bool, String> {
@@ -507,11 +508,16 @@ fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool
     let log_path = part.join("ffmpeg.log");
     let log_file = fs::File::create(&log_path).map_err(|e| e.to_string())?;
     let mut child = std::process::Command::new(ffmpeg)
-        .args(["-nostdin", "-hide_banner", "-loglevel", "info", "-discard", "nokey", "-skip_frame", "nokey", "-i"])
+        .args(["-nostdin", "-hide_banner", "-loglevel", "info", "-discard", "nokey", "-skip_frame", "nokey"])
+        // a keyframe is dropped unless it is the first or FRAME_GAP after the last one kept (its time in register 0)
+        .arg("-bsf:v")
+        .arg(format!("noise=drop='if(eq(n\\,0)+gte(if(isnan(pts)\\,dts\\,pts)*tb-ld(0)\\,{})\\,st(0\\,if(isnan(pts)\\,dts\\,pts)*tb)*0\\,1)'", FRAME_GAP - 0.05))
+        .arg("-i")
         .arg(video)
+        .args(["-map", "0:V:0"])
         // the longer side at most 1024 px (the other follows, kept even)
         .args(["-vf", "showinfo,scale='if(gte(iw,ih),min(1024,iw),-2)':'if(gte(iw,ih),-2,min(1024,ih))'", "-fps_mode", "passthrough", "-q:v", "3"])
-        .arg(part.join("%03d.jpg"))
+        .arg(part.join("%06d.jpg"))
         .stdout(std::process::Stdio::null())
         .stderr(log_file)
         .spawn()
@@ -539,13 +545,7 @@ fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool
         let errors: Vec<&str> = log.lines().filter(|l| !l.contains("Parsed_showinfo")).rev().take(3).collect();
         return Err(format!("{}: no frames ({})", video.display(), errors.join(" / ")));
     }
-    let keep: Vec<usize> = if frames.len() > MAX_FRAMES { (0..MAX_FRAMES).map(|k| k * (frames.len() - 1) / (MAX_FRAMES - 1)).collect() } else { (0..frames.len()).collect() };
-    for (i, f) in frames.iter().enumerate() {
-        if !keep.contains(&i) {
-            let _ = fs::remove_file(f);
-        }
-    }
-    let lines: String = keep.iter().map(|&i| format!("{}\n", times[i])).collect();
+    let lines: String = times.iter().map(|t| format!("{t}\n")).collect();
     fs::write(part.join("times.txt"), lines).map_err(|e| e.to_string())?;
     // "  Duration: 00:00:52.49, start: ..." (none known: the last frame's time)
     let duration = log.lines().find_map(|l| {
@@ -566,7 +566,7 @@ fn video_frames(ffmpeg: &Path, video: &Path, dir: &Path, stop: &dyn Fn() -> bool
         Some(size) => size,
         None => (fw, fh),
     };
-    let video = crate::data::Video { duration: duration.unwrap_or(times[*keep.last().expect("a frame")]), width, height };
+    let video = crate::data::Video { duration: duration.unwrap_or(*times.last().expect("a frame")), width, height };
     fs::write(part.join("video.json"), serde_json::to_vec(&video).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     // what the file says about itself (its camera, date, place), as a photo's EXIF does
     if let Some(facts) = crate::files::video_facts(&log) {
@@ -1376,7 +1376,7 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let video = temp.join("tall.mp4");
         let made = std::process::Command::new(crate::runtime::ffmpeg(&crate::data_root()).expect("ffmpeg"))
-            .args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=4:size=1080x1920:rate=25", "-g", "25", "-sc_threshold", "0"])
+            .args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=4:size=1080x1920:rate=25", "-g", "10", "-sc_threshold", "0"])
             .arg(&video)
             .status()
             .unwrap();
@@ -1387,10 +1387,10 @@ mod tests {
         assert!(!dir.exists() && !dir.with_extension("part").exists(), "nothing left of a stopped one");
         assert_eq!(video_frames(&ffmpeg, &video, &dir, &|| false), Ok(true));
         let frames = frame_files(&dir);
-        assert_eq!(frames.len(), 4, "a keyframe a second");
+        assert_eq!(frames.len(), 2, "of a keyframe every 0.4 s, one every 2 s");
         assert_eq!(shown_size(&frames[0]), Some((576, 1024)));
         let times: Vec<f32> = fs::read_to_string(dir.join("times.txt")).unwrap().lines().map(|l| l.parse().unwrap()).collect();
-        assert!(times.len() == 4 && times.iter().enumerate().all(|(k, t)| (t - k as f32).abs() < 0.2), "about a second apart: {times:?}");
+        assert!(times.len() == 2 && times.iter().enumerate().all(|(k, t)| (t - 2.0 * k as f32).abs() < 0.2), "2 s apart: {times:?}");
         assert!(!dir.join("ffmpeg.log").exists());
         let info: crate::data::Video = serde_json::from_slice(&fs::read(dir.join("video.json")).unwrap()).unwrap();
         assert!((info.duration - 4.0).abs() < 0.1, "{info:?}");
@@ -1436,25 +1436,25 @@ mod tests {
         assert!((photos[video]["video"]["duration"].as_f64().unwrap() - 18.0).abs() < 0.1, "a video says how long it is");
         assert_eq!(photos[video]["video"]["width"].as_u64(), Some(320));
         assert!(photos.iter().filter(|p| p.get("video").is_some()).count() == 1, "a photo doesn't");
-        // its 18 keyframes: in frames.json (a second apart, made small) and frames.bin, in the same order
+        // of its 18 keyframes, one every 2 s: in frames.json (made small) and frames.bin, in the same order
         let frames: Vec<crate::data::Frame> = serde_json::from_slice(&fs::read(done.join("frames.json")).unwrap()).unwrap();
-        assert_eq!(frames.len(), 18);
+        assert_eq!(frames.len(), 9);
         for (k, f) in frames.iter().enumerate() {
             assert_eq!(f.video, video);
-            assert!((f.time - k as f32).abs() < 0.2, "frame {k} at {}", f.time);
+            assert!((f.time - 2.0 * k as f32).abs() < 0.2, "frame {k} at {}", f.time);
             assert_eq!((f.width, f.height), (256, 144));
             assert!(done.join(&f.file).exists(), "{}", f.file);
         }
-        assert_eq!(fs::metadata(done.join("frames.bin")).unwrap().len() as usize, 18 * DIM * 2);
-        assert_eq!(fs::read_dir(poster.parent().unwrap()).unwrap().count(), 19, "the poster and the frames, nothing else");
+        assert_eq!(fs::metadata(done.join("frames.bin")).unwrap().len() as usize, 9 * DIM * 2);
+        assert_eq!(fs::read_dir(poster.parent().unwrap()).unwrap().count(), 10, "the poster and the frames, nothing else");
         // the map opens with them, and a search finds the video by its best frame and shows that frame
         let data = crate::data::MapData::load(&done, &crate::data::Progress::default()).unwrap();
-        assert_eq!(data.pictures(), 7 + 18);
-        let vectors = crate::search::Vectors::open(&done, 7, 18, DIM).unwrap();
+        assert_eq!(data.pictures(), 7 + 9);
+        let vectors = crate::search::Vectors::open(&done, 7, 9, DIM).unwrap();
         let frame: Vec<f32> = fs::read(done.join("frames.bin")).unwrap()[3 * DIM * 2..4 * DIM * 2].chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();
         let mut scores = vectors.cosines(&frame);
         let shown = crate::search::best_frames(&mut scores, &vectors.frame_cosines(&frame), &data.frames);
-        assert!(scores[video] > 0.99, "frame 3 against itself: {}", scores[video]);
+        assert!(scores[video] > 0.99, "frame 3 (6 s) against itself: {}", scores[video]);
         assert!(shown[video] >= 7 && data.frames[shown[video] - 7].time < 12.0, "a frame of the test pattern, not of the bars: {}", shown[video]);
         fs::remove_dir_all(&temp).unwrap();
     }

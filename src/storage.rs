@@ -146,7 +146,7 @@ mod tests {
         std::fs::write(dir.join("frames.json"), vec![0u8; 3]).unwrap();
         std::fs::create_dir_all(dir.join("frames/000000")).unwrap();
         std::fs::write(dir.join("frames/000000/poster.jpg"), vec![0u8; 60]).unwrap();
-        std::fs::write(dir.join("frames/000000/001.jpg"), vec![0u8; 20]).unwrap();
+        std::fs::write(dir.join("frames/000000/000001.jpg"), vec![0u8; 20]).unwrap();
         let s = measure(&dir);
         assert_eq!((s.photos, s.linked, s.pictures, s.frames, s.vectors, s.layout, s.other), (500, 1000, 300, 80, 240, 18, 7));
         assert_eq!(s.total(), 1145);
