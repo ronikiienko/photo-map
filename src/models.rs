@@ -324,14 +324,13 @@ mod tests {
             }
             let hub = hub.get_or_insert_with(|| test_hub_with(id)).clone();
             let dir = root.join("maps").join(format!("{map}.photomap"));
-            let photos: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(dir.join("photos.json")).unwrap()).unwrap();
-            let stored = std::fs::read(dir.join("embeddings.bin")).unwrap();
+            let photos: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(dir.join("items.json")).unwrap()).unwrap();
+            let stored = std::fs::read(dir.join("look.bin")).unwrap();
             let rows: Vec<usize> = (0..photos.len()).step_by(photos.len() / 24).take(24).collect();
             let prepared: Vec<_> = rows
                 .iter()
                 .map(|&r| {
-                    let source = std::path::PathBuf::from(photos[r]["source"].as_str().unwrap());
-                    let path = if source.exists() { source } else { dir.join(photos[r]["file"].as_str().unwrap()) };
+                    let path = std::path::PathBuf::from(photos[r]["source"].as_str().unwrap());
                     spec.prepare(&crate::photo::load_for(&path, |w, h| spec.longest_side_needed(w, h)).unwrap()).unwrap()
                 })
                 .collect();

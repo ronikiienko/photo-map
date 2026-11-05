@@ -1,4 +1,4 @@
-//! Photo map: a fast viewer for map bundles made in Python (see data.rs): every photo at its map position,
+//! Photo map: makes maps of photo collections (build.rs) and shows them (a map's files: data.rs): every photo at its map position,
 //! similar photos close together, region names as you zoom.
 //!     photo-map [bundle]      default: the one opened last in maps/
 
@@ -75,7 +75,7 @@ const PHOTO_WORLD_DEFAULT: f32 = 4.0; // before a map is open
 /// Squares never shrink below this many pixels, so far-out photos don't vanish.
 const MIN_PX: f32 = 1.0;
 /// Region names show while their region's spread is between these sizes on screen (points), fading in and out.
-/// Region names on the map (region_names.json, else regions.json).
+/// Region names on the map (regions.json).
 const SHOW_REGION_NAMES: bool = true;
 /// A photo's own caption above it once it is big on screen.
 const SHOW_PHOTO_CAPTIONS: bool = false;
@@ -689,7 +689,7 @@ impl Viewer {
         self.filter_edit = None;
         self.names = None;
         self.shown.clear();
-        let vectors = search::Vectors::open(&path, n, data.frames.len(), data.manifest.dim(), (data.sounds.len(), data.sound_model.as_ref().map_or(0, |m| m.1)));
+        let vectors = search::Vectors::open(&path, n, data.frames.len(), data.manifest.dim(), (data.sounds.len(), data.manifest.sound.as_ref().map_or(0, |s| s.dim)));
         // a map without its videos' sound is searched by look
         self.listening &= vectors.as_ref().is_some_and(|v| v.has_sound());
         let tree = tree::read(&path, n);
@@ -739,7 +739,7 @@ impl Viewer {
             hidden_mask: vec![false; n],
         });
         if !in_process {
-            self.status = "this map has no search vectors (embeddings.bin)".into();
+            self.status = "this map has no search vectors (look.bin)".into();
         }
     }
 
@@ -852,7 +852,7 @@ impl Viewer {
         use home::Action;
         match action {
             Action::Open(path) => self.open(path),
-            Action::Create { name, sources, every, model, copy_photos } => match build::create(self.library.dir(), &name, &sources, every, &model, copy_photos) {
+            Action::Create { name, sources, every, model } => match build::create(self.library.dir(), &name, &sources, every, &model) {
                 Ok(dir) => {
                     self.library.refresh();
                     self.queue.push(dir);
@@ -1102,7 +1102,7 @@ impl Viewer {
             self.shown.clear();
             self.status.clear();
         } else if m.vectors.is_none() {
-            self.status = "this map has no search vectors (embeddings.bin)".into();
+            self.status = "this map has no search vectors (look.bin)".into();
         } else if self.listening {
             // by sound: words only (switching to it takes photos out of the search)
             let spec = models::sound();
@@ -1177,7 +1177,7 @@ impl Viewer {
             return;
         }
         if m.vectors.is_none() {
-            self.status = "this map has no vectors (embeddings.bin) to arrange the photos by".into();
+            self.status = "this map has no vectors (look.bin) to arrange the photos by".into();
             return;
         }
         if let Some(why) = self.engine.failed() {
@@ -2415,7 +2415,7 @@ impl Viewer {
         });
         for i in visible.into_iter().take(200) {
             let photo = &m.data.photos[i];
-            let text = (if photo.caption.trim().is_empty() { &photo.title } else { &photo.caption }).trim().to_string();
+            let text = photo.title.trim().to_string();
             // while a search is showing: the photo's similarity to it first, in the colour of its match (grey if it is no match)
             let score = m.sims.get(i).map(|&sim| (sim, m.flags[i]));
             if text.is_empty() && score.is_none() {
@@ -2551,8 +2551,7 @@ impl Viewer {
 
         if let (Some((photo, picture, copy, at)), Some(m)) = (self.menu, &self.map) {
             let file = files::original(&m.data, photo);
-            let source = &m.data.photos[photo].source;
-            let file_tip = if file.as_os_str() == source.as_str() || source.is_empty() { file.display().to_string() } else { format!("{source} is not there any more: the map's own copy, {}", file.display()) };
+            let file_tip = file.display().to_string();
             let path = m.data.picture_path(picture);
             let menu = mapui::PhotoMenu {
                 photo,
@@ -2770,7 +2769,7 @@ fn common_root<'a>(mut paths: impl Iterator<Item = &'a str>) -> usize {
 fn find_photo(data: &data::MapData, path: &std::path::Path) -> Option<usize> {
     let rel = path.strip_prefix(&data.bundle).ok();
     let in_map = |file: &str| rel.is_some_and(|r| r == std::path::Path::new(file));
-    let photo = data.photos.iter().position(|p| if p.file.is_empty() { std::path::Path::new(&p.source) == path } else { in_map(&p.file) });
+    let photo = data.photos.iter().enumerate().position(|(i, p)| std::path::Path::new(&p.source) == path || (p.video.is_some() && data.path(i) == path));
     // a video's frame (searched with from a match beside the world) is found as its video
     photo.or_else(|| data.frames.iter().find(|f| in_map(&f.file)).map(|f| f.video))
 }

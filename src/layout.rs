@@ -320,9 +320,9 @@ mod compare {
     #[ignore]
     fn layout_of_a_real_map() {
         let bundle = crate::data_root().join(std::env::var("MAP").unwrap_or("maps/flickr30k.photomap".into()));
-        let raw = std::fs::read(bundle.join("embeddings.bin")).unwrap();
-        let v: Vec<f32> = raw.chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();
-        let n = v.len() / 768;
+        let n = crate::data::MapData::load(&bundle, &crate::data::Progress::default()).unwrap().n();
+        let raw = std::fs::read(bundle.join("look.bin")).unwrap();
+        let v: Vec<f32> = raw[..n * 768 * 2].chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();
         let vectors = Array2::from_shape_vec((n, 768), v).unwrap();
         let started = std::time::Instant::now();
         let last = std::sync::Mutex::new(String::new());

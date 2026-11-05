@@ -1,10 +1,10 @@
-//! Vectors that are already made. Every finished map keeps its photos' vectors (embeddings.bin) and where each photo came from
-//! (the full path, in photos.json), so a new build can look a photo up there instead of embedding it again. Nothing is stored
-//! for this: the maps are the cache.
+//! Vectors that are already made. Every finished map keeps its photos' vectors (look.bin) and where each photo came from (the full
+//! path, in items.json), so a new build can look a photo up there instead of embedding it again. Nothing is stored for this: the
+//! maps are the cache.
 //!
-//! A vector is reused when the same file is in an earlier map that holds plain image vectors from the same model ("input":
-//! "image" in its manifest), and the file has not been changed since that map was started. Vectors of another model are never
-//! reused, however alike the maps are: they would put the photo in the wrong place.
+//! A vector is reused when the same file is in an earlier map made with the same model, and the file has not been changed since
+//! that map was started. Vectors of another model are never reused, however alike the maps are: they would put the photo in the
+//! wrong place. Videos are not looked up (a build needs their frames' vectors too).
 
 use crate::build::time_text;
 use memmap2::Mmap;
@@ -34,24 +34,16 @@ pub struct Found {
     index: HashMap<PathBuf, Hit>,
 }
 
+/// What is read of an item.
 #[derive(Deserialize)]
-struct Photo {
-    #[serde(default)]
+struct Item {
     source: String,
-}
-
-#[derive(Deserialize)]
-struct Manifest {
     #[serde(default)]
-    created: String,
-    #[serde(default)]
-    photos: usize,
-    #[serde(default)]
-    embedding: serde_json::Value,
+    video: Option<serde::de::IgnoredAny>,
 }
 
 impl Found {
-    /// Look in the finished maps in `maps` for the photos at the paths in `wanted`: one pass over each map's photos.json (the vectors
+    /// Look in the finished maps in `maps` for the photos at the paths in `wanted`: one pass over each map's items.json (the vectors
     /// are mapped, not read). Only the wanted paths are kept, so what is held is the size of the build, not of all the maps.
     pub fn open(maps: &Path, wanted: &HashSet<PathBuf>, model: &str, dim: usize) -> Self {
         let mut found = Self { model: model.to_string(), dim, maps: Vec::new(), index: HashMap::new() };
@@ -73,17 +65,17 @@ impl Found {
 
     fn add(&mut self, dir: &Path, wanted: &HashSet<PathBuf>) {
         let Some(manifest) = read_manifest(dir, &self.model, self.dim) else { return };
-        let Ok(photos) = std::fs::read(dir.join("photos.json")).map_err(drop).and_then(|b| serde_json::from_slice::<Vec<Photo>>(&b).map_err(drop)) else { return };
-        let Ok(file) = std::fs::File::open(dir.join("embeddings.bin")) else { return };
+        let Ok(items) = std::fs::read(dir.join("items.json")).map_err(drop).and_then(|b| serde_json::from_slice::<Vec<Item>>(&b).map_err(drop)) else { return };
+        let Ok(file) = std::fs::File::open(dir.join("look.bin")) else { return };
         let Ok(vectors) = (unsafe { Mmap::map(&file) }) else { return };
-        if photos.len() != manifest.photos || vectors.len() != photos.len() * self.dim * 2 {
+        if items.len() != manifest.photos || vectors.len() < items.len() * self.dim * 2 {
             return;
         }
         let map = self.maps.len() as u32;
         self.maps.push(Earlier { vectors, created: manifest.created });
-        for (row, photo) in photos.iter().enumerate() {
-            let path = Path::new(&photo.source);
-            if wanted.contains(path) {
+        for (row, item) in items.iter().enumerate() {
+            let path = Path::new(&item.source);
+            if item.video.is_none() && wanted.contains(path) {
                 self.index.insert(path.to_path_buf(), Hit { map, row: row as u32 });
             }
         }
@@ -107,10 +99,9 @@ impl Found {
     }
 }
 
-fn read_manifest(dir: &Path, model: &str, dim: usize) -> Option<Manifest> {
-    let manifest: Manifest = serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
-    let e = &manifest.embedding;
-    (e["model"] == model && e["dim"] == dim && e["input"] == "image").then_some(manifest)
+fn read_manifest(dir: &Path, model: &str, dim: usize) -> Option<crate::data::Manifest> {
+    let manifest: crate::data::Manifest = serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
+    (manifest.look.model == model && manifest.look.dim == dim).then_some(manifest)
 }
 
 #[cfg(test)]
@@ -121,10 +112,10 @@ mod tests {
     fn map(maps: &Path, name: &str, model: &str, dim: usize, source: &Path) {
         let dir = maps.join(format!("{name}.photomap"));
         std::fs::create_dir_all(&dir).unwrap();
-        let manifest = serde_json::json!({ "name": name, "created": "2030-01-01 00:00", "photos": 1, "embedding": { "model": model, "dim": dim, "input": "image" } });
+        let manifest = serde_json::json!({ "name": name, "created": "2030-01-01 00:00", "photos": 1, "videos": 0, "photo_side": 1.0, "look": { "model": model, "dim": dim } });
         std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
-        std::fs::write(dir.join("photos.json"), serde_json::json!([{ "source": source }]).to_string()).unwrap();
-        std::fs::write(dir.join("embeddings.bin"), vec![1u8; dim * 2]).unwrap();
+        std::fs::write(dir.join("items.json"), serde_json::json!([{ "source": source, "width": 1, "height": 1 }]).to_string()).unwrap();
+        std::fs::write(dir.join("look.bin"), vec![1u8; dim * 2]).unwrap();
     }
 
     /// Vectors of one model are never found for another, even for the same file in a map of the right size.

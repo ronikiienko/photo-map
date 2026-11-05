@@ -79,7 +79,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                         }
                         Engine::NotSearchable => {
                             theme::dot(ui, theme::MUTED);
-                            ui.label(theme::muted("not searchable")).on_hover_text("this map has no embeddings.bin of the right size");
+                            ui.label(theme::muted("not searchable")).on_hover_text("this map has no look.bin of the right size");
                         }
                         Engine::Ready => {
                             let (rect, dot) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());

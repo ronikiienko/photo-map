@@ -300,8 +300,8 @@ mod tests {
 
     /// A photo of this size (a video: its own size, its poster 1024 px wide), with these facts.
     fn photo(facts: Option<crate::data::Facts>, video: Option<(u32, u32)>, size: (u32, u32)) -> crate::data::Photo {
-        let video = video.map(|(w, h)| serde_json::json!({ "duration": 10.0, "width": w, "height": h }));
-        serde_json::from_value(serde_json::json!({ "file": "", "width": size.0, "height": size.1, "title": "a", "facts": facts, "video": video })).unwrap()
+        let video = video.map(|(width, height)| crate::data::Video { duration: 10.0, width, height });
+        crate::data::Photo { source: String::new(), title: "a".into(), width: size.0, height: size.1, facts: facts.map(Box::new), video }
     }
 
     #[test]

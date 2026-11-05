@@ -1,20 +1,19 @@
-//! A map bundle, plus a spatial grid for "which photo is under the mouse". Bundles are made in Python
-//! (src/photomap.py: maps/<name>.photomap/):
-//!     manifest.json   name, photo count (videos included) and how many are videos
-//!     photos.json     per photo: file (originals/NNNNNN.ext if copied into the map, else empty), source, width, height, title, caption (optional), meta (any strings, for people to read),
-//!                     facts (optional: camera, taken, place from its EXIF, for search's camera: date: place:)
-//!     originals/      the photos copied into the map (maps made before kept links to all of them here); photo i = position i in photos.json
-//!     layout.bin      per photo: x, y (float32, 0 ... WORLD)
-//!     regions.json    optional: named regions per zoom level (Label below); region_names.json, if there, is used instead
-//!     embeddings.bin  per photo: float16 vector of the picture (search and Groups)
-//!     tree.bin        per photo: its parent in the tree that paths between photos follow (tree.rs)
-//!     frames.json     if it has videos: their frames (Frame below), in the order of frames.bin's rows
-//!     frames.bin      if it has videos: per frame, float16 vector (a search scores a video by its best frame)
-//!     frames/<n>/     a video's poster.jpg (its picture on the map) and its frames, small (shown for a search's matches)
-//!     sounds.json     if its videos were listened to (listen.rs): the sound model, and its windows (Sound below), in the order of
-//!                     sounds.bin's rows
-//!     sounds.bin      per window of a video's sound, float16 vector (a search by sound scores a video by its best window)
-//!     pages_bc7.bin   the baked levels (1 ... 32 px) of every picture: the photos', then the frames' (bake.rs)
+//! A map: maps/<name>.photomap/, made by build.rs. Its items are the photos and videos on it, in order (item i is row i of every
+//! per-item file); its pictures are everything with pixels: the items (a video's poster), then every video's frames, video after
+//! video (picture n + k is frame k).
+//!     manifest.json   name, when it was made, how many items (videos included) and videos, a photo's side on the map, and which
+//!                     model made each kind of vector (Manifest)
+//!     items.json      per item: where its file is, its size, what the file says about itself, and a video's length, frame times
+//!                     and sound windows (Item)
+//!     regions.json    named regions per zoom level (Regions)
+//!     look.bin        per picture: float16 vector (an item's places it, search and Groups; a video's is its poster frame's)
+//!     sound.bin       per window of the videos' sound (items' video.sound, video after video): float16 vector (listen.rs)
+//!     layout.bin      per item: x, y (float32, 0 ... WORLD)
+//!     tree.bin        per item: its parent in the tree that paths between photos follow (tree.rs)
+//!     pages.bin       per picture: its baked levels 1 ... 32 px (bake.rs)
+//!     cover.png       the map's picture on the Maps page
+//!     frames/<i>/     video i's poster.jpg (its picture on the map, POSTER_SIDE) and its frames 0.jpg, 1.jpg... (FRAME_SIDE)
+//! A photo is read where it is (its source); nothing is stored that can be worked out (titles, poster and frame sizes, file names).
 
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
@@ -54,76 +53,81 @@ impl Progress {
 /// World coordinates run 0..WORLD on both axes.
 pub const WORLD: f32 = 10000.0;
 
-#[derive(Deserialize)]
+/// manifest.json.
+#[derive(Serialize, Deserialize)]
 pub struct Manifest {
     pub name: String,
+    /// "2026-10-13 21:40" (UTC).
+    pub created: String,
+    /// Items: photos and videos.
     pub photos: usize,
-    #[serde(default)]
-    embedding: Embedding,
-    /// A photo's longer side on the map, world units: set when the layout was spread (spread) while the map was made. A map made
-    /// before has its photos spread when it is opened.
-    #[serde(default)]
-    photo_side: Option<f32>,
+    pub videos: usize,
+    /// A photo's longer side on the map, world units: the layout was spread to it (spread).
+    pub photo_side: f32,
+    /// The model of look.bin's vectors (the map is searched with it).
+    pub look: Vectors,
+    /// The model of sound.bin's, if any video was listened to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<Vectors>,
 }
 
-/// What the vectors of a map are: which model made them, and how many numbers each has. A map without it (made before models could
-/// be chosen) was made with the default.
-#[derive(Deserialize)]
-struct Embedding {
-    #[serde(default = "default_model")]
-    model: String,
-    #[serde(default = "default_dim")]
-    dim: usize,
-}
-
-impl Default for Embedding {
-    fn default() -> Self {
-        Self { model: default_model(), dim: default_dim() }
-    }
-}
-
-fn default_model() -> String {
-    crate::models::DEFAULT.to_string()
-}
-
-fn default_dim() -> usize {
-    crate::models::spec(crate::models::DEFAULT).map_or(768, |s| s.dim)
+/// Which model made a kind of vectors, and how many numbers each has.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Vectors {
+    pub model: String,
+    pub dim: usize,
 }
 
 impl Manifest {
     /// The id of the model the map was made with (and has to be searched with).
     pub fn model(&self) -> &str {
-        &self.embedding.model
+        &self.look.model
     }
 
     /// How many numbers each vector of the map has.
     pub fn dim(&self) -> usize {
-        self.embedding.dim
+        self.look.dim
     }
 }
 
-#[derive(Deserialize)]
-pub struct Photo {
-    /// Path inside the bundle (originals/NNNNNN.ext) if the photo was copied into the map; empty: it is read at `source`.
-    pub file: String,
-    /// The full path of the file the photo was made from: where it is read from if it wasn't copied. Builds use it to find vectors
-    /// already made for the same file (reuse.rs).
-    #[serde(default)]
+/// An item of items.json: a photo or a video.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct Item {
+    /// The full path of its file: read from there (and builds look for vectors made before by it: reuse.rs).
     pub source: String,
+    /// Its size as it is shown (turned upright), px; a video's own.
     pub width: u32,
     pub height: u32,
-    pub title: String,
-    /// Shown above the photo when zoomed in (never searched: search.rs); empty if the photo has none.
-    #[serde(default)]
-    pub caption: String,
-    /// Whatever the image file said about itself: description, date taken, camera, location...
-    #[serde(default)]
-    pub meta: serde_json::Map<String, serde_json::Value>,
-    /// What its EXIF says that search can pick by (boxed: most photos of a big map have none, and this keeps them small).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facts: Option<Box<Facts>>,
-    /// A video: how long it is and its own size (`width` and `height` above are its poster's). None: a photo.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<Clip>,
+}
+
+/// What items.json says of a video.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Default)]
+pub struct Clip {
+    /// Seconds.
+    pub duration: f32,
+    /// Its frames' times (seconds from the start), in order: frame k is frames/<i>/<k>.jpg.
+    pub times: Vec<f32>,
+    /// Where its sound windows start (seconds; each lasts listen::WINDOW), in order: their vectors are in sound.bin. None: no sound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sound: Vec<f32>,
+}
+
+/// A photo or a video as the app holds it (from items.json).
+pub struct Photo {
+    /// The full path of its file.
+    pub source: String,
+    /// Its file's name without the extension.
+    pub title: String,
+    /// The size of the picture it is drawn from, px: a video's poster's (`video` has its own).
+    pub width: u32,
+    pub height: u32,
+    /// What its EXIF says that search can pick by (boxed: most photos of a big map have none, and this keeps them small).
+    pub facts: Option<Box<Facts>>,
+    /// A video: how long it is and its own size. None: a photo.
     pub video: Option<Video>,
 }
 
@@ -161,18 +165,57 @@ pub struct Facts {
     pub exposure: String,
 }
 
-impl Photo {
-    /// Where the photo is read from: its copy in the map `bundle`, else where it came from.
-    pub fn path(&self, bundle: &Path) -> PathBuf {
-        if self.file.is_empty() { PathBuf::from(&self.source) } else { bundle.join(&self.file) }
+/// A file's name without its extension.
+pub fn title(source: &str) -> String {
+    Path::new(source).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Where item `i` is drawn from: a photo's own file, a video's poster in the map.
+pub fn item_path(bundle: &Path, i: usize, item: &Item) -> PathBuf {
+    if item.video.is_some() { poster(bundle, i) } else { PathBuf::from(&item.source) }
+}
+
+/// Video `i`'s poster.
+pub fn poster(bundle: &Path, i: usize) -> PathBuf {
+    bundle.join(format!("frames/{i}/poster.jpg"))
+}
+
+/// Video `i`'s frame `k`, in the map.
+pub fn frame_file(i: usize, k: usize) -> String {
+    format!("frames/{i}/{k}.jpg")
+}
+
+/// A poster's longer side at most (px): a video's frames are taken out at this size (build::video_frames), the poster is one of them.
+pub const POSTER_SIDE: u32 = 1024;
+
+/// The size of a video's poster (and of its frames as they are taken out), from the video's: ffmpeg's scale in video_frames, the
+/// longer side at most POSTER_SIDE, the other kept even.
+pub fn poster_size(width: u32, height: u32) -> (u32, u32) {
+    let even = |v: f64| ((v / 2.0).round() as u32 * 2).max(2);
+    if width >= height {
+        let w = width.min(POSTER_SIDE);
+        (w, even(height as f64 * w as f64 / width.max(1) as f64))
+    } else {
+        let h = height.min(POSTER_SIDE);
+        (even(width as f64 * h as f64 / height.max(1) as f64), h)
     }
 }
 
-/// A frame of a video (frames.json): kept small (FRAME_SIDE), shown beside the world when it is a search's best match in its
-/// video. Pictures are numbered photos first, then frames: frame k is picture n + k.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// The size of a video's frames as kept in the map, from its poster's: made small as photo::fit does.
+pub fn frame_size(poster: (u32, u32)) -> (u32, u32) {
+    let long = poster.0.max(poster.1);
+    if long <= FRAME_SIDE {
+        return poster;
+    }
+    let s = FRAME_SIDE as f32 / long as f32;
+    (((poster.0 as f32 * s).round() as u32).max(1), ((poster.1 as f32 * s).round() as u32).max(1))
+}
+
+/// A frame of a video: kept small (FRAME_SIDE), shown beside the world when it is a search's best match in its video. It is
+/// picture n + k.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
-    /// The photo (the video) it is from.
+    /// The item (the video) it is from.
     pub video: usize,
     /// Seconds from the video's start.
     pub time: f32,
@@ -182,21 +225,13 @@ pub struct Frame {
     pub height: u32,
 }
 
-/// A 10 s window of a video's sound (sounds.json): searched by what is said and heard in it (listen.rs).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+/// A 10 s window of a video's sound: searched by what is said and heard in it (listen.rs).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sound {
-    /// The photo (the video) it is from.
+    /// The item (the video) it is from.
     pub video: usize,
     /// Where it starts, seconds from the video's start (it lasts listen::WINDOW).
     pub time: f32,
-}
-
-/// sounds.json.
-#[derive(Deserialize)]
-pub struct Sounds {
-    pub model: String,
-    pub dim: usize,
-    pub windows: Vec<Sound>,
 }
 
 /// The picture each sound window is shown by: its video's frame nearest the window's middle (picture n + k), or the video itself.
@@ -249,10 +284,9 @@ pub struct MapData {
     pub photos: Vec<Photo>,
     /// The videos' frames (none if the map has no videos).
     pub frames: Vec<Frame>,
-    /// The windows of the videos' sound (none if they weren't listened to), the model that made their vectors and how many numbers
-    /// each has, and the picture each window is shown by: its video's frame nearest its middle (or the video's poster).
+    /// The windows of the videos' sound (none if they weren't listened to: the manifest has their model), and the picture each
+    /// window is shown by: its video's frame nearest its middle (or the video's poster).
     pub sounds: Vec<Sound>,
-    pub sound_model: Option<(String, usize)>,
     pub sound_pictures: Vec<usize>,
     pub points: Vec<Point>,
     /// How big each photo is drawn, times `side` (the Groups view: the most typical photos biggest); empty: all 1.
@@ -262,7 +296,7 @@ pub struct MapData {
     /// The baked levels as BC7 pages (bake.rs): 1 ... 16 px uploaded to the GPU as they are, 32 px copied out as needed (stream.rs).
     pub pages: std::sync::Arc<Mmap>,
     pub grid: Grid,
-    /// Empty if the bundle has no regions.json.
+    /// Empty if the map has no regions.json.
     pub regions: Regions,
 }
 
@@ -271,41 +305,46 @@ impl MapData {
         progress.stage("reading the map's files", 0);
         let read = |name: &str| std::fs::read(bundle.join(name));
         let manifest: Manifest = serde_json::from_slice(&read("manifest.json")?)?;
-        let photos: Vec<Photo> = serde_json::from_slice(&read("photos.json")?)?;
+        let items: Vec<Item> = serde_json::from_slice(&read("items.json")?)?;
         let points: Vec<Point> = bytemuck::pod_collect_to_vec(&read("layout.bin")?);
         let n = manifest.photos;
-        if photos.len() != n || points.len() != n {
-            return Err(std::io::Error::other("bundle files don't match"));
+        if items.len() != n || points.len() != n {
+            return Err(std::io::Error::other("the map's files don't match"));
         }
-        let frames: Vec<Frame> = match read("frames.json") {
-            Ok(raw) => serde_json::from_slice(&raw)?,
-            Err(_) => Vec::new(),
-        };
-        if frames.iter().any(|f| f.video >= n) {
-            return Err(std::io::Error::other("frames.json doesn't match the photos"));
-        }
-        let (sounds, sound_model) = match read("sounds.json").ok().and_then(|raw| serde_json::from_slice::<Sounds>(&raw).ok()) {
-            Some(s) if s.windows.iter().all(|w| w.video < n) => (s.windows, Some((s.model, s.dim))),
-            _ => (Vec::new(), None),
-        };
+        // the frames and the sound windows, video after video; a sound without a model (none in the manifest) isn't searched
+        let (mut frames, mut sounds) = (Vec::new(), Vec::new());
+        let photos: Vec<Photo> = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let title = title(&item.source);
+                let (width, height, video) = match item.video {
+                    Some(clip) => {
+                        let poster = poster_size(item.width, item.height);
+                        let (fw, fh) = frame_size(poster);
+                        frames.extend(clip.times.iter().enumerate().map(|(k, &time)| Frame { video: i, time, file: frame_file(i, k), width: fw, height: fh }));
+                        if manifest.sound.is_some() {
+                            sounds.extend(clip.sound.iter().map(|&time| Sound { video: i, time }));
+                        }
+                        (poster.0, poster.1, Some(Video { duration: clip.duration, width: item.width, height: item.height }))
+                    }
+                    None => (item.width, item.height, None),
+                };
+                Photo { source: item.source, title, width, height, facts: item.facts, video }
+            })
+            .collect();
         let sound_pictures = sound_pictures(&sounds, &frames, n);
-        let pages = unsafe { Mmap::map(&File::open(bundle.join("pages_bc7.bin"))?)? };
+        let pages = unsafe { Mmap::map(&File::open(bundle.join("pages.bin"))?)? };
         if pages.len() != crate::pages::baked_bytes(n + frames.len()) {
-            return Err(std::io::Error::other("pages_bc7.bin is not the size of the pictures"));
+            return Err(std::io::Error::other("pages.bin is not the size of the pictures"));
         }
-        let (side, points) = match manifest.photo_side {
-            Some(side) => (side, points),
-            None => {
-                let side = crate::median_neighbour_distance(&points);
-                (side, spread(&points, side))
-            }
-        };
         let grid = Grid::new(&points);
-        let mut regions: Regions = read("region_names.json").or_else(|_| read("regions.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut regions: Regions = read("regions.json").ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for level in &mut regions.levels {
             level.sort_by(|a, b| b.photos.cmp(&a.photos));
         }
-        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, frames, sounds, sound_model, sound_pictures, points, sizes: Vec::new(), side, pages: std::sync::Arc::new(pages), grid, regions })
+        let side = manifest.photo_side;
+        Ok(Self { bundle: bundle.to_path_buf(), manifest, photos, frames, sounds, sound_pictures, points, sizes: Vec::new(), side, pages: std::sync::Arc::new(pages), grid, regions })
     }
 
     pub fn n(&self) -> usize {
@@ -329,8 +368,10 @@ impl MapData {
         self.sizes.iter().copied().fold(1.0, f32::max)
     }
 
+    /// Where photo `id` is drawn from: its file, or a video's poster.
     pub fn path(&self, id: usize) -> PathBuf {
-        self.photos[id].path(&self.bundle)
+        let p = &self.photos[id];
+        if p.video.is_some() { poster(&self.bundle, id) } else { PathBuf::from(&p.source) }
     }
 
     /// Photos and frames: everything with pixels (pages.rs, stream.rs).

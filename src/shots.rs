@@ -54,10 +54,10 @@ pub fn app_folder(name: &str, maps: &[(&str, usize, usize, &str)]) -> PathBuf {
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::File::create(path).unwrap().set_len(bytes).unwrap();
             };
-            sized("pages_bc7.bin", *photos as u64 * 2_300_000 / 1_000);
-            sized("embeddings.bin", *photos as u64 * 1536);
-            sized("frames/000000/poster.jpg", *videos as u64 * 180_000);
-            sized("sounds.bin", *videos as u64 * 18 * 1536);
+            sized("pages.bin", *photos as u64 * 2_300_000 / 1_000);
+            sized("look.bin", *photos as u64 * 1536);
+            sized("frames/0/poster.jpg", *videos as u64 * 180_000);
+            sized("sound.bin", *videos as u64 * 18 * 1536);
             sized("layout.bin", *photos as u64 * 16);
         }
     }
@@ -68,7 +68,7 @@ pub fn app_folder(name: &str, maps: &[(&str, usize, usize, &str)]) -> PathBuf {
 /// the clusters and cameras and dates for filters, baked as the app would (bake.rs). No vectors: it can't be searched by words.
 pub fn map_bundle(maps: &Path, name: &str, n: usize) -> PathBuf {
     let bundle = maps.join(format!("{name}.photomap"));
-    std::fs::create_dir_all(bundle.join("originals")).unwrap();
+    std::fs::create_dir_all(bundle.join("photos")).unwrap();
     let clusters = [("beach", (230u8, 200u8, 120u8)), ("forest", (60, 140, 70)), ("city at night", (60, 70, 140)), ("snow", (225, 230, 240)), ("sunset", (230, 110, 60)), ("documents", (200, 200, 190))];
     let centres = [(2800.0, 3000.0), (6500.0, 2600.0), (4600.0, 5200.0), (2600.0, 7000.0), (7200.0, 6600.0), (5000.0, 8200.0)];
     // the same photos every run: a fixed little random walk
@@ -77,7 +77,8 @@ pub fn map_bundle(maps: &Path, name: &str, n: usize) -> PathBuf {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (seed >> 33) as f32 / (1u64 << 31) as f32
     };
-    let mut photos = Vec::new();
+    let mut items = Vec::new();
+    let mut files = Vec::new();
     let mut points: Vec<f32> = Vec::new();
     for i in 0..n {
         let c = i % clusters.len();
@@ -89,29 +90,43 @@ pub fn map_bundle(maps: &Path, name: &str, n: usize) -> PathBuf {
             let t = 0.75 + 0.25 * ((x as f32 / w as f32) + (y as f32 / h as f32)) / 2.0;
             image::Rgba([f(r, t), f(g, t), f(b, t), 255])
         });
-        let file = format!("originals/{i:06}.png");
-        img.save(bundle.join(&file)).unwrap();
         let (a, d) = (rand() * std::f32::consts::TAU, 900.0 * rand().sqrt());
         points.extend([centres[c].0 + d * a.cos(), centres[c].1 + d * a.sin()]);
         let camera = ["Google Pixel 3", "Xiaomi Redmi Note 7", "Canon EOS 550D"][i % 3];
         let taken = format!("{}-{:02}-{:02} 12:00", 2016 + i % 5, 1 + i % 12, 1 + i % 28);
-        let mut photo = serde_json::json!({ "file": file, "width": w, "height": h, "title": format!("{label} {i}"), "facts": { "camera": camera, "taken": taken } });
-        if i % 7 == 0 || i == 200 {
-            photo["video"] = serde_json::json!({ "duration": 5.0 + (i * 37 % 300) as f32, "width": w * 40, "height": h * 40 }); // a video (its poster)
-        }
-        photos.push(photo);
+        let facts = Some(Box::new(crate::data::Facts { camera: camera.into(), taken, ..Default::default() }));
+        // a video (no frames): its poster in the map, at the size a poster of it has
+        let item = if i % 7 == 0 || i == 200 {
+            let (pw, ph) = crate::data::poster_size(w * 40, h * 40);
+            let poster = crate::data::poster(&bundle, i);
+            std::fs::create_dir_all(poster.parent().unwrap()).unwrap();
+            image::DynamicImage::ImageRgba8(image::imageops::resize(&img, pw, ph, image::imageops::FilterType::Triangle)).to_rgb8().save(&poster).unwrap();
+            files.push(poster);
+            let clip = crate::data::Clip { duration: 5.0 + (i * 37 % 300) as f32, ..Default::default() };
+            crate::data::Item { source: format!("/videos/{label} {i}.mp4"), width: w * 40, height: h * 40, facts, video: Some(clip) }
+        } else {
+            let file = bundle.join(format!("photos/{label} {i}.png"));
+            img.save(&file).unwrap();
+            let item = crate::data::Item { source: file.to_string_lossy().into_owned(), width: w, height: h, facts, video: None };
+            files.push(file);
+            item
+        };
+        items.push(item);
     }
-    let manifest = serde_json::json!({ "name": name, "photos": n, "created": "2026-11-03 12:00" });
-    std::fs::write(bundle.join("manifest.json"), manifest.to_string()).unwrap();
-    std::fs::write(bundle.join("photos.json"), serde_json::Value::from(photos).to_string()).unwrap();
-    std::fs::write(bundle.join("layout.bin"), bytemuck::cast_slice::<f32, u8>(&points)).unwrap();
+    let videos = items.iter().filter(|i| i.video.is_some()).count();
+    let look = crate::data::Vectors { model: crate::models::DEFAULT.into(), dim: 768 };
+    // spread as a build does (data::spread)
+    let side = crate::median_neighbour_distance(bytemuck::cast_slice(&points));
+    let points = crate::data::spread(bytemuck::cast_slice(&points), side);
+    let manifest = crate::data::Manifest { name: name.into(), created: "2026-11-03 12:00".into(), photos: n, videos, photo_side: side, look, sound: None };
+    std::fs::write(bundle.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    std::fs::write(bundle.join("items.json"), serde_json::to_vec(&items).unwrap()).unwrap();
+    std::fs::write(bundle.join("layout.bin"), bytemuck::cast_slice::<crate::data::Point, u8>(&points)).unwrap();
     // two levels of names: the clusters, and halves of them
     let label = |name: &str, (x, y): (f32, f32), spread: f32, photos: usize| serde_json::json!({ "name": name, "x": x, "y": y, "spread": spread, "photos": photos });
     let coarse: Vec<_> = clusters.iter().zip(centres).map(|((name, _), at)| label(name, at, 900.0, n / 6)).collect();
     let fine: Vec<_> = clusters.iter().zip(centres).flat_map(|((name, _), (x, y))| [label(&format!("{name}, left"), (x - 400.0, y), 350.0, n / 12), label(&format!("{name}, right"), (x + 400.0, y), 350.0, n / 12)]).collect();
-    std::fs::write(bundle.join("region_names.json"), serde_json::json!({ "levels": [coarse, fine] }).to_string()).unwrap();
-    let read: Vec<crate::data::Photo> = serde_json::from_slice(&std::fs::read(bundle.join("photos.json")).unwrap()).unwrap();
-    let files: Vec<std::path::PathBuf> = read.iter().map(|p| p.path(&bundle)).collect();
+    std::fs::write(bundle.join("regions.json"), serde_json::json!({ "levels": [coarse, fine] }).to_string()).unwrap();
     crate::bake::bake(&bundle, &files, &crate::data::Progress::default()).unwrap();
     bundle
 }

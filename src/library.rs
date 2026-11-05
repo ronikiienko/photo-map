@@ -50,7 +50,7 @@ impl Library {
                     photos: manifest["photos"].as_u64()? as usize,
                     videos: manifest["videos"].as_u64().unwrap_or(0) as usize,
                     created: manifest["created"].as_str().unwrap_or_default().to_string(),
-                    model: manifest["embedding"]["model"].as_str().unwrap_or(crate::models::DEFAULT).to_string(),
+                    model: manifest["look"]["model"].as_str().unwrap_or(crate::models::DEFAULT).to_string(),
                 })
             })
             .collect();

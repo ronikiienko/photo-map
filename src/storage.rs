@@ -4,14 +4,6 @@ use std::path::Path;
 
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub struct Sizes {
-    /// The photos copied into the map.
-    pub photos: u64,
-    /// Photos that are links to the originals on the same disk: they take no space of their own.
-    pub linked: u64,
-    /// Photos on another disk that the map links to by path (symbolic links): they take no space here either.
-    pub elsewhere: u64,
-    /// Of those, how many can't be reached now (the disk is not plugged in, or the photo was moved).
-    pub unreachable: usize,
     pub pictures: u64,
     /// The videos' posters and small frames (frames/).
     pub frames: u64,
@@ -31,20 +23,19 @@ pub struct Part {
 }
 
 impl Sizes {
-    /// What the map adds to the disk (linked photos are not counted: they are the originals, here or on another disk).
+    /// What the map takes on disk (the photos are not in it: it reads them where they are).
     pub fn total(&self) -> u64 {
-        self.photos + self.pictures + self.frames + self.vectors + self.sounds + self.layout + self.other
+        self.pictures + self.frames + self.vectors + self.sounds + self.layout + self.other
     }
 
     /// The parts that take space, biggest first.
     pub fn parts(&self) -> Vec<Part> {
         let mut parts = vec![
-            Part { name: "Photos", bytes: self.photos, about: "Copies of the photos at full size, made because \"Copy the photos into the map\" was ticked: they stay sharp whatever happens to the originals." },
             Part { name: "Small pictures", bytes: self.pictures, about: "Tiny versions of every photo (1 to 32 pixels wide), compressed and kept ready. They are what you see when the map is zoomed out, and they are why the whole map is always visible at once." },
             Part { name: "Video frames", bytes: self.frames, about: "For each video, its poster (the picture it has on the map) and its keyframes, small (256 pixels): a search shows a video by the frame that matched best." },
             Part { name: "Photo vectors", bytes: self.vectors, about: "For each photo (and each frame of a video), 768 numbers that describe what it shows, made by the AI model. Photos with similar numbers look alike: this is what the layout and the search are built on." },
             Part { name: "Sound vectors", bytes: self.sounds, about: "For every 10 seconds of a video's sound, 768 numbers that describe what is said or heard in it, made by the sound model: this is what searching by sound is built on." },
-            Part { name: "Layout and names", bytes: self.layout, about: "Where each photo sits on the map, the named regions you see when zooming, and each photo's file name and size." },
+            Part { name: "Layout and names", bytes: self.layout, about: "Where each photo sits on the map, the named regions you see when zooming, and each photo's file, size and what it says about itself." },
             Part { name: "Other", bytes: self.other, about: "The cover picture shown on this page, and leftovers." },
         ];
         parts.retain(|p| p.bytes > 0);
@@ -53,7 +44,7 @@ impl Sizes {
     }
 }
 
-/// Add up a map's files. Walks the folder once; the originals are one stat per photo, so a big map takes a moment.
+/// Add up a map's files. Walks the folder once (the frames are one stat each).
 pub fn measure(map: &Path) -> Sizes {
     let mut sizes = Sizes::default();
     let Ok(entries) = std::fs::read_dir(map) else { return sizes };
@@ -61,22 +52,7 @@ pub fn measure(map: &Path) -> Sizes {
         let Ok(meta) = entry.metadata() else { continue };
         let name = entry.file_name().to_string_lossy().into_owned();
         if meta.is_dir() {
-            if name == "originals" {
-                for photo in std::fs::read_dir(entry.path()).into_iter().flatten().flatten() {
-                    // DirEntry::metadata doesn't follow a link by path: the link itself
-                    let Ok(m) = photo.metadata() else { continue };
-                    if m.is_symlink() {
-                        match std::fs::metadata(photo.path()) {
-                            Ok(target) => sizes.elsewhere += target.len(),
-                            Err(_) => sizes.unreachable += 1,
-                        }
-                    } else if links(&m) > 1 {
-                        sizes.linked += m.len();
-                    } else {
-                        sizes.photos += m.len();
-                    }
-                }
-            } else if name == "frames" {
+            if name == "frames" {
                 for video in std::fs::read_dir(entry.path()).into_iter().flatten().flatten() {
                     for f in std::fs::read_dir(video.path()).into_iter().flatten().flatten() {
                         sizes.frames += f.metadata().map_or(0, |m| m.len());
@@ -87,25 +63,14 @@ pub fn measure(map: &Path) -> Sizes {
         }
         let bytes = meta.len();
         match name.as_str() {
-            "pages_bc7.bin" => sizes.pictures += bytes,
-            "embeddings.bin" | "frames.bin" => sizes.vectors += bytes,
-            "sounds.bin" | "sounds.json" => sizes.sounds += bytes,
-            "layout.bin" | "tree.bin" | "photos.json" | "frames.json" | "manifest.json" => sizes.layout += bytes,
-            n if n.starts_with("regions") || n.starts_with("region_names") => sizes.layout += bytes,
+            "pages.bin" => sizes.pictures += bytes,
+            "look.bin" => sizes.vectors += bytes,
+            "sound.bin" => sizes.sounds += bytes,
+            "layout.bin" | "tree.bin" | "items.json" | "regions.json" | "manifest.json" => sizes.layout += bytes,
             _ => sizes.other += bytes,
         }
     }
     sizes
-}
-
-#[cfg(unix)]
-fn links(m: &std::fs::Metadata) -> u64 {
-    std::os::unix::fs::MetadataExt::nlink(m)
-}
-
-#[cfg(not(unix))]
-fn links(_: &std::fs::Metadata) -> u64 {
-    1
 }
 
 /// 1.2 GB, 340 MB, 12 KB.
@@ -129,39 +94,21 @@ mod tests {
     #[test]
     fn adds_up_the_files() {
         let dir = std::env::temp_dir().join(format!("photo-map-storage-test-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("originals")).unwrap();
-        std::fs::write(dir.join("originals/a.jpg"), vec![0u8; 1000]).unwrap();
-        std::fs::hard_link(dir.join("originals/a.jpg"), std::env::temp_dir().join(format!("photo-map-storage-test-{}.jpg", std::process::id()))).unwrap();
-        std::fs::write(dir.join("originals/b.jpg"), vec![0u8; 500]).unwrap();
-        let away = std::env::temp_dir().join(format!("photo-map-storage-test-{}-away.jpg", std::process::id()));
-        std::fs::write(&away, vec![0u8; 2000]).unwrap();
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&away, dir.join("originals/c.jpg")).unwrap();
-            std::os::unix::fs::symlink(dir.join("gone.jpg"), dir.join("originals/d.jpg")).unwrap();
-        }
-        std::fs::write(dir.join("pages_bc7.bin"), vec![0u8; 300]).unwrap();
-        std::fs::write(dir.join("embeddings.bin"), vec![0u8; 200]).unwrap();
+        std::fs::create_dir_all(dir.join("frames/3")).unwrap();
+        std::fs::write(dir.join("pages.bin"), vec![0u8; 300]).unwrap();
+        std::fs::write(dir.join("look.bin"), vec![0u8; 200]).unwrap();
         std::fs::write(dir.join("layout.bin"), vec![0u8; 10]).unwrap();
-        std::fs::write(dir.join("region_names.json"), vec![0u8; 5]).unwrap();
+        std::fs::write(dir.join("items.json"), vec![0u8; 3]).unwrap();
+        std::fs::write(dir.join("regions.json"), vec![0u8; 5]).unwrap();
         std::fs::write(dir.join("cover.png"), vec![0u8; 7]).unwrap();
-        // its sound
-        std::fs::write(dir.join("sounds.bin"), vec![0u8; 30]).unwrap();
-        std::fs::write(dir.join("sounds.json"), vec![0u8; 4]).unwrap();
-        // a video: its frames' vectors and list, its poster and frames
-        std::fs::write(dir.join("frames.bin"), vec![0u8; 40]).unwrap();
-        std::fs::write(dir.join("frames.json"), vec![0u8; 3]).unwrap();
-        std::fs::create_dir_all(dir.join("frames/000000")).unwrap();
-        std::fs::write(dir.join("frames/000000/poster.jpg"), vec![0u8; 60]).unwrap();
-        std::fs::write(dir.join("frames/000000/000001.jpg"), vec![0u8; 20]).unwrap();
+        std::fs::write(dir.join("sound.bin"), vec![0u8; 30]).unwrap();
+        // a video's poster and frames
+        std::fs::write(dir.join("frames/3/poster.jpg"), vec![0u8; 60]).unwrap();
+        std::fs::write(dir.join("frames/3/0.jpg"), vec![0u8; 20]).unwrap();
         let s = measure(&dir);
-        assert_eq!((s.photos, s.linked, s.pictures, s.frames, s.vectors, s.sounds, s.layout, s.other), (500, 1000, 300, 80, 240, 34, 18, 7));
-        assert_eq!(s.total(), 1179);
-        #[cfg(unix)]
-        assert_eq!((s.elsewhere, s.unreachable), (2000, 1));
-        std::fs::remove_file(&away).unwrap();
+        assert_eq!((s.pictures, s.frames, s.vectors, s.sounds, s.layout, s.other), (300, 80, 200, 30, 18, 7));
+        assert_eq!(s.total(), 635);
         assert_eq!(human(1_234_000_000), "1.2 GB");
         std::fs::remove_dir_all(&dir).unwrap();
-        std::fs::remove_file(std::env::temp_dir().join(format!("photo-map-storage-test-{}.jpg", std::process::id()))).unwrap();
     }
 }

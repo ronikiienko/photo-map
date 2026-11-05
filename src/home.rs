@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 pub enum Action {
     Open(PathBuf),
-    Create { name: String, sources: Vec<PathBuf>, every: usize, model: String, copy_photos: bool },
+    Create { name: String, sources: Vec<PathBuf>, every: usize, model: String },
     Pause(PathBuf),
     SetBackend(crate::backends::Backend),
     GetModel(String),
@@ -82,10 +82,8 @@ struct NewMap {
     photos: Option<usize>,
     /// How many of those are videos.
     videos: usize,
-    /// Some of the sources are on another disk (the note under the copy option says so).
+    /// Some of the sources are on another disk (the note under the count says so).
     other_disk: bool,
-    /// The photos are copied into the map instead of read where they are.
-    copy_photos: bool,
     /// Use every Nth photo.
     every: usize,
     /// The id of the model that will make the photos' vectors (models.rs).
@@ -140,7 +138,7 @@ impl Home {
     }
 
     pub fn open_new_map(&mut self) {
-        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, videos: 0, other_disk: false, copy_photos: false, every: 1, model: crate::models::DEFAULT.to_string() });
+        self.new_map = Some(NewMap { sources: Vec::new(), name: String::new(), name_edited: false, counted: String::new(), count: None, photos: None, videos: 0, other_disk: false, every: 1, model: crate::models::DEFAULT.to_string() });
     }
 
     pub fn set_drag_over(&mut self, over: bool) {
@@ -587,24 +585,9 @@ impl Home {
             if ui.button("Show in file manager").clicked() {
                 show_in_file_manager(&path);
             }
-            if sizes.photos == 0 && sizes.linked == 0 && sizes.elsewhere == 0 && sizes.unreachable == 0 {
-                ui.separator();
-                ui.label(RichText::new("Your photos are not copied").strong());
-                ui.label(theme::muted("The map keeps only where each photo is (its path), and takes no space for the photos themselves. If one is moved, renamed or deleted, or its disk is not plugged in, the map still shows its small picture, but zoomed in it says \"not found\"."));
-            }
-            if sizes.linked > 0 {
-                ui.separator();
-                ui.label(RichText::new(format!("{} of photos are links, not copies", storage::human(sizes.linked))).strong());
-                ui.label(theme::muted("The map was made from photos on the same disk, so instead of copying them it shares their data with the originals: they take no extra space while the originals are there, and they are not counted above. If you delete or move the originals, the map still works, but deleting them frees no space while the map is there: the space is freed when the map is deleted too (photos whose original is gone are counted above, as the map's own)."));
-            }
-            if sizes.elsewhere > 0 || sizes.unreachable > 0 {
-                ui.separator();
-                ui.label(RichText::new(format!("{} of photos are on another disk", storage::human(sizes.elsewhere))).strong());
-                ui.label(theme::muted("They were not copied: the map points at them where they are, and they are not counted above. Zoomed out, the map works without that disk; to see a photo at full size, the disk must be plugged in and the photo where it was. Moving or renaming the photos breaks the map's link to them."));
-                if sizes.unreachable > 0 {
-                    ui.label(RichText::new(format!("{} can't be found now: is the disk plugged in?", if sizes.unreachable == 1 { "1 photo".to_string() } else { format!("{} photos", thousands(sizes.unreachable)) })).color(theme::WARNING));
-                }
-            }
+            ui.separator();
+            ui.label(RichText::new("Your photos are not copied").strong());
+            ui.label(theme::muted("The map keeps only where each photo is (its path), and takes no space for the photos themselves. If one is moved, renamed or deleted, or its disk is not plugged in, the map still shows its small picture, but zoomed in it says \"not found\"."));
         });
         if closed || response.should_close() {
             self.details = None;
@@ -800,11 +783,10 @@ impl Home {
                 }
                 if n > 0 {
                     ui.add_space(6.0);
-                    ui.checkbox(&mut nm.copy_photos, "Copy the photos into the map").on_hover_text("They take space here as well, and the map shows them at full size whatever happens to the originals.");
-                    ui.label(theme::muted(match (nm.copy_photos, nm.other_disk) {
-                        (true, _) => "The photos will be copied into the map: they take space here as well, and stay sharp at full size even if the originals are moved or deleted.",
-                        (false, false) => "The map will read the photos where they are and take no space for them. Zoomed out it always works; at full size, a photo that has been moved or deleted shows as not found.",
-                        (false, true) => "The photos are on another disk: the map will read them there and take no space for them. Zoomed out it works without that disk; to see a photo at full size, the disk must be plugged in and the photo where it was.",
+                    ui.label(theme::muted(if nm.other_disk {
+                        "The photos are on another disk: the map will read them there and take no space for them. Zoomed out it works without that disk; to see a photo at full size, the disk must be plugged in and the photo where it was."
+                    } else {
+                        "The map will read the photos where they are and take no space for them. Zoomed out it always works; at full size, a photo that has been moved or deleted shows as not found."
                     }));
                 }
             }
@@ -855,7 +837,7 @@ impl Home {
             ui.horizontal(|ui| {
                 let ok = problem.is_none() && !sources.is_empty() && nm.photos != Some(0) && rt.setup.ort.is_some() && crate::models::spec(&nm.model).is_some_and(|s| store.installed(s));
                 if theme::tinted(ui, theme::ACCENT.gamma_multiply(0.6), ok, egui::Button::new(RichText::new("Create").strong())).clicked() {
-                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), every: nm.every, model: nm.model.clone(), copy_photos: nm.copy_photos });
+                    create = Some(Action::Create { name: clean.clone(), sources: sources.clone(), every: nm.every, model: nm.model.clone() });
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;
@@ -1333,8 +1315,8 @@ fn cover_image(map: &Path) -> Option<egui::ColorImage> {
         Ok(i) => i.to_rgba8(),
         Err(_) => {
             const SIZE: u32 = 384;
-            let photos: Vec<crate::data::Photo> = serde_json::from_slice(&std::fs::read(map.join("photos.json")).ok()?).ok()?;
-            let paths = photos.iter().take(64).map(|p| p.path(map));
+            let items: Vec<crate::data::Item> = serde_json::from_slice(&std::fs::read(map.join("items.json")).ok()?).ok()?;
+            let paths = items.iter().enumerate().take(64).map(|(i, item)| crate::data::item_path(map, i, item));
             let mut mosaic = image::RgbaImage::from_pixel(SIZE, SIZE, image::Rgba([32, 35, 44, 255]));
             let mut put = 0;
             for p in paths {

@@ -1,12 +1,12 @@
 //! Search without Python: the text model (models.rs) runs on a thread of its own, and a map's photo vectors are compared with the
-//! query's vector here. A map's vectors are embeddings.bin in its bundle (the photos' pictures, float16, as many numbers each as the
+//! query's vector here. A map's vectors are look.bin in its folder (its pictures', float16, as many numbers each as the
 //! map's model makes). A map is searched with the model it was made with.
 //!
-//! A video's sound is searched too, when the map has it (sounds.bin, listen.rs): words only, through the sound model's text model,
+//! A video's sound is searched too, when the map has it (sound.bin, listen.rs): words only, through the sound model's text model,
 //! which the search thread loads on the processor when a map with sound opens. Its scores mean nothing next to the pictures', so a
 //! search is by look or by sound, never both.
 //!
-//! Only the pictures are searched, never the captions (captions.bin, which older maps have, is not read). Measured on Wikivoyage
+//! Only the pictures are searched, never words that come with them. Measured on Wikivoyage
 //! (4,139 photos with their real captions): with SigLIP, words are much closer to any caption than to any picture (a typical
 //! caption 0.70 like "church", the best picture 0.15), so a caption decided every match, and SigLIP judges text against text
 //! poorly ("seal": Carp, shore, Woodpecker).
@@ -232,20 +232,20 @@ pub fn best_moments(scores: &mut [f32], moment_scores: &[f32], videos: impl Into
 
 /// A map's vectors, memory-mapped.
 pub struct Vectors {
-    images: Mmap,
-    /// The videos' frames (frames.bin; empty if none): a video's own row is its poster frame's, which places it on the
-    /// map; a search scores it by its best frame (best_moments).
-    frames: Option<Mmap>,
-    /// The windows of the videos' sound (sounds.bin; None if none) and how many numbers each has (the sound model's).
+    /// look.bin: the items' rows, then the videos' frames' (a video's own row is its poster frame's, which places it on the map;
+    /// a search scores it by its best frame: best_moments).
+    look: Mmap,
+    /// How many items (the rows before the frames').
+    n: usize,
+    /// The windows of the videos' sound (sound.bin; None if none) and how many numbers each has (the sound model's).
     sounds: Option<(Mmap, usize)>,
     /// How many numbers each vector has.
     dim: usize,
 }
 
 impl Vectors {
-    /// None if the map has no vectors (embeddings.bin), or they are the wrong size for its photos (or frames.bin for its
-    /// `frames` frames).
-    /// `sounds`: the sound windows and their vectors' size (sounds.bin is left out if it is the wrong size).
+    /// None if the map has no vectors (look.bin), or they are the wrong size for its `n` items and `frames` frames.
+    /// `sounds`: the sound windows and their vectors' size (sound.bin is left out if it is the wrong size).
     pub fn open(bundle: &Path, n: usize, frames: usize, dim: usize, sounds: (usize, usize)) -> Option<Self> {
         let map = |name: &str, rows: usize, dim: usize| {
             let file = std::fs::File::open(bundle.join(name)).ok()?;
@@ -253,9 +253,8 @@ impl Vectors {
             let map = unsafe { memmap2::MmapOptions::new().populate().map(&file) }.ok()?;
             (map.len() == rows * dim * 2).then_some(map)
         };
-        let frames = if frames > 0 { Some(map("frames.bin", frames, dim)?) } else { None };
-        let sounds = if sounds.0 > 0 { map("sounds.bin", sounds.0, sounds.1).map(|m| (m, sounds.1)) } else { None };
-        Some(Self { images: map("embeddings.bin", n, dim)?, frames, sounds, dim })
+        let sounds = if sounds.0 > 0 { map("sound.bin", sounds.0, sounds.1).map(|m| (m, sounds.1)) } else { None };
+        Some(Self { look: map("look.bin", n + frames, dim)?, n, sounds, dim })
     }
 
     /// Has the map its videos' sound?
@@ -273,17 +272,17 @@ impl Vectors {
     /// which one number at a time can't use) and multiplied in eight lanes: 88k photos in ~10 ms instead of ~50. A video's is its
     /// average frame's (`frame_cosines` has each frame's).
     pub fn cosines(&self, query: &[f32]) -> Vec<f32> {
-        cosines(bytemuck::cast_slice(&self.images), self.dim, query)
+        cosines(&bytemuck::cast_slice::<u8, f16>(&self.look)[..self.n * self.dim], self.dim, query)
     }
 
     /// The query's cosine with every frame of the videos (empty if there are none).
     pub fn frame_cosines(&self, query: &[f32]) -> Vec<f32> {
-        self.frames.as_ref().map_or(Vec::new(), |f| cosines(bytemuck::cast_slice(f), self.dim, query))
+        cosines(&bytemuck::cast_slice::<u8, f16>(&self.look)[self.n * self.dim..], self.dim, query)
     }
 
     /// One photo's vector.
     pub fn row(&self, i: usize) -> Vec<f32> {
-        self.images[i * self.dim * 2..(i + 1) * self.dim * 2].chunks_exact(2).map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32()).collect()
+        self.look[i * self.dim * 2..(i + 1) * self.dim * 2].chunks_exact(2).map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32()).collect()
     }
 }
 

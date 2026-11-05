@@ -1,6 +1,6 @@
 //! Where every level of every photo lives on the GPU: one BC7 texture array of PAGE x PAGE pages.
 //! Level L holds photos in slots of 2^L px (1 px ... 4096 px, 4k is the most that is kept), in a grid of PAGE / 2^L slots per row.
-//! Levels 0 ... 5 (1 px ... 32 px) are baked for every photo by bake.rs (pages_bc7.bin, slot = photo id). Levels 0 ... 4 (1 px ...
+//! Levels 0 ... 5 (1 px ... 32 px) are baked for every photo by bake.rs (pages.bin, slot = photo id). Levels 0 ... 4 (1 px ...
 //! 16 px) are always loaded; from RESIDENT (32 px) up, levels are streamed for the photos on screen into a fixed budget of pages,
 //! slots handed out by stream.rs: 32 px copied from the baked file, from BAKED (64 px) up decoded from the originals.
 //! The shader repeats the same address maths.
@@ -9,7 +9,7 @@ pub const PAGE: u32 = 4096;
 pub const LEVELS: usize = 13;
 /// Levels always loaded: 1 ... 16 px (about 350 bytes a photo). The first streamed level is this one (32 px).
 pub const RESIDENT: usize = 5;
-/// Levels in pages_bc7.bin: 1 ... 32 px (about 1.4 KB a photo). From here on (64 px) levels are decoded from the originals.
+/// Levels in pages.bin: 1 ... 32 px (about 1.4 KB a photo). From here on (64 px) levels are decoded from the originals.
 pub const BAKED: usize = 6;
 /// Pages per streamed level (32, 64, 128, 256, 512, 1024, 2048, 4096 px): 32768, 8192, 2048, 1024, 512, 256, 8, 3 slots
 /// (a 4k picture is a whole page: 16.8 MB).
@@ -32,12 +32,12 @@ fn baked_pages(level: usize, photos: usize) -> usize {
     photos.div_ceil(per_page(level) as usize)
 }
 
-/// Bytes of the baked levels for `photos` photos (BC7: a byte per pixel, whole pages): the size of pages_bc7.bin.
+/// Bytes of the baked levels for `photos` photos (BC7: a byte per pixel, whole pages): the size of pages.bin.
 pub fn baked_bytes(photos: usize) -> usize {
     (0..BAKED).map(|l| baked_pages(l, photos)).sum::<usize>() * (PAGE as usize).pow(2)
 }
 
-/// Where photo `id`'s baked picture of `level` starts in pages_bc7.bin (byte), and the bytes from one row of its BC7 blocks to
+/// Where photo `id`'s baked picture of `level` starts in pages.bin (byte), and the bytes from one row of its BC7 blocks to
 /// the next: a page is PAGE / 4 blocks of 16 bytes a row.
 pub fn baked_at(level: usize, photos: usize, id: usize) -> (usize, usize) {
     let page = (0..level).map(|l| baked_pages(l, photos)).sum::<usize>() + id / per_page(level) as usize;

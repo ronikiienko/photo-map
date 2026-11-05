@@ -48,24 +48,25 @@ impl Rows for Array2<f32> {
     }
 }
 
-/// A map's vectors as f16, read from embeddings.bin where it is (mapped, not copied: the system keeps what it reads of it in its
+/// A map's items' vectors as f16, read from look.bin where it is (mapped, not copied: the system keeps what it reads of it in its
 /// file cache, which it can drop when memory is short, and reads again).
 pub struct HalfRows {
     map: memmap2::Mmap,
+    n: usize,
     dim: usize,
 }
 
 impl HalfRows {
-    /// embeddings.bin of `n` photos of `dim` numbers; an error if it isn't that size.
+    /// The first `n` rows (the items'; the videos' frames' come after) of `dim` numbers of look.bin; an error if it is shorter.
     pub fn open(path: &std::path::Path, n: usize, dim: usize) -> Result<HalfRows, String> {
-        const { assert!(cfg!(target_endian = "little"), "embeddings.bin is little-endian") };
+        const { assert!(cfg!(target_endian = "little"), "look.bin is little-endian") };
         let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         // the file is the build's own, and nothing writes it while it is read
         let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("{}: {e}", path.display()))?;
-        if map.len() != n * dim * 2 {
+        if map.len() < n * dim * 2 || map.len() % (dim * 2) != 0 {
             return Err(format!("{} is not the size of the photos", path.display()));
         }
-        Ok(HalfRows { map, dim })
+        Ok(HalfRows { map, n, dim })
     }
 }
 
@@ -73,7 +74,7 @@ impl Rows for HalfRows {
     type Elem = u16;
 
     fn count(&self) -> usize {
-        self.map.len() / 2 / self.dim
+        self.n
     }
 
     fn dim(&self) -> usize {

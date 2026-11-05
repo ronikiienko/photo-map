@@ -3,7 +3,7 @@
 //! in a slot of that level's pool (see pages.rs). A table gives, per photo, how many levels are loaded and the
 //! slot of each. Levels 1 ... 16 px are always loaded (slot = photo id); from 32 px up they are streamed for the photos on
 //! screen (from 16 px on screen, when the 32 px picture starts to fade in), each into a free or least-recently-seen slot of
-//! its level: 32 px is read from the baked file (pages_bc7.bin) by reader threads (it may have to come from disk); from 64 px up, worker threads decode
+//! its level: 32 px is read from the baked file (pages.bin) by reader threads (it may have to come from disk); from 64 px up, worker threads decode
 //! the original file, fit each wanted level and BC7-compress it, and the main thread copies the blocks in. A photo's
 //! streamed levels are always contiguous from 32 px up, so evicting a level also drops the ones above it. The table's first
 //! entry is the loaded level count (levels 0 ... count - 1 are there). Only the entries that changed are uploaded again.
@@ -140,7 +140,7 @@ impl Streamer {
         let started = std::time::Instant::now();
         let page_bytes = (PAGE * PAGE) as usize; // BC7: 1 byte per pixel
         let resident: u32 = (0..RESIDENT).map(|l| layout.pages[l]).sum();
-        assert_eq!(data.pages.len(), crate::pages::baked_bytes(n), "pages_bc7.bin doesn't match the photos: delete it, the viewer bakes it again");
+        assert_eq!(data.pages.len(), crate::pages::baked_bytes(n), "pages.bin doesn't match the photos: delete it, the viewer bakes it again");
         for page in 0..resident {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: page }, aspect: wgpu::TextureAspect::All },

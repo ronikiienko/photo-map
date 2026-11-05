@@ -4,10 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The photo's file where it came from; the map's own copy (or, in maps made before, its link) if that is gone.
+/// The photo's (or the video's) own file.
 pub fn original(data: &crate::data::MapData, id: usize) -> PathBuf {
-    let source = Path::new(&data.photos[id].source);
-    if !source.as_os_str().is_empty() && source.exists() { source.to_path_buf() } else { data.path(id) }
+    PathBuf::from(&data.photos[id].source)
 }
 
 /// The file manager, on the file's folder with the file selected (on Linux by the freedesktop FileManager1 call, which Dolphin,
@@ -111,15 +110,6 @@ pub fn details(data: &crate::data::MapData, id: usize) -> Details {
         place = f.at.map(|[lat, lon]| (lat as f64, lon as f64));
         if place.is_some() || !f.place.is_empty() {
             lines.push(("Place".into(), f.place.clone()));
-        }
-    }
-    for (k, v) in &photo.meta {
-        let v = match v {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        if !v.trim().is_empty() {
-            lines.push((k.clone(), v));
         }
     }
     Details { lines, place }

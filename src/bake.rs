@@ -1,4 +1,4 @@
-//! The baked levels (1 px ... 32 px) as BC7 pages: pages_bc7.bin; 1 ... 16 px are uploaded to the GPU as they are, 32 px pictures
+//! The baked levels (1 px ... 32 px) as BC7 pages: pages.bin; 1 ... 16 px are uploaded to the GPU as they are, 32 px pictures
 //! are copied out as they come on screen (stream.rs).
 //! Made as the last step of building a map (build.rs), and kept in the bundle.
 //! Every level L holds each picture (the photos, then the videos' frames) in a slot of 2^L px (fitted into the top-left corner,
@@ -56,7 +56,7 @@ pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Res
     // only a batch of tiles and a page per level are held, whatever the number of photos. Each level goes to a file of its own,
     // put together (level 0 first) at the end.
     let batch = (PAGE / TOP) * (PAGE / TOP);
-    let level_file = |level: usize| bundle.join(format!("pages_bc7.{level}.tmp"));
+    let level_file = |level: usize| bundle.join(format!("pages.{level}.tmp"));
     let mut files = (0..LEVELS).map(|l| std::fs::File::create(level_file(l)).map(io::BufWriter::new)).collect::<io::Result<Vec<_>>>()?;
     let mut pages: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
     let done = AtomicUsize::new(0);
@@ -118,7 +118,7 @@ pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Res
             }
         }
     }
-    let tmp = bundle.join("pages_bc7.tmp");
+    let tmp = bundle.join("pages.tmp");
     let mut file = io::BufWriter::new(std::fs::File::create(&tmp)?);
     for (level, part) in files.into_iter().enumerate() {
         drop(part.into_inner().map_err(|e| e.into_error())?);
@@ -127,8 +127,8 @@ pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Res
     }
     file.flush()?;
     drop(file);
-    std::fs::rename(tmp, bundle.join("pages_bc7.bin"))?;
-    step("pages_bc7.bin written".into());
+    std::fs::rename(tmp, bundle.join("pages.bin"))?;
+    step("pages.bin written".into());
     Ok(())
 }
 
@@ -186,16 +186,16 @@ mod tests {
     #[test]
     fn bakes_the_resident_levels() {
         let dir = std::env::temp_dir().join(format!("photo-map-bake-test-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("originals")).unwrap();
+        std::fs::create_dir_all(dir.join("photos")).unwrap();
         let photos: Vec<PathBuf> = (0..5)
             .map(|i| {
-                let file = dir.join(format!("originals/{i}.png"));
+                let file = dir.join(format!("photos/{i}.png"));
                 image::RgbaImage::from_pixel(100 + i * 20, 80, image::Rgba([50 * i as u8, 120, 200, 255])).save(&file).unwrap();
                 file
             })
             .collect();
         bake(&dir, &photos, &Progress::default()).unwrap();
-        let len = std::fs::metadata(dir.join("pages_bc7.bin")).unwrap().len() as usize;
+        let len = std::fs::metadata(dir.join("pages.bin")).unwrap().len() as usize;
         assert_eq!(len, crate::pages::baked_bytes(photos.len()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
