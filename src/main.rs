@@ -373,6 +373,8 @@ struct Viewer {
     help_open: bool,
     /// The video playing in its tile, if one is (player.rs).
     player: Option<player::Player>,
+    /// A video's frame kept in the map (frames.json), shown while its player goes to a time: which frame, and its picture.
+    still: Option<(usize, egui::TextureHandle)>,
     /// Builds stopped because a map was opened (a build and a map together would not fit on the card): they go on when the Maps page is back.
     paused_for_viewing: Vec<PathBuf>,
     /// Files and folders dropped on the Maps page this frame.
@@ -506,6 +508,7 @@ impl Viewer {
             hidden: false,
             help_open: false,
             player: None,
+            still: None,
             paused_for_viewing: Vec::new(),
             dropped: Vec::new(),
             cursor: None,
@@ -2149,50 +2152,68 @@ impl Viewer {
             ctx.request_repaint();
         }
         let hovered = self.cursor.is_some_and(|c| tile.rect.contains(egui::pos2(c.x / ppp, c.y / ppp)));
-        if hovered && !p.playing() {
-            draw_play_sign(&painter, tile.rect); // over its picture; not while it plays (it would be in the way)
-        }
-        if !hovered && p.playing() {
-            return; // watched: nothing over it
-        }
-        // the controls: the pill (play or pause, and the time), and the bar beside it
-        let pill = tile.pill();
-        let bar = egui::Rect::from_min_max(egui::pos2(pill.max.x + pill.height() * 0.5, pill.min.y), egui::pos2(tile.rect.max.x - pill.height() * 0.3, pill.max.y));
-        let area = pill.union(bar);
+        // the controls (not while it plays unwatched): the pill (play or pause, and the time), and the bar beside it
         let mut toggle = false;
         let mut seek = None;
-        egui::Area::new(egui::Id::new("video controls")).fixed_pos(area.min).order(egui::Order::Middle).show(ctx, |ui| {
-            let (_, response) = ui.allocate_exact_size(area.size(), egui::Sense::hover());
-            let pill_r = ui.interact(pill, egui::Id::new("video pill"), egui::Sense::click());
-            let bar_r = ui.interact(bar, egui::Id::new("video bar"), egui::Sense::click_and_drag());
-            toggle = pill_r.clicked();
-            let fraction = |x: f32| ((x - bar.min.x) / bar.width().max(1.0)).clamp(0.0, 1.0);
-            let dragging = bar_r.interact_pointer_pos().filter(|_| bar_r.dragged() || bar_r.is_pointer_button_down_on()).map(|at| fraction(at.x));
-            if bar_r.drag_stopped() || bar_r.clicked() {
-                seek = bar_r.interact_pointer_pos().map(|at| fraction(at.x) * p.duration);
-            }
-            let shown = dragging.map_or(p.position(), |f| f * p.duration);
-            let painter = ui.painter();
-            draw_pill(painter, pill, Some(clock(shown)), p.playing(), 1.0);
-            // the bar: a track, how far it is, and a knob there (bigger under the mouse)
-            let y = bar.center().y;
-            let track = egui::Rect::from_min_max(egui::pos2(bar.min.x, y - 2.0), egui::pos2(bar.max.x, y + 2.0));
-            painter.rect_filled(track.expand(3.0), 5.0, egui::Color32::from_black_alpha(130));
-            painter.rect_filled(track, 2.0, egui::Color32::from_white_alpha(70));
-            let x = bar.min.x + bar.width() * (shown / p.duration.max(1e-3)).clamp(0.0, 1.0);
-            painter.rect_filled(egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y)), 2.0, egui::Color32::WHITE);
-            let hot = bar_r.hovered() || dragging.is_some();
-            painter.circle_filled(egui::pos2(x, y), if hot { 7.0 } else { 5.0 }, egui::Color32::WHITE);
-            if pill_r.hovered() || bar_r.hovered() {
-                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            let _ = response;
-        });
+        let mut dragging = None;
+        if hovered || !p.playing() {
+            let pill = tile.pill();
+            let bar = egui::Rect::from_min_max(egui::pos2(pill.max.x + pill.height() * 0.5, pill.min.y), egui::pos2(tile.rect.max.x - pill.height() * 0.3, pill.max.y));
+            let area = pill.union(bar);
+            egui::Area::new(egui::Id::new("video controls")).fixed_pos(area.min).order(egui::Order::Middle).show(ctx, |ui| {
+                let (_, response) = ui.allocate_exact_size(area.size(), egui::Sense::hover());
+                let pill_r = ui.interact(pill, egui::Id::new("video pill"), egui::Sense::click());
+                let bar_r = ui.interact(bar, egui::Id::new("video bar"), egui::Sense::click_and_drag());
+                toggle = pill_r.clicked();
+                let fraction = |x: f32| ((x - bar.min.x) / bar.width().max(1.0)).clamp(0.0, 1.0);
+                dragging = bar_r.interact_pointer_pos().filter(|_| bar_r.dragged() || bar_r.is_pointer_button_down_on()).map(|at| fraction(at.x));
+                if bar_r.drag_stopped() || bar_r.clicked() {
+                    seek = bar_r.interact_pointer_pos().map(|at| fraction(at.x) * p.duration);
+                }
+                let shown = dragging.map_or(p.position(), |f| f * p.duration);
+                let painter = ui.painter();
+                draw_pill(painter, pill, Some(clock(shown)), p.playing(), 1.0);
+                // the bar: a track, how far it is, and a knob there (bigger under the mouse)
+                let y = bar.center().y;
+                let track = egui::Rect::from_min_max(egui::pos2(bar.min.x, y - 2.0), egui::pos2(bar.max.x, y + 2.0));
+                painter.rect_filled(track.expand(3.0), 5.0, egui::Color32::from_black_alpha(130));
+                painter.rect_filled(track, 2.0, egui::Color32::from_white_alpha(70));
+                let x = bar.min.x + bar.width() * (shown / p.duration.max(1e-3)).clamp(0.0, 1.0);
+                painter.rect_filled(egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y)), 2.0, egui::Color32::WHITE);
+                let hot = bar_r.hovered() || dragging.is_some();
+                painter.circle_filled(egui::pos2(x, y), if hot { 7.0 } else { 5.0 }, egui::Color32::WHITE);
+                if pill_r.hovered() || bar_r.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let _ = response;
+            });
+        }
         if toggle {
             if p.playing() { p.pause() } else { p.play() }
         }
         if let Some(t) = seek {
             p.seek(t);
+        }
+        // until ffmpeg's frame from a new time comes, and while the bar is dragged: the map's own frame nearest that time (made
+        // small when the map was), at once
+        let still = dragging.map(|f| f * p.duration).or_else(|| p.waiting().then(|| p.position()));
+        if let (Some(t), Some(m)) = (still, &self.map) {
+            let near = m.data.frames.iter().enumerate().filter(|(_, f)| f.video == p.photo).min_by(|a, b| (a.1.time - t).abs().total_cmp(&(b.1.time - t).abs())).map(|(k, _)| k);
+            if let Some(k) = near {
+                if self.still.as_ref().is_none_or(|s| s.0 != k) {
+                    self.still = photo::load(&m.data.bundle.join(&m.data.frames[k].file)).map(|img| {
+                        let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                        (k, ctx.load_texture("video still", color, egui::TextureOptions::LINEAR))
+                    });
+                }
+                if let Some((_, tex)) = &self.still {
+                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                    painter.add(egui::epaint::RectShape::filled(tile.rect, corner, egui::Color32::WHITE).with_texture(tex.id(), uv));
+                }
+            }
+        }
+        if hovered && !p.playing() {
+            draw_play_sign(&painter, tile.rect); // over its picture; not while it plays (it would be in the way)
         }
     }
 

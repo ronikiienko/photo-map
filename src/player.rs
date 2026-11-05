@@ -83,6 +83,11 @@ impl Player {
         (self.at + shown.saturating_sub(1) as f32 / fps).min(self.duration)
     }
 
+    /// No frame yet from where it was started (ffmpeg is starting, or going to a time).
+    pub fn waiting(&self) -> bool {
+        self.shared.shown.load(Ordering::Relaxed) == 0 && !self.shared.ended.load(Ordering::Relaxed)
+    }
+
     pub fn playing(&self) -> bool {
         self.playing && !self.shared.ended.load(Ordering::Relaxed)
     }
