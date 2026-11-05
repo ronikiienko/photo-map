@@ -20,6 +20,12 @@ const KEY_SPEED: f32 = 900.0;
 const KEY_FRICTION: f32 = 0.8;
 const KEY_ZOOM: f32 = 0.05;
 const FLY_CARRY: f32 = 0.85;
+/// Zoomed out at most to where the content is this much of its fitted size.
+const MIN_ZOOM: f32 = 0.5;
+/// Zoomed in at most to where a photo's longer side is this many times the window's shorter side.
+const MAX_PHOTO: f32 = 2.0;
+/// Content smaller than the screen stays on it, at least this much of the window from its edges.
+const MARGIN: f32 = 0.03;
 
 fn factor(f: f32, dt: f32) -> f32 {
     f.max(0.0).powf(dt * HZ)
@@ -36,6 +42,14 @@ enum Pan {
     /// Held: the view follows the pointer exactly; velocity is only recorded, for the fling.
     Dragging { velocity: Vec2 },
     Coasting { velocity: Vec2 },
+}
+
+/// What the camera may show: the content's box (world) and a photo's longer side in it (world units).
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub lo: Vec2,
+    pub hi: Vec2,
+    pub photo: f32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -65,6 +79,10 @@ pub struct Camera {
     pending_pan: Vec2,
     key_velocity: Vec2,
     fly: Option<(Vec2, f32)>,
+    /// None: anywhere, any zoom.
+    pub limits: Option<Limits>,
+    /// This frame's scale range (update): the limits', widened to where a scale already outside them eases back from.
+    scale_range: (f32, f32),
 }
 
 impl Camera {
@@ -82,7 +100,23 @@ impl Camera {
             pending_pan: Vec2::ZERO,
             key_velocity: Vec2::ZERO,
             fly: None,
+            limits: None,
+            scale_range: (0.0, f32::INFINITY),
         }
+    }
+
+    /// The scales the limits allow.
+    fn scales(&self, l: &Limits) -> (f32, f32) {
+        let most = MAX_PHOTO * self.viewport.min_element() / l.photo.max(1e-6);
+        ((self.fit(l.lo, l.hi).1 * MIN_ZOOM).min(most), most)
+    }
+
+    /// The centres the limits allow at this scale: any point of the content can be in the middle of the screen below the bar, and
+    /// content smaller than that screen stays on it.
+    fn centers(&self, l: &Limits, scale: f32) -> (Vec2, Vec2) {
+        let shift = Vec2::new(0.0, self.top * 0.5 / scale); // the middle below the bar, from the screen's middle
+        let half = (self.viewport * 0.5 - Vec2::new(0.0, self.top * 0.5)) / scale - MARGIN * self.viewport.min_element() / scale;
+        (l.lo.min(l.hi - half) - shift, l.hi.max(l.lo + half) - shift)
     }
 
     pub fn to_world(&self, screen: Vec2) -> Vec2 {
@@ -164,7 +198,7 @@ impl Camera {
 
     fn zoom_about(&mut self, f: f32, screen: Vec2) {
         let before = self.to_world(screen);
-        self.scale *= f;
+        self.scale = (self.scale * f).clamp(self.scale_range.0, self.scale_range.1);
         self.center += before - self.to_world(screen);
     }
 
@@ -172,6 +206,30 @@ impl Camera {
     pub fn update(&mut self, dt: f32, cursor: Option<Vec2>, keys: Keys) -> bool {
         let dt = dt.clamp(1e-6, 0.1);
         let mut moving = false;
+        // past the limits (they changed, or the window did) the camera eases back in; input can't take it further out
+        // (`near`: close enough to the limit to stop there)
+        let ease = |cur: f32, lo: f32, hi: f32, near: f32| {
+            let inside = cur.clamp(lo, hi);
+            let back = smooth(cur, inside, FLY_CARRY, dt);
+            let back = if (back - inside).abs() < near { inside } else { back };
+            (lo.min(back), hi.max(back))
+        };
+        let limits = self.limits.filter(|_| self.fly.is_none());
+        let before = self.center;
+        self.scale_range = match &limits {
+            Some(l) => {
+                let (lo, hi) = self.scales(l);
+                let (lo, hi) = ease(self.scale.ln(), lo.ln(), hi.ln(), 0.002);
+                (lo.exp(), hi.exp())
+            }
+            None => (0.0, f32::INFINITY),
+        };
+        if let (Some(l), Some((target, log_scale))) = (self.limits, self.fly) {
+            let (lo, hi) = self.scales(&l);
+            let log_scale = log_scale.clamp(lo.ln(), hi.ln());
+            let (lo, hi) = self.centers(&l, log_scale.exp());
+            self.fly = Some((target.clamp(lo, hi), log_scale));
+        }
 
         // Wheel: a scroll sets the zoom velocity; without scroll it decays, so notches blend into one zoom.
         if self.pending_zoom != 0.0 {
@@ -189,7 +247,11 @@ impl Camera {
             self.zoom_velocity = 0.0;
         } else {
             let about = if key_zoom != 0.0 { self.viewport * 0.5 } else { cursor.unwrap_or(self.viewport * 0.5) };
+            let was = self.scale;
             self.zoom_about(factor(self.zoom_velocity.exp(), dt), about);
+            if self.scale == was {
+                self.zoom_velocity = 0.0; // at a limit
+            }
             moving = true;
         }
 
@@ -248,6 +310,35 @@ impl Camera {
                 self.fly = None;
             }
             moving = true;
+        }
+
+        if let Some(l) = limits {
+            // a scale left outside (the limits or the window changed) comes back, about the middle
+            let was = self.scale;
+            self.zoom_about(1.0, self.viewport * 0.5);
+            moving |= self.scale != was;
+            let (lo, hi) = self.centers(&l, self.scale);
+            let mut stopped = [false; 2];
+            for a in 0..2 {
+                let (lo, hi) = ease(before[a], lo[a], hi[a], 0.5 / self.scale);
+                let c = self.center[a].clamp(lo, hi);
+                stopped[a] = c != self.center[a];
+                if c != before[a] {
+                    moving = true;
+                }
+                self.center[a] = c;
+            }
+            let stop = |v: &mut Vec2| {
+                for a in 0..2 {
+                    if stopped[a] {
+                        v[a] = 0.0;
+                    }
+                }
+            };
+            if let Pan::Coasting { velocity } = &mut self.pan {
+                stop(velocity);
+            }
+            stop(&mut self.key_velocity);
         }
         moving
     }

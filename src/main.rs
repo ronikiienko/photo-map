@@ -51,6 +51,7 @@ mod theme;
 mod tree;
 
 use camera::{Camera, Keys};
+use rayon::prelude::*;
 use data::{MapData, Progress, WORLD};
 use glam::Vec2;
 use gpu::{CameraUniform, Gpu, MapRenderer, NO_LIFT};
@@ -257,6 +258,8 @@ struct OpenMap {
     /// Where each copy sits beside the world (the matches', then the moments'), and a copy's side (world units).
     copies: Vec<data::Point>,
     copy_side: f32,
+    /// The box the photos span where they are now (move_to), photos' halves included.
+    points_box: (Vec2, Vec2),
     /// "Moments that match": the video whose frames that match the search are shown right of the matches, best first. It stays
     /// while the search changes (each new one picks its frames again), until the search is cleared.
     moments: Option<usize>,
@@ -281,6 +284,18 @@ struct OpenMap {
     /// they are (the map doesn't move) and no search marks them. `hidden_mask`: hidden by any of them.
     hidden: Vec<Hidden>,
     hidden_mask: Vec<bool>,
+}
+
+/// The box the photos span, each `side` big at most (their size in the Groups view counted).
+fn points_box(data: &MapData, side: f32) -> (Vec2, Vec2) {
+    let (lo, hi) = (0..data.n())
+        .into_par_iter()
+        .map(|i| {
+            let (p, half) = (data.points[i], Vec2::splat(data.size(i) * side / 2.0));
+            (Vec2::new(p.x, p.y) - half, Vec2::new(p.x, p.y) + half)
+        })
+        .reduce(|| (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |a, b| (a.0.min(b.0), a.1.max(b.1)));
+    if lo.x > hi.x { (Vec2::ZERO, Vec2::splat(WORLD)) } else { (lo, hi) }
 }
 
 impl OpenMap {
@@ -350,6 +365,13 @@ impl OpenMap {
         }
     }
 
+    /// Where the camera may go: the photos and their copies beside the world, with zoom by a photo's size.
+    fn limits(&self) -> camera::Limits {
+        let half = Vec2::splat(self.copy_side / beside::FILL / 2.0);
+        let (lo, hi) = self.copies.iter().map(|p| Vec2::new(p.x, p.y)).fold(self.points_box, |(lo, hi), p| (lo.min(p - half), hi.max(p + half)));
+        camera::Limits { lo, hi, photo: self.photo_world }
+    }
+
     /// The box the photos beside the world and their copies span.
     fn beside_box(&self) -> (Vec2, Vec2) {
         let pts = self.order.iter().map(|&i| self.data.points[i]).chain(self.copies.iter().copied()).map(|p| Vec2::new(p.x, p.y));
@@ -367,6 +389,7 @@ impl OpenMap {
             })
             .collect();
         self.data.set_points(points, sizes);
+        self.points_box = points_box(&self.data, photo_world);
         self.renderer.move_points(queue, &self.data, &shown);
         self.from = shown;
         self.moved = Some(Instant::now());
@@ -627,6 +650,7 @@ impl Viewer {
         self.camera.jump(self.camera.fit(Vec2::ZERO, Vec2::splat(WORLD)));
         let n = data.n();
         let photo_world = data.side;
+        let points_box = points_box(&data, photo_world);
         self.status.clear();
         // the last map's search is over with it: its words, its photo, and what the box said it was
         self.search.clear();
@@ -665,6 +689,7 @@ impl Viewer {
             at: None,
             copies: Vec::new(),
             copy_side: 0.0,
+            points_box,
             moments: None,
             trail: None,
             tree,
@@ -1570,6 +1595,7 @@ impl Viewer {
         // answered, and the heading over the matches
         let bar = self.ui.ctx.memory(|m| m.area_rect(egui::Id::new("top"))).map_or(0.0, |r| r.bottom());
         self.camera.top = (bar + 56.0).max(84.0) * self.screen.scale();
+        self.camera.limits = self.map.as_ref().filter(|_| self.page == Page::Viewer).map(OpenMap::limits);
         self.camera.update(dt, self.cursor, self.keys);
         self.lens.update(dt, self.cursor);
         self.frames += 1;
