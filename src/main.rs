@@ -675,6 +675,7 @@ impl Viewer {
                     backend: backend.clone(),
                     queued: self.queue.contains(&b.dir),
                     elsewhere: run.is_none_or(|r| !r.running()) && build::locked(&b.dir),
+                    unread_videos: state.as_ref().map_or_else(|| b.job.unread_videos.clone(), |s| s.unread_videos.clone()),
                     state,
                 }
             })

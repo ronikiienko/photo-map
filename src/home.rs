@@ -52,6 +52,8 @@ pub struct BuildView {
     pub queued: bool,
     /// Being made by another window of the app.
     pub elsewhere: bool,
+    /// The videos that couldn't be read, left out (their file names).
+    pub unread_videos: Vec<String>,
     pub state: Option<State>,
 }
 
@@ -335,6 +337,17 @@ impl Home {
                         step(ui, *s, b.stage, i + 1 == steps.len());
                     }
                 });
+                if !b.unread_videos.is_empty() {
+                    // which ones, under the mouse (a few: a long list wouldn't fit)
+                    let n = b.unread_videos.len();
+                    let mut names = b.unread_videos.iter().take(12).cloned().collect::<Vec<_>>().join("\n");
+                    if n > 12 {
+                        names += &format!("\nand {} more", n - 12);
+                    }
+                    let text = if n == 1 { "1 video couldn't be read: it is left out".to_string() } else { format!("{n} videos couldn't be read: they are left out") };
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(text).size(13.0).color(theme::WARNING)).on_hover_text(names);
+                }
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -589,7 +602,7 @@ impl Home {
                 ui.label(RichText::new(format!("{} of photos are on another disk", storage::human(sizes.elsewhere))).strong());
                 ui.label(theme::muted("They were not copied: the map points at them where they are, and they are not counted above. Zoomed out, the map works without that disk; to see a photo at full size, the disk must be plugged in and the photo where it was. Moving or renaming the photos breaks the map's link to them."));
                 if sizes.unreachable > 0 {
-                    ui.label(RichText::new(format!("{} can't be found now: is the disk plugged in?", if sizes.unreachable == 1 { "1 photo".to_string() } else { format!("{} photos", thousands(sizes.unreachable)) })).color(Color32::from_rgb(235, 150, 100)));
+                    ui.label(RichText::new(format!("{} can't be found now: is the disk plugged in?", if sizes.unreachable == 1 { "1 photo".to_string() } else { format!("{} photos", thousands(sizes.unreachable)) })).color(theme::WARNING));
                 }
             }
         });
@@ -779,7 +792,7 @@ impl Home {
                 if nm.videos > 0 && rt.ffmpeg.is_none() {
                     // like the runtime above: the need, and the way to the window that gets it
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Videos are read with ffmpeg, which hasn't been downloaded.").color(Color32::from_rgb(235, 150, 100)));
+                        ui.label(RichText::new("Videos are read with ffmpeg, which hasn't been downloaded.").color(theme::WARNING));
                         if ui.button("Runtime…").on_hover_text("Get it in the Runtime window").clicked() {
                             open_runtime = true;
                         }
@@ -1382,8 +1395,9 @@ mod shots {
             finished: false,
             recent: Default::default(),
             vector_head: vec![0.12, -0.03, 0.4, 0.07, -0.21, 0.0, 0.33, -0.1],
+            unread_videos: Vec::new(),
         };
-        BuildView { dir: "/maps/new.building".into(), name: "Phone 2024".into(), source: "/photos/phone (12,000 photos)".into(), stage: Stage::Embed, running, backend: "on the graphics card".into(), queued: false, elsewhere: false, state: Some(state) }
+        BuildView { dir: "/maps/new.building".into(), name: "Phone 2024".into(), source: "/photos/phone (12,000 photos)".into(), stage: Stage::Embed, running, backend: "on the graphics card".into(), queued: false, elsewhere: false, unread_videos: Vec::new(), state: Some(state) }
     }
 
     /// Draws `p` (`size`: the window) and saves it as .local/shots/maps-<name>.png. Covers load on threads: it draws until they are in.
@@ -1428,6 +1442,9 @@ mod shots {
         }
         videos.stage = Stage::Videos;
         shot("9b-building-videos", size, Page { builds: vec![videos], ..page(|_, _| {}) });
+        let mut unread = building(true, None);
+        unread.unread_videos = vec!["DJI_0041.MP4".into(), "broken.mov".into(), "IMG_2207.MOV".into()];
+        shot("9c-videos-unread", size, Page { builds: vec![unread], ..page(|_, _| {}) });
         shot("10-build-failed", size, Page { builds: vec![building(false, Some("the model ran out of memory on the graphics card"))], ..page(|_, _| {}) });
         shot("11-dragging", size, page(|h, _| h.drag_over = true));
     }

@@ -115,6 +115,9 @@ pub struct Job {
     /// A photo's longer side on the map (world units), set by the layout: the photos are spread to it (data::spread).
     #[serde(default)]
     pub photo_side: Option<f32>,
+    /// The videos ffmpeg couldn't read (their file names), left out of the map: set by the Videos step.
+    #[serde(default)]
+    pub unread_videos: Vec<String>,
 }
 
 fn default_model() -> String {
@@ -206,7 +209,7 @@ pub fn create(maps: &Path, name: &str, sources: &[PathBuf], every: usize, model:
     let dir = building_dir(maps, &name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let created = chrono_like_now();
-    Job { name, sources, created, stage: Stage::Videos, photos: 0, every: every.max(1), model: model.to_string(), copy_photos, photo_side: None }.write(&dir).map_err(|e| e.to_string())?;
+    Job { name, sources, created, stage: Stage::Videos, photos: 0, every: every.max(1), model: model.to_string(), copy_photos, photo_side: None, unread_videos: Vec::new() }.write(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -252,6 +255,8 @@ pub struct State {
     pub recent: std::collections::VecDeque<(u64, Arc<image::RgbaImage>)>,
     /// The first few of the 768 numbers the model gave the last photo.
     pub vector_head: Vec<f32>,
+    /// The videos that couldn't be read (Job::unread_videos).
+    pub unread_videos: Vec<String>,
 }
 
 /// How many numbers of a vector the card shows.
@@ -387,7 +392,7 @@ impl Run {
         let job = Job::read(&dir)?;
         let spec = models::spec(&job.model)?;
         let lock = lock(&dir)?;
-        let state = State { stage: job.stage, done: 0, total: 0, unit: "photos", message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false, recent: Default::default(), vector_head: Vec::new() };
+        let state = State { stage: job.stage, done: 0, total: 0, unit: "photos", message: String::new(), stage_started: Instant::now(), base: (Instant::now(), 0), samples: Default::default(), error: None, finished: false, recent: Default::default(), vector_head: Vec::new(), unread_videos: job.unread_videos.clone() };
         let shared = Arc::new(Shared { pause: AtomicBool::new(false), state: Mutex::new(state) });
         let ctx = Ctx { dir: dir.clone(), root, job, shared: shared.clone(), hub, spec };
         let handle = std::thread::spawn(move || {
@@ -720,7 +725,14 @@ fn read_videos(ctx: &mut Ctx) -> Result<Flow, String> {
             }
         }
     });
-    Ok(if ctx.paused() { Flow::Paused } else { Flow::Done })
+    if ctx.paused() {
+        return Ok(Flow::Paused);
+    }
+    // the ones with no frames: said on the build's card
+    let unread: Vec<String> = videos.iter().zip(&dirs).filter(|(_, dir)| !dir.is_dir()).map(|(v, _)| v.file_name().map_or_else(|| v.display().to_string(), |n| n.to_string_lossy().into_owned())).collect();
+    shared_state(&ctx.shared).unread_videos = unread.clone();
+    ctx.job.unread_videos = unread;
+    Ok(Flow::Done)
 }
 
 fn find_photos(ctx: &mut Ctx) -> Result<Flow, String> {

@@ -23,6 +23,8 @@ const CONTROL_HOVER: Color32 = Color32::from_rgb(52, 58, 73);
 
 /// A button that deletes something.
 pub const DANGER: Color32 = Color32::from_rgb(150, 60, 55);
+/// Something to know that isn't an error (photos not found, a video that couldn't be read).
+pub const WARNING: Color32 = Color32::from_rgb(235, 150, 100);
 
 pub const GAP: f32 = 8.0;
 pub const RADIUS: u8 = 10; // cards and windows
