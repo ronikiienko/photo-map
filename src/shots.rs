@@ -29,17 +29,17 @@ pub fn harness<S>(size: egui::Vec2, s: S, mut draw: impl FnMut(&egui::Context, &
     )
 }
 
-/// A made-up app folder, .local/ui-fixture/<name> (one a test: tests run side by side), with these maps in it (name, photos, created): each a manifest and a cover (a gradient
+/// A made-up app folder, .local/ui-fixture/<name> (one a test: tests run side by side), with these maps in it (name, photos, videos among them, created): each a manifest and a cover (a gradient
 /// of its own colour). Made again every time, so it is what the test says.
-pub fn app_folder(name: &str, maps: &[(&str, usize, &str)]) -> PathBuf {
+pub fn app_folder(name: &str, maps: &[(&str, usize, usize, &str)]) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".local/ui-fixture").join(name);
     let _ = std::fs::remove_dir_all(&root);
     let dir = root.join("maps");
     std::fs::create_dir_all(&dir).unwrap();
-    for (k, (name, photos, created)) in maps.iter().enumerate() {
+    for (k, (name, photos, videos, created)) in maps.iter().enumerate() {
         let map = dir.join(format!("{}.photomap", name.to_lowercase().replace(' ', "-")));
         std::fs::create_dir_all(&map).unwrap();
-        let manifest = serde_json::json!({ "name": name, "photos": photos, "created": created });
+        let manifest = serde_json::json!({ "name": name, "photos": photos, "videos": videos, "created": created });
         std::fs::write(map.join("manifest.json"), manifest.to_string()).unwrap();
         let tint = [(90u8, 140u8, 200u8), (200, 140, 90), (110, 180, 120), (170, 110, 190)][k % 4];
         let cover = image::RgbaImage::from_fn(192, 192, |x, y| {

@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 pub struct Entry {
     pub path: PathBuf,
     pub name: String,
+    /// Everything on the map, videos included.
     pub photos: usize,
+    /// How many of those are videos.
+    pub videos: usize,
     /// "2026-10-11 14:00", if the map says.
     pub created: String,
     /// The id of the model the map was made with (models.rs).
@@ -45,6 +48,7 @@ impl Library {
                     path: p.clone(),
                     name: manifest["name"].as_str()?.to_string(),
                     photos: manifest["photos"].as_u64()? as usize,
+                    videos: manifest["videos"].as_u64().unwrap_or(0) as usize,
                     created: manifest["created"].as_str().unwrap_or_default().to_string(),
                     model: manifest["embedding"]["model"].as_str().unwrap_or(crate::models::DEFAULT).to_string(),
                 })

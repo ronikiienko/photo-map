@@ -467,10 +467,14 @@ impl Home {
                     }
                 }
                 p.text(rect.min + vec2(12.0, COVER + 6.0), Align2::LEFT_TOP, &e.name, egui::FontId::proportional(15.0), theme::TEXT);
-                // the day it was made (the time of day would run past the card's edge on a big map)
+                // the day it was made, if it fits (the time of day would run past the card's edge on a big map)
                 let day = e.created.get(..10).unwrap_or(&e.created);
-                let detail = if day.is_empty() { format!("{} photos", thousands(e.photos)) } else { format!("{} photos · {day}", thousands(e.photos)) };
-                p.text(rect.min + vec2(12.0, COVER + 28.0), Align2::LEFT_TOP, detail, egui::FontId::proportional(12.0), theme::MUTED);
+                let count = photos_and_videos(e.photos, e.videos);
+                let font = egui::FontId::proportional(12.0);
+                let with_day = format!("{count} · {day}");
+                let fits = p.layout_no_wrap(with_day.clone(), font.clone(), theme::MUTED).size().x <= rect.width() - 24.0;
+                let detail = if day.is_empty() || !fits { count } else { with_day };
+                p.text(rect.min + vec2(12.0, COVER + 28.0), Align2::LEFT_TOP, detail, font, theme::MUTED);
                 // the model that made its vectors (it is the one that searches it)
                 let model = crate::models::spec(&e.model).map_or("unknown model", |s| s.label);
                 p.text(rect.min + vec2(12.0, COVER + 46.0), Align2::LEFT_TOP, model, egui::FontId::proportional(12.0), theme::MUTED);
@@ -552,7 +556,7 @@ impl Home {
         let response = theme::modal(ctx, "storage", 480.0, None, |ui| {
             closed = theme::window_header(ui, &format!("What takes space in “{}”", entry.name));
             ui.label(RichText::new(format!("{} on disk", storage::human(sizes.total()))).size(17.0));
-            ui.label(theme::muted(format!("for {} photos", thousands(entry.photos))));
+            ui.label(theme::muted(format!("for {}", photos_and_videos(entry.photos, entry.videos))));
             ui.add_space(8.0);
             let total = sizes.total().max(1) as f32;
             for (i, part) in sizes.parts().iter().enumerate() {
@@ -770,12 +774,7 @@ impl Home {
             } else if nm.count.is_some() {
                 ui.label(theme::muted("Counting photos and videos…"));
             } else if let Some(n) = nm.photos {
-                let count = |k: usize, one: &str, many: &str| format!("{} {}", thousands(k), if k == 1 { one } else { many });
-                let found = match nm.videos {
-                    0 => count(n, "photo", "photos"),
-                    v if v == n => count(v, "video", "videos"),
-                    v => format!("{} and {}", count(n - v, "photo", "photos"), count(v, "video", "videos")),
-                };
+                let found = photos_and_videos(n, nm.videos);
                 ui.label(theme::muted(if nm.every > 1 { format!("{found} found, {} of them used", thousands(n.div_ceil(nm.every))) } else { format!("{found} found") }));
                 if nm.videos > 0 && rt.ffmpeg.is_none() {
                     // like the runtime above: the need, and the way to the window that gets it
@@ -1271,6 +1270,16 @@ fn part_colour(i: usize) -> Color32 {
 }
 
 /// 28 014 style grouping.
+/// "12 photos", "3 videos", "12 photos and 3 videos": `n` things, `videos` of them videos.
+fn photos_and_videos(n: usize, videos: usize) -> String {
+    let count = |k: usize, one: &str, many: &str| format!("{} {}", thousands(k), if k == 1 { one } else { many });
+    match videos {
+        0 => count(n, "photo", "photos"),
+        v if v == n => count(v, "video", "videos"),
+        v => format!("{} and {}", count(n - v, "photo", "photos"), count(v, "video", "videos")),
+    }
+}
+
 fn thousands(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::new();
@@ -1351,7 +1360,7 @@ mod shots {
     }
 
     fn page(set: impl FnOnce(&mut Home, &Library)) -> Page {
-        let root = app_folder("maps-page", &[("Takeout tagged", 18_412, "2026-10-11 14:00"), ("Main folder", 88_105, "2026-09-02 09:12"), ("Istanbul trip, spring 2019", 1_204, "2026-10-30 21:40"), ("Scans", 312, "")]);
+        let root = app_folder("maps-page", &[("Takeout tagged", 18_412, 0, "2026-10-11 14:00"), ("Main folder", 88_105, 0, "2026-09-02 09:12"), ("Istanbul trip, spring 2019", 1_204, 87, "2026-10-30 21:40"), ("Scans", 312, 0, "")]);
         let lib = Library::new(root.join("maps"));
         let mut home = Home::new();
         set(&mut home, &lib);

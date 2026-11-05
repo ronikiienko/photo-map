@@ -1,6 +1,6 @@
 //! A map bundle, plus a spatial grid for "which photo is under the mouse". Bundles are made in Python
 //! (src/photomap.py: maps/<name>.photomap/):
-//!     manifest.json   name, photo count
+//!     manifest.json   name, photo count (videos included) and how many are videos
 //!     photos.json     per photo: file (originals/NNNNNN.ext if copied into the map, else empty), source, width, height, title, caption (optional), meta (any strings, for people to read),
 //!                     facts (optional: camera, taken, place from its EXIF, for search's camera: date: place:)
 //!     originals/      the photos copied into the map (maps made before kept links to all of them here); photo i = position i in photos.json

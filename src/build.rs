@@ -1275,11 +1275,14 @@ fn keep_frames(ctx: &mut Ctx) -> Result<Vec<crate::data::Frame>, String> {
 }
 
 fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
+    let photos: Vec<crate::data::Photo> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let videos = photos.iter().filter(|p| p.video.is_some()).count();
     let mut manifest = serde_json::json!({
         "format": 1,
         "name": ctx.job.name,
         "created": ctx.job.created,
         "photos": ctx.job.photos,
+        "videos": videos,
         "world": crate::data::WORLD as u32,
         "embedding": { "model": ctx.job.model, "dim": ctx.dim(), "dtype": "float16", "input": "image" },
     });
