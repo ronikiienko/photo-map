@@ -126,20 +126,14 @@ fn draw_pill(painter: &egui::Painter, pill: egui::Rect, time: Option<String>, pl
     }
 }
 
-/// A video's big sign in the middle of its tile `rect`: play, or (`playing`) pause, in a dark disc.
-fn draw_big_sign(painter: &egui::Painter, rect: egui::Rect, playing: bool) {
+/// A video's big play sign in the middle of its tile `rect`, in a dark disc.
+fn draw_play_sign(painter: &egui::Painter, rect: egui::Rect) {
     let radius = (rect.width().min(rect.height()) * 0.16).clamp(14.0, 34.0);
     let c = rect.center();
     painter.circle_filled(c, radius, egui::Color32::from_black_alpha(150));
     let r = radius * 0.42;
-    if playing {
-        for dx in [-0.45, 0.45] {
-            painter.rect_filled(egui::Rect::from_center_size(egui::pos2(c.x + dx * r, c.y), egui::vec2(r * 0.5, r * 1.9)), 1.5, egui::Color32::WHITE);
-        }
-    } else {
-        let triangle = vec![egui::pos2(c.x - r * 0.7, c.y - r), egui::pos2(c.x + r, c.y), egui::pos2(c.x - r * 0.7, c.y + r)];
-        painter.add(egui::Shape::convex_polygon(triangle, egui::Color32::WHITE, egui::Stroke::NONE));
-    }
+    let triangle = vec![egui::pos2(c.x - r * 0.7, c.y - r), egui::pos2(c.x + r, c.y), egui::pos2(c.x - r * 0.7, c.y + r)];
+    painter.add(egui::Shape::convex_polygon(triangle, egui::Color32::WHITE, egui::Stroke::NONE));
 }
 
 /// Seconds as a clock: "0:07", "12:30", "1:02:03".
@@ -2120,14 +2114,14 @@ impl Viewer {
             let time = (t.long >= VIDEO_TIME_FROM).then(|| clock(t.time));
             draw_pill(&painter, t.pill(), time, false, fade);
             if mouse.is_some_and(|m| t.rect.contains(m)) {
-                draw_big_sign(&painter, t.rect, false);
+                draw_play_sign(&painter, t.rect);
             }
         }
     }
 
     /// The video playing: its newest frame over its tile, and, under the mouse or while paused, its controls along the tile's
-    /// bottom (play or pause, how far, and a bar to go anywhere in it); under the mouse also a big pause or play sign in its
-    /// middle (a click on the tile does that). It stops when its tile leaves the screen or gets too small to mark.
+    /// bottom (play or pause, how far, and a bar to go anywhere in it); paused and under the mouse also a big play sign in its
+    /// middle (a click on the tile pauses or plays it). It stops when its tile leaves the screen or gets too small to mark.
     fn player_ui(&mut self, ctx: &egui::Context) {
         let Some(p) = &self.player else { return };
         let ppp = ctx.pixels_per_point();
@@ -2146,8 +2140,8 @@ impl Viewer {
             ctx.request_repaint();
         }
         let hovered = self.cursor.is_some_and(|c| tile.rect.contains(egui::pos2(c.x / ppp, c.y / ppp)));
-        if hovered {
-            draw_big_sign(&painter, tile.rect, p.playing()); // over its picture
+        if hovered && !p.playing() {
+            draw_play_sign(&painter, tile.rect); // over its picture; not while it plays (it would be in the way)
         }
         if !hovered && p.playing() {
             return; // watched: nothing over it
