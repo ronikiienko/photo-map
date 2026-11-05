@@ -156,13 +156,14 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                             (query::Key::Camera, "the camera it was taken with, like pixel"),
                             (query::Key::Date, "when it was taken, like 2019-07"),
                             (query::Key::Place, "the town nearest to where it was taken, like lviv"),
+                            (query::Key::Size, "its longest side in pixels: 3840.. is 4K and up, ..1920 full HD and below"),
                         ] {
                             if theme::button(ui, egui::Button::new(key.label())).on_hover_text(tip).clicked() {
                                 actions.edit_filter = Some(FilterEdit { at: usize::MAX, key, not: false, value: String::new() });
                                 ui.close();
                             }
                         }
-                    }).0.on_hover_text("only photos that pass a filter can match: photos or videos, by name, camera, date or place");
+                    }).0.on_hover_text("only photos that pass a filter can match: photos or videos, by name, camera, date, place or size");
                     });
                     // while in the box with an idea showing: the keys for ideas
                     if focused && (idea.is_some() || whole) {
@@ -634,10 +635,11 @@ mod shots {
         shot("2-typing", State { search: "street at".into(), focus: true, ..state() }, None);
         let results = || State { search: "shopping cart".into(), found: 100, at: Some(0), status: "shopping cart: similarity 0.12 to 0.25".into(), ..state() };
         shot("3-results", results(), None);
-        shot("4-chips", State { filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi"), filter("year:2016..2018"), Filter::kind(true)], ..results() }, None);
+        shot("4-chips", State { filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi"), filter("year:2016..2018"), Filter::kind(true), filter("size:3840..")], ..results() }, None);
         shot("4b-chip-hovered", State { filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi")], ..results() }, Some(egui::pos2(100.0, 71.0)));
         shot("5b-editing-a-not-chip", State { filters: vec![filter("place:istanbul")], filter_edit: Some(FilterEdit { at: 1, key: Key::Camera, not: true, value: "pixel".into() }), ..results() }, None);
         shot("5-editing-a-chip", State { filters: vec![filter("place:istanbul")], filter_edit: Some(FilterEdit { at: 1, key: Key::Date, not: false, value: String::new() }), ..results() }, None);
+        shot("5c-editing-a-size", State { filters: vec![filter("place:istanbul")], filter_edit: Some(FilterEdit { at: 1, key: Key::Size, not: false, value: String::new() }), ..results() }, None);
         shot("6-filters-only", State { search: String::new(), filters: vec![filter("year:2019")], status: "date:2019: 2,412 photos".into(), ..results() }, None);
         shot("7-photos", State { photos: 3, search: String::new(), filters: vec![filter("place:lviv")], ..results() }, None);
         shot("7b-photo-hovered", State { photos: 3, search: String::new(), filters: vec![filter("place:lviv")], ..results() }, Some(egui::pos2(105.0, 27.0)));

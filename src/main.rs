@@ -956,7 +956,7 @@ impl Viewer {
                 .iter()
                 .map(|p| {
                     let name = p.source.get(root..).unwrap_or(&p.source);
-                    filters.iter().all(|f| f.passes(name, p.facts.as_deref(), p.video.is_some()))
+                    filters.iter().all(|f| f.passes(name, p))
                 })
                 .collect();
             let hits = pass.iter().zip(&m.hidden_mask).filter(|&(&p, &h)| p && !h).count();

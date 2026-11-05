@@ -91,6 +91,8 @@ pub enum Key {
     Place,
     /// Photos or videos ("photos", "videos"): made with a button, not written.
     Kind,
+    /// The long side in px (a video's own, not its poster's): size:3840.. (4K and up), ..1920, 2000..4000.
+    Size,
 }
 
 /// One filter: `camera:pixel`, `name:greece`, `NOT place:kyiv`. Typed in the box, it leaves it for a chip of its own.
@@ -112,6 +114,7 @@ impl Key {
             Key::Date => "Date",
             Key::Place => "Place",
             Key::Kind => "Only",
+            Key::Size => "Size",
         }
     }
 
@@ -122,6 +125,7 @@ impl Key {
             Key::Date => "2016..2018",
             Key::Place => "lviv, kyiv",
             Key::Kind => "",
+            Key::Size => "3840.. or ..1920",
         }
     }
 }
@@ -146,6 +150,7 @@ impl Filter {
             Key::Date => "date",
             Key::Place => "place",
             Key::Kind => "only",
+            Key::Size => "size",
         };
         let value = self.values.join(",");
         let value = if value.contains(' ') { format!("\"{value}\"") } else { value };
@@ -157,11 +162,13 @@ impl Filter {
         Filter { key: Key::Kind, values: vec![if videos { "videos" } else { "photos" }.into()], not: false }
     }
 
-    /// Whether a photo (`video`: a video) with this name and these facts passes (a NOT passes what it doesn't pick). A date
+    /// Whether a photo passes (a NOT passes what it doesn't pick): `name` is its file's below the map's shared folder. A date
     /// picks by its start.
-    pub fn passes(&self, name: &str, facts: Option<&crate::data::Facts>, video: bool) -> bool {
+    pub fn passes(&self, name: &str, photo: &crate::data::Photo) -> bool {
+        let facts = photo.facts.as_deref();
         let picks = |value: &str| match (self.key, facts) {
-            (Key::Kind, _) => (value == "videos") == video,
+            (Key::Kind, _) => (value == "videos") == photo.video.is_some(),
+            (Key::Size, _) => in_sizes(photo.video.map_or(photo.width.max(photo.height), |v| v.width.max(v.height)), value),
             (Key::Name, _) => has_name(name, value),
             (Key::Camera, Some(f)) => has_name(&f.camera, value),
             (Key::Date, Some(f)) => in_dates(&f.taken, value),
@@ -169,6 +176,17 @@ impl Filter {
             (_, None) => false,
         };
         self.values.iter().any(|v| picks(v)) != self.not
+    }
+}
+
+/// Whether a long side of `long` px is in `sizes`: a range ("3840..", "..1920", "2000..4000", both ends in) or one size. Not a
+/// number: nothing is.
+fn in_sizes(long: u32, sizes: &str) -> bool {
+    let (from, to) = sizes.split_once("..").unwrap_or((sizes, sizes));
+    let end = |s: &str, none: u32| if s.trim().is_empty() { Some(none) } else { s.trim().parse::<u32>().ok() };
+    match (end(from, 0), end(to, u32::MAX)) {
+        (Some(from), Some(to)) => (from..=to).contains(&long),
+        _ => false,
     }
 }
 
@@ -193,6 +211,7 @@ fn key_of(word: &str) -> Option<(Key, &str)> {
         "camera" => Key::Camera,
         "date" | "year" => Key::Date,
         "place" => Key::Place,
+        "size" => Key::Size,
         _ => return None,
     };
     Some((key, value))
@@ -279,10 +298,16 @@ mod tests {
         assert_eq!(filters(r#"place:"kyiv, lviv" year:2016,,2018"#), ("".into(), vec![f(Key::Place, "kyiv,lviv", false), f(Key::Date, "2016,2018", false)]));
     }
 
+    /// A photo of this size (a video: its own size, its poster 1024 px wide), with these facts.
+    fn photo(facts: Option<crate::data::Facts>, video: Option<(u32, u32)>, size: (u32, u32)) -> crate::data::Photo {
+        let video = video.map(|(w, h)| serde_json::json!({ "duration": 10.0, "width": w, "height": h }));
+        serde_json::from_value(serde_json::json!({ "file": "", "width": size.0, "height": size.1, "title": "a", "facts": facts, "video": video })).unwrap()
+    }
+
     #[test]
     fn dates_any_of_and_ranges() {
-        let at = |taken: &str| crate::data::Facts { taken: taken.into(), ..Default::default() };
-        let passes = |text: &str, taken: &str| filters(text).1[0].passes("", Some(&at(taken)), false);
+        let at = |taken: &str| photo(Some(crate::data::Facts { taken: taken.into(), ..Default::default() }), None, (1, 1));
+        let passes = |text: &str, taken: &str| filters(text).1[0].passes("", &at(taken));
         assert!(passes("year:2016,2018", "2018-01-01 10:00"));
         assert!(!passes("year:2016,2018", "2017-01-01 10:00"));
         assert!(passes("year:2016..2018", "2016-01-01"));
@@ -300,17 +325,33 @@ mod tests {
     #[test]
     fn filters_pass_photos() {
         let facts = crate::data::Facts { camera: "Google Pixel 7".into(), taken: "2019-07-04 14:00".into(), place: "Lviv, Lviv Oblast, Ukraine".into(), ..Default::default() };
+        let known = photo(Some(facts), None, (1, 1));
         let (_, fs) = filters(r#"camera:pixel date:2019-07 place:lviv "trip""#);
-        assert!(fs.iter().all(|f| f.passes("Trip 2019/a.jpg", Some(&facts), false)));
+        assert!(fs.iter().all(|f| f.passes("Trip 2019/a.jpg", &known)));
         let (_, fs) = filters("date:2019-08");
-        assert!(!fs[0].passes("a.jpg", Some(&facts), false));
+        assert!(!fs[0].passes("a.jpg", &known));
         let (_, fs) = filters("NOT camera:canon camera:pixel");
-        assert!(fs[0].passes("a.jpg", None, false), "nothing known: a NOT lets it through");
-        assert!(!fs[1].passes("a.jpg", None, false), "nothing known: not picked");
+        let unknown = photo(None, None, (1, 1));
+        assert!(fs[0].passes("a.jpg", &unknown), "nothing known: a NOT lets it through");
+        assert!(!fs[1].passes("a.jpg", &unknown), "nothing known: not picked");
+        let (a_photo, a_video) = (photo(None, None, (4000, 3000)), photo(None, Some((1920, 1080)), (1024, 576)));
         let videos = Filter::kind(true);
-        assert!(videos.passes("a.mp4", None, true) && !videos.passes("a.jpg", None, false));
+        assert!(videos.passes("a.mp4", &a_video) && !videos.passes("a.jpg", &a_photo));
         let photos = Filter::kind(false);
-        assert!(photos.passes("a.jpg", None, false) && !photos.passes("a.mp4", None, true));
+        assert!(photos.passes("a.jpg", &a_photo) && !photos.passes("a.mp4", &a_video));
+    }
+
+    #[test]
+    fn sizes_by_the_long_side() {
+        let passes = |text: &str, p: &crate::data::Photo| filters(text).1[0].passes("", p);
+        let (photo_4k, portrait_hd) = (photo(None, None, (3000, 4000)), photo(None, Some((1080, 1920)), (576, 1024)));
+        assert!(passes("size:3840..", &photo_4k) && !passes("size:3840..", &portrait_hd), "a video by its own size, not its poster's");
+        assert!(passes("size:..1920", &portrait_hd) && !passes("size:..1920", &photo_4k), "both ends in");
+        assert!(passes("size:2000..4000", &photo_4k) && !passes("size:2000..4000", &portrait_hd));
+        assert!(passes("size:1920", &portrait_hd) && !passes("size:1921", &portrait_hd), "one size: just it");
+        assert!(passes("size:..1000,3000..", &photo_4k), "any of them");
+        assert!(passes("NOT size:..1920", &photo_4k));
+        assert!(!passes("size:big", &photo_4k), "not a number: nothing");
     }
 
     #[test]
