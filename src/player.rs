@@ -1,6 +1,7 @@
 //! Playing a video in its tile (no sound): ffmpeg decodes it from a time at its own speed (`-re`) to raw RGBA frames of the
-//! size it is shown at, a thread keeps the newest one, and the window uploads it when it is new. Pausing stops ffmpeg; playing
-//! again, or going to another time, starts it there.
+//! size it is shown at (up to the screen's and the video's own), a thread keeps the newest one, and the window uploads it when
+//! it is new. Pausing stops ffmpeg; playing again, going to another time, or the tile growing or shrinking a lot on screen
+//! starts it there again.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -9,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// The longest side frames are decoded at (px).
-pub const MAX_SIDE: u32 = 1280;
+/// How much the tile's size on screen changes before frames are decoded at its new size.
+const REFIT: f32 = 1.5;
 
 /// What the reader thread hands over: the newest frame, and whether the video has run out.
 #[derive(Default)]
@@ -26,6 +27,8 @@ pub struct Player {
     pub duration: f32,
     ffmpeg: PathBuf,
     video: PathBuf,
+    /// The video's own size (px, upright).
+    own: (u32, u32),
     /// The frames' size (px).
     pub size: (u32, u32),
     /// Where it was when it last started or stopped, and since when it plays (None: paused).
@@ -38,16 +41,29 @@ pub struct Player {
 }
 
 impl Player {
-    /// Plays `video` from `at` seconds, in frames of about `long` px on its longer side (its shape: `width` x `height`).
+    /// Plays `video` (its own size: `own`) from `at` seconds, in frames of about `long` px on their longer side, at most
+    /// `most` (the screen's).
     #[allow(clippy::too_many_arguments)]
-    pub fn new(ffmpeg: &Path, video: &Path, photo: usize, copy: Option<usize>, duration: f32, at: f32, (width, height): (u32, u32), long: f32, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
-        let side = (long.round() as u32).clamp(64, MAX_SIDE);
-        let scale = side as f32 / width.max(height).max(1) as f32;
-        let even = |v: f32| ((v / 2.0).round() as u32).max(1) * 2;
-        let size = (even(width as f32 * scale), even(height as f32 * scale));
-        let mut player = Self { photo, copy, duration, ffmpeg: ffmpeg.to_path_buf(), video: video.to_path_buf(), size, at: at.clamp(0.0, duration), since: None, child: None, shared: Arc::new(Shared::default()), wake, texture: None };
+    pub fn new(ffmpeg: &Path, video: &Path, photo: usize, copy: Option<usize>, duration: f32, at: f32, own: (u32, u32), long: f32, most: f32, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let size = frame_size(own, long, most);
+        let mut player = Self { photo, copy, duration, ffmpeg: ffmpeg.to_path_buf(), video: video.to_path_buf(), own, size, at: at.clamp(0.0, duration), since: None, child: None, shared: Arc::new(Shared::default()), wake, texture: None };
         player.play();
         player
+    }
+
+    /// The tile is now `long` px on its longer side (the screen's: `most`): once that is REFIT times bigger or smaller than
+    /// the frames, they are decoded at the new size, on from where it is (the last frame stays until the first new one).
+    pub fn fit(&mut self, long: f32, most: f32) {
+        let size = frame_size(self.own, long, most);
+        let ratio = size.0.max(size.1) as f32 / self.size.0.max(self.size.1) as f32;
+        if ratio < REFIT && ratio > 1.0 / REFIT {
+            return;
+        }
+        self.size = size;
+        if self.playing() {
+            self.at = self.position();
+            self.play();
+        }
     }
 
     /// Where it is (seconds).
@@ -145,6 +161,14 @@ impl Player {
     }
 }
 
+/// Frames of about `long` px on their longer side, no bigger than `most` nor the video's own size, even sides (for ffmpeg).
+fn frame_size((width, height): (u32, u32), long: f32, most: f32) -> (u32, u32) {
+    let own = width.max(height).max(1) as f32;
+    let scale = long.min(most).min(own).max(64.0) / own;
+    let even = |v: f32| ((v / 2.0).round() as u32).max(1) * 2;
+    (even(width as f32 * scale), even(height as f32 * scale))
+}
+
 impl Drop for Player {
     fn drop(&mut self) {
         self.stop_ffmpeg();
@@ -155,6 +179,15 @@ impl Drop for Player {
 mod tests {
     use super::*;
 
+    /// Frames are the tile's size, but never bigger than the screen or the video itself.
+    #[test]
+    fn frames_follow_the_tile() {
+        assert_eq!(frame_size((3840, 2160), 900.0, 2560.0), (900, 506));
+        assert_eq!(frame_size((3840, 2160), 5000.0, 2560.0), (2560, 1440), "the screen's at most");
+        assert_eq!(frame_size((1920, 1080), 5000.0, 2560.0), (1920, 1080), "the video's own at most");
+        assert_eq!(frame_size((1080, 1920), 10.0, 2560.0), (36, 64), "upright, and never tiny");
+    }
+
     /// Frames come at the size asked for, from the time asked for, and stop when paused. Needs ffmpeg; no window.
     #[test]
     fn plays_and_pauses() {
@@ -163,7 +196,7 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
         let video = temp.join("v.mp4");
         assert!(Command::new(&ffmpeg).args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=3:size=320x180:rate=25"]).arg(&video).status().unwrap().success());
-        let mut p = Player::new(&ffmpeg, &video, 0, None, 3.0, 1.0, (320, 180), 160.0, Arc::new(|| {}));
+        let mut p = Player::new(&ffmpeg, &video, 0, None, 3.0, 1.0, (320, 180), 160.0, 1920.0, Arc::new(|| {}));
         assert_eq!(p.size, (160, 90));
         let started = Instant::now();
         while p.shared.frame.lock().unwrap().is_none() && started.elapsed().as_secs() < 5 {

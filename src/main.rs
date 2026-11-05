@@ -826,6 +826,11 @@ impl Viewer {
         self.library.refresh();
     }
 
+    /// The screen's longer side (px): videos are never decoded bigger.
+    fn screen_long(&self) -> f32 {
+        self.camera.viewport.max_element()
+    }
+
     fn size_px(&self) -> f32 {
         (self.camera.scale * self.map.as_ref().map_or(PHOTO_WORLD_DEFAULT, |m| m.photo_world)).max(MIN_PX)
     }
@@ -2129,7 +2134,9 @@ impl Viewer {
             self.player = None;
             return;
         };
+        let most = self.screen_long();
         let Some(p) = &mut self.player else { return };
+        p.fit(tile.long * ppp, most);
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, "video".into()));
         if let Some(texture) = p.texture(ctx) {
             let corner = (0.04 * tile.rect.width().min(tile.rect.height())).min(6.0); // as the map's own corners (map.wgsl)
@@ -2197,7 +2204,7 @@ impl Viewer {
         let photo = &m.data.photos[t.photo];
         let video = files::original(&m.data, t.photo);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(self.wake());
-        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, (photo.width, photo.height), t.long * ppp, wake));
+        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, (photo.width, photo.height), t.long * ppp, self.screen_long(), wake));
     }
 
     /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view
