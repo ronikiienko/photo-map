@@ -73,7 +73,7 @@ impl Stage {
         match self {
             Stage::Videos => "Takes still pictures out of each video (MP4, MOV, MKV and so on) with ffmpeg: about one every 2 seconds. Nothing to do if there are no videos.",
             Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and notes where each one is: the map reads them there, and takes no space for them (unless you asked for them to be copied into the map). Nothing is changed in your folders.",
-            Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. A video's frames each go through the model: the video's vector is their average (which places it on the map), its picture the frame closest to that average, and a search finds it by its best-matching frame. This is the slow part, because every photo goes through the model on the graphics card.",
+            Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. A video's frames each go through the model: the video is shown by its most typical frame (the one closest to their average), placed on the map by that frame's vector, and a search finds it by its best-matching frame. This is the slow part, because every photo goes through the model on the graphics card.",
             Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP). Last, photos that would cover each other are moved apart a little, so that every photo can be seen.",
             Stage::Tree => "Joins all the photos into one tree by the shortest links between them (the most similar pairs). A path between two photos (right-click one on the map) follows this tree: of all the ways from one to the other, it is the one whose biggest change from photo to photo is the smallest. Each photo is compared with the photos in the parts of the map nearest to it, not with all of them.",
             Stage::Regions => "Groups the photos on the map into areas, from a few big ones down to small ones of about 10 photos. The groups are made from neighbours on the map, so each area is one connected piece. Zooming in shows the finer ones.",
@@ -891,7 +891,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     fs::create_dir_all(ctx.dir.join("vectors")).map_err(|e| e.to_string())?;
     let finished = |k: usize| fs::metadata(shard_path(&ctx.dir, k)).is_ok_and(|m| m.len() as usize == shard_len(n, k) * ctx.dim() * 2);
     let todo: Vec<usize> = (0..shards).filter(|&k| !finished(k)).collect();
-    // what each photo is read from: its file, or a video's frames (each embedded; the video's vector is their average). The
+    // what each photo is read from: its file, or a video's frames (each embedded; the video's vector is its poster's). The
     // progress counts pictures: a frame costs what a photo does
     let found = read_found(&ctx.dir)?;
     let photos: Vec<crate::data::Photo> = serde_json::from_slice(&fs::read(ctx.dir.join("photos.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -924,7 +924,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     for &k in &todo {
         in_todo[k * SHARD..k * SHARD + shard_len(n, k)].fill(true);
     }
-    // (not videos: their frames' vectors are needed too, and an earlier map keeps only the average)
+    // (not videos: their frames' vectors are needed too, and an earlier map keeps only the poster's)
     let wanted: std::collections::HashSet<PathBuf> = (0..n).filter(|&i| in_todo[i] && found[i].frames.is_none()).map(|i| found[i].src.clone()).collect();
     let earlier = crate::reuse::Found::open(ctx.dir.parent().ok_or("no maps folder")?, &wanted, &model_id, dim);
     drop(wanted);
@@ -1103,8 +1103,9 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     Ok(Flow::Done)
 }
 
-/// A video's vector from its frames' `rows`: their average (unit length). Its frames' vectors are kept in `dir`/vectors.f16 (for
-/// search: a video matches as well as its best frame), and the frame nearest the average is its poster.jpg.
+/// A video's vector from its frames' `rows`: the poster's, the frame nearest their average (poster.jpg). A real picture's vector,
+/// like every photo's: an average of many frames is like no picture, and drifts toward the other videos'. Its frames' vectors
+/// are kept in `dir`/vectors.f16 (for search: a video matches as well as its best frame).
 fn video_vector(dir: &Path, frames: &[PathBuf], rows: &[Vec<f32>], dim: usize) -> io::Result<Vec<f32>> {
     let mut mean = vec![0f32; dim];
     for r in rows {
@@ -1119,7 +1120,7 @@ fn video_vector(dir: &Path, frames: &[PathBuf], rows: &[Vec<f32>], dim: usize) -
     fs::copy(&frames[best], dir.join("poster.jpg"))?;
     let bytes: Vec<u8> = rows.iter().flatten().flat_map(|&x| half::f16::from_f32(x).to_le_bytes()).collect();
     write_atomic(&dir.join("vectors.f16"), &bytes)?;
-    Ok(mean)
+    Ok(rows[best].clone())
 }
 
 fn read_layout(dir: &Path, n: usize) -> Result<Vec<f32>, String> {
@@ -1454,7 +1455,7 @@ mod tests {
         fs::remove_dir_all(&temp).unwrap();
     }
 
-    /// A video is one photo on the map: its vector the average of its frames', its picture the frame nearest that average, its
+    /// A video is one photo on the map: its picture and vector the frame nearest its frames' average, its
     /// frames' vectors kept for search. Needs ffmpeg (it makes the videos, too).
     #[test]
     fn a_video_is_one_photo() {

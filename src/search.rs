@@ -168,7 +168,7 @@ pub fn best_frames(scores: &mut [f32], frame_scores: &[f32], frames: &[crate::da
 /// A map's vectors, memory-mapped.
 pub struct Vectors {
     images: Mmap,
-    /// The videos' frames (frames.bin; empty if none): a video's own row is the average of its frames, which places it on the
+    /// The videos' frames (frames.bin; empty if none): a video's own row is its poster frame's, which places it on the
     /// map; a search scores it by its best frame (best_frames).
     frames: Option<Mmap>,
     /// How many numbers each vector has.
