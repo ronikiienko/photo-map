@@ -2431,10 +2431,13 @@ fn common_root<'a>(mut paths: impl Iterator<Item = &'a str>) -> usize {
     first.as_bytes()[..len].iter().rposition(|&b| b == b'/' || b == b'\\').map_or(0, |k| k + 1)
 }
 
-/// Which photo of the map is this file, if any (one pass over them all, for a click).
+/// Which photo of the map is this file, if any (one pass over them all, for a click): a video's frame counts as its video.
 fn find_photo(data: &data::MapData, path: &std::path::Path) -> Option<usize> {
     let rel = path.strip_prefix(&data.bundle).ok();
-    data.photos.iter().position(|p| if p.file.is_empty() { std::path::Path::new(&p.source) == path } else { rel.is_some_and(|r| r == std::path::Path::new(&p.file)) })
+    let in_map = |file: &str| rel.is_some_and(|r| r == std::path::Path::new(file));
+    let photo = data.photos.iter().position(|p| if p.file.is_empty() { std::path::Path::new(&p.source) == path } else { in_map(&p.file) });
+    // a video's frame (searched with from a match beside the world) is found as its video
+    photo.or_else(|| data.frames.iter().find(|f| in_map(&f.file)).map(|f| f.video))
 }
 
 fn photo_path(text: &str) -> Option<PathBuf> {
