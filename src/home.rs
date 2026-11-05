@@ -377,7 +377,7 @@ impl Home {
                             }
                             let rate = s.rate().unwrap_or(0.0);
                             if rate > 0.0 && by_time {
-                                line += &format!(" · {} of video a second", duration(rate));
+                                line += &if rate < 10.0 { format!(" · {rate:.1}x real time") } else { format!(" · {rate:.0}x real time") };
                             } else if rate > 0.0 && by_photo {
                                 line += &format!(" · {rate:.1} {}/s", s.unit);
                             }
