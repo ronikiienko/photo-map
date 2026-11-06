@@ -44,8 +44,8 @@ pub fn cuda() -> ep::ExecutionProviderDispatch {
 }
 
 impl Runtime {
-    /// The process's runtime, started the first time it is asked for (ONNX Runtime allows one environment in a process; the photo
-    /// models' hub and the sound step of a build share it). A failure to start is kept too: it would fail the same way again.
+    /// The process's runtime, started the first time it is asked for (ONNX Runtime allows one environment in a process: the models'
+    /// hub and the tests share it). A failure to start is kept too: it would fail the same way again.
     pub fn shared(root: &Path) -> Result<&'static Runtime> {
         static RUNTIME: std::sync::OnceLock<Result<Runtime>> = std::sync::OnceLock::new();
         RUNTIME.get_or_init(|| Runtime::start(root)).as_ref().map_err(|e| e.clone())

@@ -41,8 +41,6 @@ pub struct Bar<'a> {
     pub hidden: Vec<(String, usize)>,
     /// A video's moments are shown beside the matches ("Moments that match"): a chip says so, and its cross ends it.
     pub moments: bool,
-    /// Search by look or by sound (Some(true)): a switch at the box's start, only on a map whose videos were listened to (None).
-    pub listening: Option<bool>,
     /// The open map's photos, to find a photo searched for on it.
     pub data: Option<&'a crate::data::MapData>,
     /// A small picture of the map's photo with this number, for the empty box offering it (suggest.rs); None if it can't be read.
@@ -91,27 +89,12 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                         }
                         Engine::NoMap => {}
                     }
-                    // look or sound: what the words are looked for in
-                    if let Some(on) = bar.listening {
-                        let mut choice = on;
-                        ui.scope(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
-                            ui.selectable_value(&mut choice, false, egui::RichText::new("Look").size(12.5)).on_hover_text("search the photos and the videos' frames by what they show");
-                            ui.selectable_value(&mut choice, true, egui::RichText::new("Sound").size(12.5)).on_hover_text("search the videos by what is said and heard in them, in any language");
-                        });
-                        if choice != on {
-                            actions.listen = Some(choice);
-                        }
-                    }
-                    let listening = bar.listening == Some(true);
                     let clearable = !bar.search.is_empty() || !bar.photos.is_empty() || bar.found > 0;
                     // how many photos are hidden, a small badge at the box's end that opens the hidden searches
                     let hidden_total: usize = bar.hidden.iter().map(|h| h.1).sum();
                     let badge = (hidden_total > 0).then(|| format!("{hidden_total} hidden {}", if *bar.hidden_open { "⏷" } else { "⏵" }));
-                    // ideas (suggest.rs): up / down switch, Tab takes one; taken before the box sees the keys (not by sound: they are
-                    // about what photos show)
-                    let words = bar.photos.is_empty() && !listening;
+                    // ideas (suggest.rs): up / down switch, Tab takes one; taken before the box sees the keys
+                    let words = bar.photos.is_empty();
                     let mut to_end = false;
                     if words && focused {
                         let (tab, down, up) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, egui::Key::Tab), i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)));
@@ -197,7 +180,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                         ui.add(egui::Label::new(hint).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text(tip);
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    if !bar.photos.is_empty() && !listening {
+                    if !bar.photos.is_empty() {
                         // a search is photos or words, never both: while photos are the search they take the place of the words
                         for (k, (path, tex)) in bar.photos.iter().enumerate() {
                             let image = egui::Image::new((tex.id(), egui::vec2(26.0 * tex.aspect_ratio(), 26.0))).corner_radius(4);
@@ -224,13 +207,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                         }
                     } else {
                         // empty: the idea is the placeholder; typing: the rest of it shows faint after the words
-                        let hint = if listening && bar.search.is_empty() {
-                            "what is said or heard in the videos".to_string()
-                        } else if bar.search.is_empty() && photo_idea.is_none() {
-                            idea.clone().unwrap_or_default()
-                        } else {
-                            String::new()
-                        };
+                        let hint = if bar.search.is_empty() && photo_idea.is_none() { idea.clone().unwrap_or_default() } else { String::new() };
                         let edit = egui::TextEdit::singleline(bar.search).id(box_id).hint_text(hint).frame(egui::Frame::NONE).desired_width(ui.available_width()).show(ui);
                         // the keys stay with the box: Tab and up / down would otherwise move to another button
                         ui.memory_mut(|m| m.set_focus_lock_filter(box_id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..Default::default() }));
@@ -548,8 +525,6 @@ mod shots {
         /// The empty box offers a (made-up) photo of the map.
         photo_idea: bool,
         idea_tex: Option<egui::TextureHandle>,
-        /// The map has its videos' sound: Some(searching by it).
-        listening: Option<bool>,
     }
 
     fn state() -> State {
@@ -572,7 +547,6 @@ mod shots {
             focus: false,
             photo_idea: false,
             idea_tex: None,
-            listening: None,
         }
     }
 
@@ -637,7 +611,6 @@ mod shots {
                     all_marked: false,
                     hidden: s.hidden.clone(),
                     moments: s.moments,
-                    listening: s.listening,
                     data: None,
                     thumb: &mut |_| idea_tex.clone(),
                 };
@@ -672,11 +645,6 @@ mod shots {
         shot("7b-photo-hovered", State { photos: 3, search: String::new(), filters: vec![filter("place:lviv")], ..results() }, Some(egui::pos2(105.0, 27.0)));
         shot("8-hidden", State { hidden: vec![("cars".into(), 120), ("like IMG_2041 +2".into(), 40)], hidden_open: true, ..results() }, None);
         shot("10-moments", State { moments: true, ..results() }, None);
-        // a map whose videos were listened to: the switch, by look and by sound
-        shot("11a-sound-switch", State { listening: Some(false), ..state() }, None);
-        shot("11b-sound-empty", State { listening: Some(true), focus: true, ..state() }, None);
-        shot("11c-sound-results", State { listening: Some(true), search: "the toast at the wedding".into(), found: 24, at: Some(0), moments: true, status: "the toast at the wedding: similarity 0.31 to 0.52".into(), ..state() }, None);
-        shot("11d-sound-narrow", State { width: 300.0, listening: Some(true), search: "the toast at the wedding".into(), found: 24, at: Some(0), ..state() }, None);
         shot("9-narrow", State { width: 300.0, filters: vec![filter("place:istanbul"), filter("NOT camera:pixel,redmi")], hidden: vec![("cars".into(), 120)], hidden_open: true, ..results() }, None);
         // a photo of the map offered in the empty box; + Filter
         {

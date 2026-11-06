@@ -13,28 +13,17 @@ use std::sync::{Arc, Mutex};
 
 pub const SIGLIP_BASE_512: &str = "google/siglip2-base-patch16-512";
 pub const SIGLIP_BASE_256: &str = "google/siglip2-base-patch16-256";
-/// The sound model: videos are searched by what is said and heard in them (listen.rs).
-pub const EMBEDDINGGEMMA_2: &str = "google/embeddinggemma-2";
 /// What a new map is made with.
 pub const DEFAULT: &str = SIGLIP_BASE_256;
 
-/// What a model looks at: photos (a map is made and searched with one of these), or the videos' sound (any map with videos gets
-/// it if it is downloaded).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind {
-    Photos,
-    Sound,
-}
-
 pub struct Spec {
     pub id: &'static str,
-    pub kind: Kind,
     pub label: &'static str,
     /// A line on what it is good for, for the model choice.
     pub note: &'static str,
     /// How many numbers a photo's vector has.
     pub dim: usize,
-    /// Photos are squeezed into a square of this many pixels a side (0: a sound model).
+    /// Photos are squeezed into a square of this many pixels a side.
     pub size: u32,
     /// The most tokens of a search text it reads (about 3 or 4 words in 5); None: more than any search is.
     pub max_tokens: Option<usize>,
@@ -57,10 +46,9 @@ const fn file(path: &'static str, size: u64, sha256: &'static str) -> File {
     File { path, size, sha256 }
 }
 
-pub const ALL: [Spec; 3] = [
+pub const ALL: [Spec; 2] = [
     Spec {
         id: SIGLIP_BASE_256,
-        kind: Kind::Photos,
         label: "SigLIP 2 Base (256 px)",
         note: "The fastest. Short words and photos only.",
         dim: 768,
@@ -77,7 +65,6 @@ pub const ALL: [Spec; 3] = [
     },
     Spec {
         id: SIGLIP_BASE_512,
-        kind: Kind::Photos,
         label: "SigLIP 2 Base (512 px)",
         note: "Looks at photos in more detail than the 256 px one, and is several times slower. Short words and photos only.",
         dim: 768,
@@ -92,41 +79,10 @@ pub const ALL: [Spec; 3] = [
             file("onnx/vision_model_fp16.onnx", 187312043, "70cad97773fbda5d8edbd7df3abd6023346e3ce4bf18747557d28dde570bdec8"),
         ],
     },
-    // only its sound side and its text model (which every sound window goes through too); float32, as the publisher made them:
-    // the graphics card runs them in fp16 and bf16 (patch.rs), the processor in float32 (its float16 is slower)
-    Spec {
-        id: EMBEDDINGGEMMA_2,
-        kind: Kind::Sound,
-        label: "EmbeddingGemma 2 (sound)",
-        note: "Searches videos by what is said and heard in them, in any language: \"the toast at the wedding\". A map's videos are listened to when the map is made, if this is downloaded.",
-        dim: 768,
-        size: 0,
-        max_tokens: None,
-        repo: "onnx-community/embeddinggemma-2-ONNX",
-        revision: "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
-        folder: "embeddinggemma-2",
-        files: &[
-            file("tokenizer.json", 32170510, "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4"),
-            file("onnx/audio_encoder.onnx", 204577, "e0a62590c49949fe0b1410f5dc52c92a185abb4c4e69e2c50a4e316103fdbc09"),
-            file("onnx/audio_encoder.onnx_data", 1172750848, "6943b910d1d1e9b5dffd4ccad63f61aa308ad10b70ed128bb61886b119da1e3a"),
-            file("onnx/model.onnx", 421421, "bc47de15f81208a5c99e5ab10f746d5e33b51ea228b7dc0bef9c133a94f1c1c3"),
-            file("onnx/model.onnx_data", 1084170240, "9fd452bfc6916e5a92f080f8dada35598ca4512b21c65897d4c5974d5f9630a2"),
-        ],
-    },
 ];
 
 pub fn spec(id: &str) -> Option<&'static Spec> {
     ALL.iter().find(|s| s.id == id)
-}
-
-/// The models a map can be made with.
-pub fn photo_models() -> impl Iterator<Item = &'static Spec> {
-    ALL.iter().filter(|s| s.kind == Kind::Photos)
-}
-
-/// The sound model.
-pub fn sound() -> &'static Spec {
-    spec(EMBEDDINGGEMMA_2).expect("listed")
 }
 
 impl Spec {
@@ -195,7 +151,7 @@ impl Hub {
                 *shared.slot.lock().unwrap() = None;
                 *shared.state.lock().unwrap() = State::default();
                 let loaded = (|| {
-                    let spec = spec(&id).filter(|s| s.kind == Kind::Photos).ok_or_else(|| format!("unknown model {id}"))?;
+                    let spec = spec(&id).ok_or_else(|| format!("unknown model {id}"))?;
                     Siglip::load(Runtime::shared(&root)?, &root, spec, spec.size)
                 })();
                 match loaded {
@@ -367,7 +323,7 @@ mod tests {
         let keep = root.join(".cache/test/agree");
         std::fs::create_dir_all(&keep).unwrap();
         let mut hub = None;
-        for spec in photo_models().filter(|s| s.installed(root)) {
+        for spec in ALL.iter().filter(|s| s.installed(root)) {
             let hub = hub.get_or_insert_with(|| test_hub_with(spec.id)).clone();
             assert_eq!(hub.wait_for(spec.id, &|| false), Ok(true));
             let prepared: Vec<_> = files.iter().map(|f| spec.prepare(&crate::photo::load_for(f, |w, h| spec.longest_side_needed(w, h)).unwrap()).unwrap()).collect();

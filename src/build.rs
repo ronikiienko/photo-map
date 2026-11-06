@@ -1,12 +1,12 @@
-//! Making a map from a folder of photos, in this process (no Python): read the videos, find the photos, embed, listen, lay out,
+//! Making a map from a folder of photos, in this process (no Python): read the videos, find the photos, embed, lay out,
 //! find regions, name them, bake.
 //!
 //! A map being made is a folder maps/<name>.building/ that keeps everything done so far, so closing the app (or pausing) loses at
 //! most a few seconds of work. Besides the map's own files (data.rs), as each stage makes them, it holds:
 //!     job.json      name, sources, the stage to run next, photo count
 //!     files.json    the photos and videos found (scan), in order: they are the map's items
-//!     videos/<k>/   the kth video's frames (0.jpg, 1.jpg...), times.txt, video.json, facts.json, poster.jpg, and its sound's
-//!                   vectors (sound.f16) and their starts (sound.txt): a video with them is never redone. They become frames/<i>/.
+//!     videos/<k>/   the kth video's frames (0.jpg, 1.jpg...), times.txt, video.json, facts.json, poster.jpg: a video with
+//!                   them is never redone. They become frames/<i>/.
 //!     pictures/     the vectors of the pictures (photos and videos' frames) in shards of SHARD (embed): a finished shard is never redone
 //!     levels.bin    the regions of every level (regions), until they are named
 //! When the last stage is done the folder is renamed to maps/<name>.photomap.
@@ -40,7 +40,6 @@ pub enum Stage {
     Videos,
     Scan,
     Embed,
-    Sound,
     Layout,
     Tree,
     Regions,
@@ -50,7 +49,7 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 10] = [Stage::Videos, Stage::Scan, Stage::Embed, Stage::Sound, Stage::Layout, Stage::Tree, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
+    pub const ALL: [Stage; 9] = [Stage::Videos, Stage::Scan, Stage::Embed, Stage::Layout, Stage::Tree, Stage::Regions, Stage::Names, Stage::Bake, Stage::Finish];
 
     /// What the stage is doing, for the list of steps.
     pub fn label(self) -> &'static str {
@@ -58,7 +57,6 @@ impl Stage {
             Stage::Videos => "Reading videos",
             Stage::Scan => "Finding photos",
             Stage::Embed => "Understanding photos",
-            Stage::Sound => "Listening to videos",
             Stage::Layout => "Laying out the map",
             Stage::Tree => "Linking similar photos",
             Stage::Regions => "Finding regions",
@@ -74,7 +72,6 @@ impl Stage {
             Stage::Videos => "Takes still pictures out of each video (MP4, MOV, MKV and so on) with ffmpeg: about one every 2 seconds. Nothing to do if there are no videos.",
             Stage::Scan => "Looks through the folders you gave for photo files (JPEG, PNG, WebP and so on), counts them and notes where each one is: the map reads them there, and takes no space for them. Nothing is changed in your folders.",
             Stage::Embed => "The model looks at every photo and turns it into a vector: hundreds of numbers that describe what is in the picture. Photos of similar things get similar numbers, and that is all the map uses to decide what belongs together. A video's frames each go through the model: the video is shown by its most typical frame (the one closest to their average), placed on the map by that frame's vector, and a search finds it by its best-matching frame. This is the slow part, because every photo goes through the model on the graphics card.",
-            Stage::Sound => "The sound model listens to each video, 10 seconds at a time, and turns what is said and heard there into a vector like a search's words get: a video can then be searched by its sound as well as by its pictures. Skipped if the map has no videos, or the sound model (EmbeddingGemma 2) isn't downloaded (Models, on the Maps page).",
             Stage::Layout => "Hundreds of numbers can't be drawn on a screen, so they are squeezed down to 2 (x and y) in a way that keeps photos with similar vectors close together. It first finds each photo's 10 nearest neighbours, then arranges the photos in the plane so that neighbours stay neighbours (the method is called UMAP). Last, photos that would cover each other are moved apart a little, so that every photo can be seen.",
             Stage::Tree => "Joins all the photos into one tree by the shortest links between them (the most similar pairs). A path between two photos (right-click one on the map) follows this tree: of all the ways from one to the other, it is the one whose biggest change from photo to photo is the smallest. Each photo is compared with the photos in the parts of the map nearest to it, not with all of them.",
             Stage::Regions => "Groups the photos on the map into areas, from a few big ones down to small ones of about 10 photos. The groups are made from neighbours on the map, so each area is one connected piece. Zooming in shows the finer ones.",
@@ -160,7 +157,7 @@ pub fn clean_name(name: &str) -> String {
 
 /// Start a new build: its folder with job.json. Err with what is wrong (name taken, folder missing).
 pub fn create(maps: &Path, name: &str, sources: &[PathBuf], every: usize, model: &str) -> Result<PathBuf, String> {
-    if !models::spec(model).is_some_and(|s| s.kind == models::Kind::Photos) {
+    if models::spec(model).is_none() {
         return Err(format!("unknown model {model}"));
     }
     let name = clean_name(name);
@@ -414,7 +411,6 @@ fn run(mut ctx: Ctx) -> (Arc<Shared>, Result<(), String>) {
                 Stage::Videos => read_videos(&mut ctx)?,
                 Stage::Scan => scan(&mut ctx)?,
                 Stage::Embed => embed_photos(&mut ctx)?,
-                Stage::Sound => listen(&mut ctx)?,
                 Stage::Layout => lay_out(&mut ctx)?,
                 Stage::Tree => make_tree(&mut ctx)?,
                 Stage::Regions => find_regions(&mut ctx)?,
@@ -773,10 +769,6 @@ pub fn same_disk(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn read_items(dir: &Path) -> Result<Vec<crate::data::Item>, String> {
-    serde_json::from_slice(&fs::read(dir.join("items.json")).map_err(|e| format!("items.json: {e}"))?).map_err(|e| e.to_string())
-}
-
 fn write_items(ctx: &mut Ctx) -> Result<Flow, String> {
     let found = read_found(&ctx.dir)?;
     ctx.job.photos = found.len();
@@ -804,7 +796,7 @@ fn write_items(ctx: &mut Ctx) -> Result<Flow, String> {
                         Err(e) => return Some(Err(format!("{}: {e}", dir.display()))),
                     };
                     let facts = fs::read(dir.join("facts.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
-                    Ok(crate::data::Item { source, width: video.width, height: video.height, facts, video: Some(crate::data::Clip { duration: video.duration, times, sound: Vec::new() }) })
+                    Ok(crate::data::Item { source, width: video.width, height: video.height, facts, video: Some(crate::data::Clip { duration: video.duration, times }) })
                 }
                 _ => Ok(crate::data::Item { source, width: f.width, height: f.height, facts: crate::files::facts(&f.src), video: None }),
             })
@@ -1020,153 +1012,6 @@ fn put_in_place(dir: &Path, start: &[usize], frame_dirs: &[Option<PathBuf>], pic
     fs::rename(dir.join("look.tmp"), dir.join("look.bin"))
 }
 
-/// What the listening step hands from the thread reading the videos' sound to the model: a few windows of a video (their starts and
-/// features), or the end of one.
-/// Videos whose sound is read at once by the listening step.
-const READERS: usize = 4;
-
-enum Heard {
-    Windows(usize, Vec<(f32, Vec<f32>)>),
-    End(usize),
-}
-
-/// The videos' sound, 10 s windows of it through the sound model (listen.rs), if it is downloaded: a video's go to its folder
-/// (sound.f16, a row a window, and sound.txt, their starts: written last, a video with it is done), then all of them, video after
-/// video, to sound.bin, and their starts to items.json. A thread reads the sound with ffmpeg and makes the windows' features while
-/// the card embeds the ones before. A video without sound has none.
-fn listen(ctx: &mut Ctx) -> Result<Flow, String> {
-    use crate::listen;
-    let spec = models::sound();
-    let found = read_found(&ctx.dir)?;
-    // (photo, its file, its frames folder, how long it is)
-    let videos: Vec<(usize, PathBuf, PathBuf, f32)> = found.iter().enumerate().filter_map(|(i, f)| Some((i, f.src.clone(), ctx.dir.join(f.frames.as_ref()?), f.video.map_or(0.0, |v| v.duration)))).collect();
-    drop(found);
-    let bin = ctx.dir.join("sound.bin");
-    if videos.is_empty() || !spec.installed(&ctx.root) {
-        // no videos, or no sound model: they are found by their pictures only
-        let _ = fs::remove_file(&bin);
-        return Ok(Flow::Done);
-    }
-    let Some(ffmpeg) = crate::runtime::ffmpeg(&ctx.root) else {
-        return Err("the videos' sound is read with ffmpeg: download it in Runtime (on the Maps page), then carry on".into());
-    };
-    let done_with = |dir: &Path| dir.join("sound.txt").exists();
-    let todo: Vec<(PathBuf, PathBuf, f32)> = videos.iter().filter(|v| !done_with(&v.2)).map(|v| (v.1.clone(), v.2.clone(), v.3)).collect();
-    let mut finished: f32 = videos.iter().filter(|v| done_with(&v.2)).map(|v| v.3).sum();
-    let total: f32 = videos.iter().map(|v| v.3).sum();
-    shared_state(&ctx.shared).unit = "seconds of video";
-    let dim = spec.dim;
-    if !todo.is_empty() {
-        ctx.progress(finished as usize, total as usize, "loading the sound model (the first time it is prepared for this computer: a few minutes)");
-        // the photo model's sessions on the card go first: both don't fit
-        ctx.hub.release_build();
-        let mut listener = listen::Listener::for_build(crate::embed::Runtime::shared(&ctx.root)?, &ctx.root, spec)?;
-        ctx.progress(finished as usize, total as usize, if listener.card == listen::Card::Processor { "on the processor: slow without a graphics card" } else { "" });
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Heard>(4 * READERS);
-        let stop = Arc::new(AtomicBool::new(false));
-        // a few videos are read at once (starting ffmpeg and decoding are much of the work with many short videos), each by its own
-        // thread taking the next one not taken
-        let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let readers: Vec<_> = (0..READERS.min(todo.len()))
-            .map(|_| {
-                let (todo, stop, next, tx, ffmpeg) = (todo.clone(), stop.clone(), next.clone(), tx.clone(), ffmpeg.clone());
-                std::thread::spawn(move || {
-                    let features = |pending: &mut Vec<(f32, Vec<f32>)>| pending.par_drain(..).map(|(start, samples)| (start, listen::features(&samples))).collect::<Vec<_>>();
-                    loop {
-                        let k = next.fetch_add(1, Ordering::Relaxed);
-                        let Some((video, _, _)) = todo.get(k) else { return };
-                        let mut pending = Vec::new();
-                        let mut sent = true;
-                        let read = listen::read_windows(&ffmpeg, video, &mut |start, samples| {
-                            pending.push((start, samples));
-                            if pending.len() == listen::BATCH {
-                                sent = !stop.load(Ordering::Relaxed) && tx.send(Heard::Windows(k, features(&mut pending))).is_ok();
-                            }
-                            sent
-                        });
-                        match read {
-                            Ok(true) => {}
-                            Ok(false) => return, // stopped
-                            Err(e) => eprintln!("{}: its sound can't be read: {e}", video.display()),
-                        }
-                        if !pending.is_empty() && tx.send(Heard::Windows(k, features(&mut pending))).is_err() {
-                            return;
-                        }
-                        if tx.send(Heard::End(k)).is_err() {
-                            return;
-                        }
-                    }
-                })
-            })
-            .collect();
-        drop(tx); // the readers hold the only senders: the channel ends when they are all done
-        // each video being read: its rows, their starts and how far it has been heard
-        let mut open: std::collections::HashMap<usize, (Vec<u8>, Vec<f32>, f32)> = std::collections::HashMap::new();
-        let mut outcome = Ok(Flow::Done);
-        for heard in rx.iter() {
-            if ctx.paused() {
-                outcome = Ok(Flow::Paused);
-                break;
-            }
-            match heard {
-                Heard::Windows(k, windows) => {
-                    let features: Vec<Vec<f32>> = windows.iter().map(|w| w.1.clone()).collect();
-                    let (rows, starts, heard) = open.entry(k).or_default();
-                    match listener.embed_windows(&features) {
-                        Ok(vectors) => {
-                            for (v, (start, _)) in vectors.iter().zip(&windows) {
-                                rows.extend(v.iter().flat_map(|x| half::f16::from_f32(*x).to_le_bytes()));
-                                starts.push(*start);
-                            }
-                        }
-                        Err(e) => {
-                            outcome = Err(e);
-                            break;
-                        }
-                    }
-                    *heard = windows.last().map_or(0.0, |w| w.0 + listen::WINDOW).min(todo[k].2);
-                    ctx.set_done((finished + open.values().map(|o| o.2).sum::<f32>()) as usize);
-                }
-                Heard::End(k) => {
-                    let (rows, starts, _) = open.remove(&k).unwrap_or_default();
-                    let dir = &todo[k].1;
-                    let times: String = starts.iter().map(|t| format!("{t}\n")).collect();
-                    write_atomic(&dir.join("sound.f16"), &rows).and_then(|_| write_atomic(&dir.join("sound.txt"), times.as_bytes())).map_err(|e| e.to_string())?;
-                    finished += todo[k].2;
-                    ctx.set_done((finished + open.values().map(|o| o.2).sum::<f32>()) as usize);
-                }
-            }
-        }
-        stop.store(true, Ordering::Relaxed);
-        drop(rx); // a reader waiting to send gives up
-        for r in readers {
-            let _ = r.join();
-        }
-        if !matches!(outcome?, Flow::Done) {
-            return Ok(Flow::Paused);
-        }
-    }
-    // all of them together, in the items' order
-    let mut items = read_items(&ctx.dir)?;
-    let mut all_rows = Vec::new();
-    for (i, _, dir, _) in &videos {
-        let times: Vec<f32> = fs::read_to_string(dir.join("sound.txt")).map_err(|e| e.to_string())?.lines().filter_map(|l| l.parse().ok()).collect();
-        let rows = fs::read(dir.join("sound.f16")).map_err(|e| e.to_string())?;
-        if rows.len() != times.len() * dim * 2 {
-            return Err(format!("{}: {} sound windows, {} bytes of vectors", dir.display(), times.len(), rows.len()));
-        }
-        all_rows.extend(rows);
-        items[*i].video.as_mut().ok_or("items.json doesn't match the videos")?.sound = times;
-    }
-    if all_rows.is_empty() {
-        let _ = fs::remove_file(&bin);
-    } else {
-        write_atomic(&bin, &all_rows).map_err(|e| e.to_string())?;
-    }
-    write_atomic(&ctx.dir.join("items.json"), &serde_json::to_vec(&items).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    Ok(Flow::Done)
-}
-
 fn read_layout(dir: &Path, n: usize) -> Result<Vec<f32>, String> {
     let raw = fs::read(dir.join("layout.bin")).map_err(|e| format!("layout.bin: {e}"))?;
     if raw.len() != n * 8 {
@@ -1306,7 +1151,6 @@ fn keep_frames(ctx: &mut Ctx, found: &[Found]) -> Result<Vec<PathBuf>, String> {
 
 fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
     let found = read_found(&ctx.dir)?;
-    let sound = ctx.dir.join("sound.bin").exists().then(|| crate::data::Vectors { model: models::sound().id.to_string(), dim: models::sound().dim });
     let manifest = crate::data::Manifest {
         name: ctx.job.name.clone(),
         created: ctx.job.created.clone(),
@@ -1314,10 +1158,9 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
         videos: found.iter().filter(|f| f.frames.is_some()).count(),
         photo_side: ctx.job.photo_side.ok_or("the layout's photo size is missing: lay out the map again")?,
         look: crate::data::Vectors { model: ctx.job.model.clone(), dim: ctx.dim() },
-        sound,
     };
     write_atomic(&ctx.dir.join("manifest.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    // the videos' folders become item i's frames/<i>/, without what is in items.json, look.bin and sound.bin now (a folder already
+    // the videos' folders become item i's frames/<i>/, without what is in items.json and look.bin now (a folder already
     // moved is not there any more: a finish stopped half way carries on)
     for (i, f) in found.iter().enumerate() {
         let Some(rel) = &f.frames else { continue };
@@ -1325,7 +1168,7 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
         if !from.is_dir() {
             continue;
         }
-        for name in ["times.txt", "video.json", "facts.json", "sound.f16", "sound.txt"] {
+        for name in ["times.txt", "video.json", "facts.json"] {
             let _ = fs::remove_file(from.join(name));
         }
         fs::create_dir_all(ctx.dir.join("frames")).map_err(|e| e.to_string())?;
@@ -1346,8 +1189,8 @@ fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
 mod tests {
     use super::*;
 
-    /// Turns maps of the format before items.json into today's (data.rs), in place: photos.json, frames.json and sounds.json become
-    /// items.json; embeddings.bin and frames.bin look.bin; sounds.bin sound.bin; region_names.json regions.json; pages_bc7.bin
+    /// Turns maps of the format before items.json into today's (data.rs), in place: photos.json and frames.json become items.json;
+    /// embeddings.bin and frames.bin look.bin; region_names.json regions.json; pages_bc7.bin
     /// pages.bin; frames/<k, 6 digits>/<n, 6 digits>.jpg frames/<i>/<n - 1>.jpg. The old json files are kept in `backup`/<map>/
     /// first. A map stopped half way is carried on. Maps with photos copied into them are left alone.
     /// cargo test --release convert_maps -- --ignored --nocapture (PHOTO_MAP_MAPS: the maps folder, else the app's)
@@ -1365,12 +1208,9 @@ mod tests {
                     let data = crate::data::MapData::load(&dir, &crate::data::Progress::default()).expect("the map opens");
                     let look = fs::metadata(dir.join("look.bin")).unwrap().len() as usize;
                     assert_eq!(look, data.pictures() * data.manifest.dim() * 2, "look.bin");
-                    if let Some(s) = &data.manifest.sound {
-                        assert_eq!(fs::metadata(dir.join("sound.bin")).unwrap().len() as usize, data.sounds.len() * s.dim * 2, "sound.bin");
-                    }
                     assert!((0..data.pictures()).all(|i| i < data.n() || data.picture_path(i).exists()), "every frame's file");
                     assert!((0..data.n()).all(|i| data.photos[i].video.is_none() || data.path(i).exists()), "every poster");
-                    eprintln!("{}: {} items, {} frames, {} sound windows ({:.1} s)", dir.display(), data.n(), data.frames.len(), data.sounds.len(), started.elapsed().as_secs_f32());
+                    eprintln!("{}: {} items, {} frames ({:.1} s)", dir.display(), data.n(), data.frames.len(), started.elapsed().as_secs_f32());
                 }
                 Err(e) => eprintln!("{}: left as it was: {e}", dir.display()),
             }
@@ -1385,7 +1225,6 @@ mod tests {
         let photos = photos.as_array().ok_or("photos.json is not a list")?;
         let frames = if dir.join("frames.json").exists() { read("frames.json")? } else { Value::Array(Vec::new()) };
         let frames = frames.as_array().ok_or("frames.json is not a list")?;
-        let sounds = if dir.join("sounds.json").exists() { Some(read("sounds.json")?) } else { None };
         let n = photos.len();
         if old["photos"].as_u64() != Some(n as u64) {
             return Err("manifest.json and photos.json don't agree".into());
@@ -1398,24 +1237,17 @@ mod tests {
             dim: old["embedding"]["dim"].as_u64().map_or(DIM, |d| d as usize),
         };
         let photo_side = old["photo_side"].as_f64().ok_or("no photo_side")? as f32;
-        let windows: Vec<(usize, f32)> = sounds.as_ref().map_or(Vec::new(), |s| s["windows"].as_array().unwrap().iter().map(|w| (w["video"].as_u64().unwrap() as usize, w["time"].as_f64().unwrap() as f32)).collect());
-        let sound = sounds.as_ref().filter(|_| !windows.is_empty()).map(|s| crate::data::Vectors { model: s["model"].as_str().unwrap().to_string(), dim: s["dim"].as_u64().unwrap() as usize });
-        // frames and windows come video after video
-        let of = |list: Vec<(usize, f32)>| -> Result<std::collections::HashMap<usize, Vec<f32>>, String> {
-            let mut out: std::collections::HashMap<usize, Vec<f32>> = std::collections::HashMap::new();
-            let mut last = 0;
-            for (video, time) in list {
-                if video < last || video >= n || photos[video].get("video").is_none() {
-                    return Err(format!("frames or windows out of order at video {video}"));
-                }
-                last = video;
-                out.entry(video).or_default().push(time);
+        // the frames come video after video
+        let mut times: std::collections::HashMap<usize, Vec<f32>> = std::collections::HashMap::new();
+        let mut last = 0;
+        for f in frames {
+            let (video, time) = (f["video"].as_u64().unwrap() as usize, f["time"].as_f64().unwrap() as f32);
+            if video < last || video >= n || photos[video].get("video").is_none() {
+                return Err(format!("frames out of order at video {video}"));
             }
-            Ok(out)
-        };
-        let frame_list: Vec<(usize, f32)> = frames.iter().map(|f| (f["video"].as_u64().unwrap() as usize, f["time"].as_f64().unwrap() as f32)).collect();
-        let times = of(frame_list)?;
-        let starts = of(windows)?;
+            last = video;
+            times.entry(video).or_default().push(time);
+        }
         let mut items = Vec::with_capacity(n);
         for (i, p) in photos.iter().enumerate() {
             let source = p["source"].as_str().ok_or(format!("photo {i} has no source"))?.to_string();
@@ -1425,7 +1257,7 @@ mod tests {
                 Some(v) => {
                     let (width, height) = size(v);
                     let times = times.get(&i).cloned().ok_or(format!("video {i} has no frames"))?;
-                    let clip = crate::data::Clip { duration: v["duration"].as_f64().unwrap() as f32, times, sound: starts.get(&i).cloned().unwrap_or_default() };
+                    let clip = crate::data::Clip { duration: v["duration"].as_f64().unwrap() as f32, times };
                     crate::data::Item { source, width, height, facts, video: Some(clip) }
                 }
                 None => {
@@ -1441,7 +1273,7 @@ mod tests {
         }
         // the old json files first, as they were
         fs::create_dir_all(backup).map_err(|e| e.to_string())?;
-        for name in ["manifest.json", "photos.json", "frames.json", "sounds.json", "region_names.json", "regions.json"] {
+        for name in ["manifest.json", "photos.json", "frames.json", "region_names.json", "regions.json"] {
             if dir.join(name).exists() && !backup.join(name).exists() {
                 fs::copy(dir.join(name), backup.join(name)).map_err(|e| e.to_string())?;
             }
@@ -1482,16 +1314,15 @@ mod tests {
         }
         let rename = |from: &str, to: &str| -> Result<(), String> { if dir.join(from).exists() { fs::rename(dir.join(from), dir.join(to)).map_err(|e| e.to_string()) } else { Ok(()) } };
         rename("embeddings.bin", "look.bin")?;
-        rename("sounds.bin", "sound.bin")?;
         rename("pages_bc7.bin", "pages.bin")?;
         if dir.join("region_names.json").exists() {
             rename("region_names.json", "regions.json")?;
         }
         let videos = items.iter().filter(|i| i.video.is_some()).count();
-        let manifest = crate::data::Manifest { name: old["name"].as_str().unwrap_or_default().to_string(), created: old["created"].as_str().unwrap_or_default().to_string(), photos: n, videos, photo_side, look, sound };
+        let manifest = crate::data::Manifest { name: old["name"].as_str().unwrap_or_default().to_string(), created: old["created"].as_str().unwrap_or_default().to_string(), photos: n, videos, photo_side, look };
         write_atomic(&dir.join("items.json"), &serde_json::to_vec(&items).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         write_atomic(&dir.join("manifest.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        for name in ["photos.json", "frames.json", "frames.bin", "sounds.json"] {
+        for name in ["photos.json", "frames.json", "frames.bin"] {
             let _ = fs::remove_file(dir.join(name));
         }
         Ok(())
@@ -1621,12 +1452,12 @@ mod tests {
         assert_eq!((data.photos[video].width, data.photos[video].height), (320, 180), "a poster no bigger than its video");
         assert_eq!(fs::metadata(done.join("look.bin")).unwrap().len() as usize, (7 + 9) * DIM * 2);
         // the map opens with them, and a search finds the video by its best frame and shows that frame
-        let vectors = crate::search::Vectors::open(&done, 7, 9, DIM, (0, 0)).unwrap();
+        let vectors = crate::search::Vectors::open(&done, 7, 9, DIM).unwrap();
         let frame: Vec<f32> = fs::read(done.join("look.bin")).unwrap()[(7 + 3) * DIM * 2..(7 + 4) * DIM * 2].chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect();
         let mut scores = vectors.cosines(&frame);
-        let best = crate::search::best_moments(&mut scores, &vectors.frame_cosines(&frame), data.frames.iter().map(|f| f.video));
+        let shown = crate::search::best_frames(&mut scores, &vectors.frame_cosines(&frame), &data.frames);
         assert!(scores[video] > 0.99, "frame 3 (6 s) against itself: {}", scores[video]);
-        assert!(best[video].is_some_and(|k| data.frames[k].time < 12.0), "a frame of the test pattern, not of the bars: {:?}", best[video]);
+        assert!(shown[video] >= 7 && data.frames[shown[video] - 7].time < 12.0, "a frame of the test pattern, not of the bars: {}", shown[video]);
         fs::remove_dir_all(&temp).unwrap();
     }
 

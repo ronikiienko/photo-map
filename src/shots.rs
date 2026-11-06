@@ -57,7 +57,6 @@ pub fn app_folder(name: &str, maps: &[(&str, usize, usize, &str)]) -> PathBuf {
             sized("pages.bin", *photos as u64 * 2_300_000 / 1_000);
             sized("look.bin", *photos as u64 * 1536);
             sized("frames/0/poster.jpg", *videos as u64 * 180_000);
-            sized("sound.bin", *videos as u64 * 18 * 1536);
             sized("layout.bin", *photos as u64 * 16);
         }
     }
@@ -118,7 +117,7 @@ pub fn map_bundle(maps: &Path, name: &str, n: usize) -> PathBuf {
     // spread as a build does (data::spread)
     let side = crate::median_neighbour_distance(bytemuck::cast_slice(&points));
     let points = crate::data::spread(bytemuck::cast_slice(&points), side);
-    let manifest = crate::data::Manifest { name: name.into(), created: "2026-11-03 12:00".into(), photos: n, videos, photo_side: side, look, sound: None };
+    let manifest = crate::data::Manifest { name: name.into(), created: "2026-11-03 12:00".into(), photos: n, videos, photo_side: side, look };
     std::fs::write(bundle.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
     std::fs::write(bundle.join("items.json"), serde_json::to_vec(&items).unwrap()).unwrap();
     std::fs::write(bundle.join("layout.bin"), bytemuck::cast_slice::<crate::data::Point, u8>(&points)).unwrap();

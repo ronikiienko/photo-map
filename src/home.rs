@@ -364,7 +364,7 @@ impl Home {
                         if s.total > 0 {
                             // only these stages count photos; the others count steps of their own (shown as a percentage)
                             let by_photo = matches!(b.stage, Stage::Scan | Stage::Embed);
-                            // the videos and listening steps count seconds of video
+                            // the videos step counts seconds of video
                             let by_time = s.unit == "seconds of video";
                             if by_time {
                                 line += &format!(" · {} of {} of video", video_time(s.done), video_time(s.total));
@@ -681,8 +681,8 @@ impl Home {
         let mut open_models = false;
         let mut open_runtime = false;
         // the model asked for is one that is installed
-        if !crate::models::spec(&nm.model).is_some_and(|s| s.kind == crate::models::Kind::Photos && store.installed(s)) {
-            if let Some(first) = crate::models::photo_models().find(|s| store.installed(s)) {
+        if !crate::models::spec(&nm.model).is_some_and(|s| store.installed(s)) {
+            if let Some(first) = crate::models::ALL.iter().find(|s| store.installed(s)) {
                 nm.model = first.id.to_string();
             }
         }
@@ -799,11 +799,11 @@ impl Home {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.spacing_mut().button_padding = egui::vec2(12.0, 5.0);
-                for spec in crate::models::photo_models().filter(|s| store.installed(s)) {
+                for spec in crate::models::ALL.iter().filter(|s| store.installed(s)) {
                     ui.selectable_value(&mut nm.model, spec.id.to_string(), spec.label).on_hover_text(spec.note);
                 }
             });
-            if !crate::models::photo_models().any(|s| store.installed(s)) {
+            if !crate::models::ALL.iter().any(|s| store.installed(s)) {
                 ui.horizontal(|ui| {
                     ui.label(theme::muted("No model has been downloaded."));
                     if ui.button("Get a model").clicked() {
@@ -949,7 +949,7 @@ impl Home {
         let mut close = false;
         let mut open_runtime = false;
         let response = theme::modal(ctx, "models", 560.0, Some("Models"), |ui| {
-            ui.label(theme::muted("A map is made and searched with one photo model: only the ones you have are offered when a map is made. With the sound model too, a map's videos can also be searched by what is said and heard in them. They are downloaded from their publishers on Hugging Face."));
+            ui.label(theme::muted("A map is made and searched with one model. Only the models you have are offered when a map is made. They are downloaded from their publishers on Hugging Face."));
             ui.add_space(8.0);
             if rt.setup.ort.is_none() {
                 ui.horizontal(|ui| {
@@ -1218,7 +1218,6 @@ fn step(ui: &mut Ui, step: Stage, current: Stage, last: bool) {
         Stage::Videos => "Videos",
         Stage::Scan => "Find",
         Stage::Embed => "Understand",
-        Stage::Sound => "Listen",
         Stage::Layout => "Lay out",
         Stage::Tree => "Link",
         Stage::Regions => "Regions",
@@ -1262,7 +1261,7 @@ fn show_in_file_manager(folder: &Path) {
 }
 
 fn part_colour(i: usize) -> Color32 {
-    [theme::ACCENT, theme::OK, Color32::from_rgb(230, 170, 90), Color32::from_rgb(200, 130, 220), Color32::from_rgb(110, 200, 210), Color32::from_rgb(235, 215, 110), theme::MUTED][i % 7]
+    [theme::ACCENT, theme::OK, Color32::from_rgb(230, 170, 90), Color32::from_rgb(200, 130, 220), Color32::from_rgb(110, 200, 210), theme::MUTED][i % 6]
 }
 
 /// 28 014 style grouping.
