@@ -1584,6 +1584,7 @@ mod tests {
     /// and the most memory the process held during it: for seeing how a big map's build scales. Linux (it reads /proc/self/status).
     /// A build whose photos are all embedded doesn't load the model (nor touch the graphics card) if the vocabulary is cached.
     /// BUILD=... cargo test --release stages_of_a_real_build -- --ignored --nocapture
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore]
     fn stages_of_a_real_build() {

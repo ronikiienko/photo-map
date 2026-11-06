@@ -151,7 +151,9 @@ impl Choice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{Gpu, Place, Source};
+    #[cfg(not(target_os = "macos"))]
+    use crate::runtime::Gpu;
+    use crate::runtime::{Place, Source};
 
     fn place() -> Place {
         Place { dir: PathBuf::from("/x"), source: Source::Project }
