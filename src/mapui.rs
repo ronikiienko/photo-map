@@ -172,6 +172,8 @@ pub struct PhotoMenu {
     pub can_add: bool,
     /// A video, while a search is on: its moments that match can be shown.
     pub moments: bool,
+    /// A video: "Copy image" copies the frame it was opened on.
+    pub video: bool,
     /// Its file, and what to say about it (where it is; or that the original is gone and this is the map's copy).
     pub file: PathBuf,
     pub file_tip: String,
@@ -214,6 +216,14 @@ pub fn photo_menu(ctx: &egui::Context, m: &PhotoMenu, actions: &mut UiActions) {
                 }
                 if theme::button(ui, egui::Button::new("Open")).on_hover_text("in the app your system opens it with").clicked() {
                     actions.open_file = Some(m.file.clone());
+                    actions.done = true;
+                }
+                if theme::button(ui, egui::Button::new("Copy image")).on_hover_text(if m.video { "this frame, at the video's own size" } else { "the photo, at its own size" }).clicked() {
+                    actions.copy_image = Some(m.picture);
+                    actions.done = true;
+                }
+                if theme::button(ui, egui::Button::new("Copy path")).on_hover_text(&m.file_tip).clicked() {
+                    actions.copy_path = Some(m.file.clone());
                     actions.done = true;
                 }
                 if theme::button(ui, egui::Button::new("Details")).on_hover_text("file, date taken, camera, place").clicked() {
@@ -322,6 +332,7 @@ mod shots {
             ends_path,
             can_add,
             moments: false,
+            video: false,
             file: "/photos/2019/IMG_20190612_184455.jpg".into(),
             file_tip: "/photos/2019/IMG_20190612_184455.jpg".into(),
         }

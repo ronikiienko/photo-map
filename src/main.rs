@@ -300,6 +300,30 @@ fn points_box(data: &MapData, side: f32) -> (Vec2, Vec2) {
 }
 
 impl OpenMap {
+    /// Where "Copy image" reads picture `id` from: a photo's file; a video's frame (its poster is one of its frames) at its time in
+    /// the video, with the map's smaller copy for when the video can't be read.
+    fn picture_source(&self, id: usize) -> PictureSource {
+        let data = &self.data;
+        let frame = match id.checked_sub(data.n()) {
+            Some(k) => Some(k),
+            // a poster: the frame whose vector it has (build: the poster is copied from that frame, its vector with it)
+            None if data.photos[id].video.is_some() => self.vectors.as_ref().and_then(|v| {
+                let poster = v.row(id);
+                (0..data.frames.len()).filter(|&k| data.frames[k].video == id).find(|&k| v.row(data.n() + k) == poster)
+            }),
+            None => None,
+        };
+        match frame {
+            Some(k) => {
+                let f = &data.frames[k];
+                // a poster's own copy (POSTER_SIDE) is bigger than a frame's
+                let kept = if id < data.n() { data.path(id) } else { data.picture_path(id) };
+                PictureSource::Frame { video: files::original(data, f.video), time: f.time, kept }
+            }
+            None => PictureSource::Photo(data.path(id)),
+        }
+    }
+
     /// Which photos are hidden, after a hidden search was added or taken away.
     fn rehide(&mut self) {
         self.hidden_mask.fill(false);
@@ -468,6 +492,8 @@ struct Viewer {
     photos: Vec<(PathBuf, egui::TextureHandle)>,
     /// What the last search did, next to the box.
     status: String,
+    /// "Copy image": the picture being read on its own thread, and what to say once it is on the clipboard.
+    copying: Option<std::sync::mpsc::Receiver<(Option<image::RgbaImage>, &'static str)>>,
     /// The words of the Groups view (as typed), and the view the Layout menu has chosen.
     groups_text: String,
     view_choice: View,
@@ -601,6 +627,7 @@ impl Viewer {
             logic: query::Logic::one(),
             photos: Vec::new(),
             status: String::new(),
+            copying: None,
             groups_text: String::new(),
             view_choice: View::Map,
             layout_for: View::Map,
@@ -981,6 +1008,37 @@ impl Viewer {
         }
         self.search.clear(); // a search is words or a photo, not both: the photo replaces the words
         true
+    }
+
+    /// "Copy image": the picture is read on its own thread (a big photo takes a moment, a video's frame needs ffmpeg) and put on
+    /// the clipboard by poll_copying.
+    fn copy_image(&mut self, source: PictureSource) {
+        let (send, receive) = std::sync::mpsc::channel();
+        self.copying = Some(receive);
+        self.status = "copying...".into();
+        std::thread::spawn(move || {
+            let got = match source {
+                PictureSource::Photo(file) => (photo::load(&file), "image copied"),
+                PictureSource::Frame { video, time, kept } => match video_frame(&video, time) {
+                    Some(img) => (Some(img), "frame copied"),
+                    None => (photo::load(&kept), "frame copied, small: the video can't be read"),
+                },
+            };
+            let _ = send.send(got);
+        });
+    }
+
+    fn poll_copying(&mut self) {
+        let Some(got) = self.copying.as_ref().and_then(|r| r.try_recv().ok()) else { return };
+        self.copying = None;
+        self.status = match got {
+            (Some(img), said) => {
+                let size = [img.width() as usize, img.height() as usize];
+                self.ui.ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()));
+                said.into()
+            }
+            (None, _) => "can't read it to copy".into(),
+        };
     }
 
     /// A picture on the clipboard becomes the search (joining the photos already there, as a dropped one does): it is saved as a
@@ -1606,6 +1664,7 @@ impl Viewer {
         self.lens.update(dt, self.cursor);
         self.frames += 1;
         self.poll_engine();
+        self.poll_copying();
         self.runtime.tick();
         self.store.tick();
         self.examples.tick();
@@ -1783,6 +1842,13 @@ impl Viewer {
         }
         if let Some(file) = &actions.open_file {
             files::open(file);
+        }
+        if let Some(file) = &actions.copy_path {
+            self.ui.ctx.copy_text(file.display().to_string());
+            self.status = "path copied".into();
+        }
+        if let (Some(picture), Some(m)) = (actions.copy_image, &self.map) {
+            self.copy_image(m.picture_source(picture));
         }
         if let Some(i) = actions.path_from {
             self.path_from = Some(i);
@@ -2483,6 +2549,7 @@ impl Viewer {
                 title: m.data.photos[photo].title.clone(),
                 ends_path: self.path_from.is_some_and(|from| from != photo),
                 moments: m.has_moments(photo),
+                video: m.data.photos[photo].video.is_some(),
                 can_add: !self.photos.is_empty() && !self.photos.iter().any(|(p, _)| *p == path),
                 file,
                 file_tip,
@@ -2568,6 +2635,9 @@ struct UiActions {
     /// "Show in folder" and "Open" on a photo's file.
     reveal: Option<PathBuf>,
     open_file: Option<PathBuf>,
+    /// "Copy image" (the picture: a photo, or a video's poster or frame) and "Copy path" (its file).
+    copy_image: Option<usize>,
+    copy_path: Option<PathBuf>,
     /// A menu item that needs nothing more was chosen: the menu closes.
     done: bool,
     /// The back arrow.
@@ -2692,6 +2762,30 @@ fn find_photo(data: &data::MapData, path: &std::path::Path) -> Option<usize> {
     let photo = data.photos.iter().enumerate().position(|(i, p)| std::path::Path::new(&p.source) == path || (p.video.is_some() && data.path(i) == path));
     // a video's frame (searched with from a match beside the world) is found as its video
     photo.or_else(|| data.frames.iter().find(|f| in_map(&f.file)).map(|f| f.video))
+}
+
+/// Where "Copy image" reads a picture from (OpenMap::picture_source).
+enum PictureSource {
+    Photo(PathBuf),
+    /// A video's frame: the video, the frame's time (seconds) and the map's copy of it.
+    Frame { video: PathBuf, time: f32, kept: PathBuf },
+}
+
+/// The frame of `video` at `time` (seconds) at the video's own size (turned upright, as ffmpeg does by itself). None: no ffmpeg, or
+/// it can't read the video.
+fn video_frame(video: &std::path::Path, time: f32) -> Option<image::RgbaImage> {
+    let ffmpeg = runtime::ffmpeg(&data_root())?;
+    let out = std::process::Command::new(ffmpeg)
+        .args(["-nostdin", "-hide_banner", "-nostats", "-loglevel", "error", "-ss"])
+        .arg(format!("{time:.3}"))
+        .arg("-i")
+        .arg(video)
+        .args(["-frames:v", "1", "-c:v", "png", "-f", "image2pipe", "pipe:1"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    image::load_from_memory(&out.stdout).ok().map(|img| img.to_rgba8())
 }
 
 fn photo_path(text: &str) -> Option<PathBuf> {
