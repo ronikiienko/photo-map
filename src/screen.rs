@@ -97,8 +97,9 @@ impl Screen {
     pub fn on_event(&mut self, ctx: &egui::Context, event: &WindowEvent) -> bool {
         match self {
             Screen::Window { window, input } => input.on_window_event(window, event).consumed,
-            Screen::Headless { ppp, events, pointer, .. } => {
-                // what egui_winit makes of these, for the ones a script sends
+            Screen::Headless { events, pointer, .. } => {
+                // what egui_winit makes of these, for the ones a script sends; egui's points include the interface size
+                let ppp = &ctx.pixels_per_point();
                 let modifiers = egui::Modifiers::NONE;
                 match event {
                     WindowEvent::CursorMoved { position, .. } => {
@@ -135,12 +136,12 @@ impl Screen {
     }
 
     /// egui's input for the next frame, with `more` events (letters and keys a script types) after the screen's own.
-    pub fn egui_input(&mut self, more: &mut Vec<egui::Event>) -> egui::RawInput {
+    pub fn egui_input(&mut self, ctx: &egui::Context, more: &mut Vec<egui::Event>) -> egui::RawInput {
         let mut raw = match self {
             Screen::Window { window, input } => input.take_egui_input(window),
             Screen::Headless { size, ppp, events, started, .. } => {
                 let mut raw = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0 as f32, size.1 as f32) / *ppp)),
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0 as f32, size.1 as f32) / (*ppp * ctx.zoom_factor()))),
                     time: Some(started.elapsed().as_secs_f64()),
                     focused: true,
                     events: std::mem::take(events),

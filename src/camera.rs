@@ -70,6 +70,8 @@ pub struct Camera {
     pub viewport: Vec2,
     /// Screen pixels at the top that the bar covers (the search box, the menus): what is fitted stays below them.
     pub top: f32,
+    /// How fast the wheel, a pinch and the zoom keys zoom (1: as the constants say; settings.rs).
+    pub zoom_speed: f32,
     pan: Pan,
     drag_moved: Vec2,
     zoom_velocity: f32,
@@ -89,6 +91,7 @@ impl Camera {
     pub fn new(viewport: Vec2) -> Self {
         Self {
             top: 0.0,
+            zoom_speed: 1.0,
             center: Vec2::ZERO,
             scale: 1.0,
             viewport,
@@ -130,8 +133,10 @@ impl Camera {
     /// Scale and centre that show the world box `min..max` with some margin.
     pub fn fit(&self, min: Vec2, max: Vec2) -> (Vec2, f32) {
         let size = (max - min).max(Vec2::splat(1.0)) + Vec2::splat(400.0);
-        // in the screen below the bar: the middle moves down by half of it
-        let scale = ((self.viewport - Vec2::new(0.0, self.top)) / size).min_element();
+        // in the screen below the bar: the middle moves down by half of it (the bar taller than the window, as a short window or
+        // a tall results card can make it, still leaves a quarter of it: else the scale is negative and its log NaN)
+        let below = (self.viewport - Vec2::new(0.0, self.top)).max(self.viewport * 0.25);
+        let scale = (below / size).min_element();
         ((min + max) * 0.5 - Vec2::new(0.0, self.top * 0.5 / scale), scale)
     }
 
@@ -146,18 +151,18 @@ impl Camera {
     }
 
     pub fn scroll_lines(&mut self, lines: f32) {
-        self.pending_zoom += lines * ZOOM_PER_LINE;
+        self.pending_zoom += lines * ZOOM_PER_LINE * self.zoom_speed;
         self.fly = None;
     }
 
     pub fn scroll_pixels(&mut self, pixels: f32) {
-        self.pending_zoom += pixels * ZOOM_PER_PIXEL;
+        self.pending_zoom += pixels * ZOOM_PER_PIXEL * self.zoom_speed;
         self.fly = None;
     }
 
     /// A trackpad pinch (positive: fingers spreading): zooms about the pointer.
     pub fn pinch(&mut self, delta: f32) {
-        self.pending_pinch += delta * PINCH_ZOOM;
+        self.pending_pinch += delta * PINCH_ZOOM * self.zoom_speed;
         self.fly = None;
     }
 
@@ -238,7 +243,7 @@ impl Camera {
         } else {
             self.zoom_velocity = smooth(self.zoom_velocity, 0.0, ZOOM_FRICTION, dt);
         }
-        let key_zoom = KEY_ZOOM * (keys.zoom_in as i32 - keys.zoom_out as i32) as f32;
+        let key_zoom = KEY_ZOOM * self.zoom_speed * (keys.zoom_in as i32 - keys.zoom_out as i32) as f32;
         if key_zoom != 0.0 {
             self.zoom_velocity = key_zoom;
             self.fly = None;

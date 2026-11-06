@@ -120,6 +120,8 @@ pub struct Home {
     /// The window on the models is open, and the model asked about removing.
     models_open: bool,
     examples_open: bool,
+    /// The Settings window is open.
+    settings_open: bool,
     /// An example whose photos Remove was pressed for, waiting to be confirmed.
     confirm_remove_example: Option<&'static str>,
     confirm_remove_model: Option<String>,
@@ -134,7 +136,7 @@ fn per_row(width: f32) -> usize {
 
 impl Home {
     pub fn new() -> Self {
-        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: false, models_open: false, confirm_remove_model: None, examples_open: false, confirm_remove_example: None }
+        Self { covers: HashMap::new(), recent: HashMap::new(), sizes: HashMap::new(), details: None, drag_over: false, new_map: None, confirm_discard: None, confirm_delete: None, runtime_open: false, confirm_remove: false, models_open: false, confirm_remove_model: None, examples_open: false, settings_open: false, confirm_remove_example: None }
     }
 
     pub fn open_new_map(&mut self) {
@@ -165,7 +167,9 @@ impl Home {
         self.sizes.remove(map);
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager, store: &ModelStore, examples: &Examples) -> Vec<Action> {
+    /// `settings` is changed in place by the Settings window (the caller saves and applies it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, builds: &[BuildView], resume: bool, ready_msg: Option<&str>, rt: &Manager, store: &ModelStore, examples: &Examples, settings: &mut crate::settings::Settings) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::Area::new("maps-background".into()).anchor(Align2::LEFT_TOP, [0.0, 0.0]).order(egui::Order::Background).show(ctx, |ui| {
             let screen = ctx.content_rect();
@@ -204,6 +208,7 @@ impl Home {
             });
         }
         self.dialogs(ctx, builds, lib, rt, store, examples, &mut actions);
+        self.settings_window(ctx, settings);
         actions
     }
 
@@ -231,6 +236,9 @@ impl Home {
                 }
                 if ui.button("Runtime").on_hover_text("The libraries the models run on: what is there and what can be downloaded").clicked() {
                     self.runtime_open = true;
+                }
+                if ui.button("Settings").on_hover_text("Zoom speed and interface size").clicked() {
+                    self.settings_open = true;
                 }
             });
         });
@@ -941,6 +949,29 @@ impl Home {
         }
     }
 
+    /// The window on the app's settings: zoom speed and interface size (settings.rs).
+    fn settings_window(&mut self, ctx: &egui::Context, settings: &mut crate::settings::Settings) {
+        if !self.settings_open {
+            return;
+        }
+        let mut close = false;
+        let response = theme::modal(ctx, "settings", 380.0, Some("Settings"), |ui| {
+            ui.label(theme::muted("ZOOM SPEED"));
+            theme::segmented(ui, &mut settings.zoom_speed, &crate::settings::ZOOM_SPEEDS);
+            ui.label(theme::muted("The wheel, a trackpad pinch and the zoom keys."));
+            ui.add_space(10.0);
+            ui.label(theme::muted("INTERFACE SIZE"));
+            theme::segmented(ui, &mut settings.ui_size, &crate::settings::UI_SIZES);
+            ui.add_space(10.0);
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+        if close || response.should_close() {
+            self.settings_open = false;
+        }
+    }
+
     /// The window on the models: which are installed, what each takes, and a way to get or remove each.
     fn models_window(&mut self, ctx: &egui::Context, rt: &Manager, store: &ModelStore, actions: &mut Vec<Action>) {
         if !self.models_open {
@@ -1385,7 +1416,7 @@ mod shots {
     /// Draws `p` (`size`: the window) and saves it as .local/shots/maps-<name>.png. Covers load on threads: it draws until they are in.
     fn shot(name: &str, size: egui::Vec2, p: Page) {
         let mut h = harness(size, p, |ctx, p: &mut Page| {
-            let _ = p.home.show(ctx, &p.lib, &p.builds, false, None, &p.rt, &p.store, &p.examples);
+            let _ = p.home.show(ctx, &p.lib, &p.builds, false, None, &p.rt, &p.store, &p.examples, &mut crate::settings::Settings::default());
         });
         for _ in 0..20 {
             h.run_steps(2);
@@ -1415,6 +1446,7 @@ mod shots {
         shot("5-runtime", size, page(|h, _| h.runtime_open = true));
         shot("6-models", size, page(|h, _| h.models_open = true));
         shot("7-examples", size, page(|h, _| h.examples_open = true));
+        shot("7b-settings", size, page(|h, _| h.settings_open = true));
         shot("8-delete", size, page(|h, lib| h.confirm_delete = Some(lib.maps[1].path.clone())));
         shot("9-building", size, Page { builds: vec![building(true, None)], ..page(|_, _| {}) });
         let mut videos = building(true, None);

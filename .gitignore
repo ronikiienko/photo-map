@@ -12,5 +12,6 @@ data/
 idk/
 index/
 logs/
+.local/
 reports/
 .DS_Store

@@ -43,6 +43,7 @@ mod shots;
 mod sound;
 mod search;
 mod searchbar;
+mod settings;
 mod siglip;
 mod storage;
 mod suggest;
@@ -432,8 +433,8 @@ struct Viewer {
     player: Option<player::Player>,
     /// A video's frame kept in the map (frames.json), shown while its player goes to a time: which frame, and its picture.
     still: Option<(usize, egui::TextureHandle)>,
-    /// Videos play without sound (one setting for all, kept: `muted_file`).
-    muted: bool,
+    /// What the user chose that is kept (settings.rs): sound, zoom speed, interface size.
+    settings: settings::Settings,
     /// Builds stopped because a map was opened (a build and a map together would not fit on the card): they go on when the Maps page is back.
     paused_for_viewing: Vec<PathBuf>,
     /// Files and folders dropped on the Maps page this frame.
@@ -526,6 +527,9 @@ impl Viewer {
     /// `make_screen`: the window (or none) that egui's input comes from, made with the app's egui context.
     fn new(gpu: Gpu, make_screen: impl FnOnce(&egui::Context) -> screen::Screen, library: Library, first: Option<PathBuf>) -> Self {
         let ctx = egui::Context::default();
+        // the interface size is the Options menu's (settings.rs), not egui's own Cmd/Ctrl +/- (- and = zoom the map)
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        ctx.set_zoom_factor(settings::Settings::load().ui_size);
         theme::apply(&ctx);
         let screen = make_screen(&ctx);
         let wake = screen.waker();
@@ -540,7 +544,9 @@ impl Viewer {
         let mut renderer = egui_wgpu::Renderer::new(&gpu.device, gpu.config.format, Default::default());
         renderer.callback_resources.insert(player::VideoGpu::new(&gpu.device, gpu.config.format));
         let size = screen.size();
-        let camera = Camera::new(Vec2::new(size.0 as f32, size.1 as f32));
+        let settings = settings::Settings::load();
+        let mut camera = Camera::new(Vec2::new(size.0 as f32, size.1 as f32));
+        camera.zoom_speed = settings.zoom_speed;
         let mut viewer = Self {
             screen,
             gpu,
@@ -568,7 +574,7 @@ impl Viewer {
             help_open: false,
             player: None,
             still: None,
-            muted: muted_file().exists(),
+            settings,
             paused_for_viewing: Vec::new(),
             dropped: Vec::new(),
             cursor: None,
@@ -1469,7 +1475,7 @@ impl Viewer {
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } if !over_ui && self.page == Page::Viewer => {
-                let ppp = self.screen.scale();
+                let ppp = self.ui.ctx.pixels_per_point(); // to egui's points (the interface size included)
                 self.menu = self.hovered.zip(self.cursor).map(|(i, c)| (i, self.hovered_picture().unwrap_or(i), self.hovered_copy, egui::pos2(c.x / ppp, c.y / ppp)));
             }
             WindowEvent::MouseInput { state, button: button @ (MouseButton::Left | MouseButton::Middle), .. } => match state {
@@ -1594,7 +1600,7 @@ impl Viewer {
         // what is fitted stays below the search box as drawn last frame (it grows with chips), the results row it gets once a search is
         // answered, and the heading over the matches
         let bar = self.ui.ctx.memory(|m| m.area_rect(egui::Id::new("top"))).map_or(0.0, |r| r.bottom());
-        self.camera.top = (bar + 56.0).max(84.0) * self.screen.scale();
+        self.camera.top = (bar + 56.0).max(84.0) * self.ui.ctx.pixels_per_point();
         self.camera.limits = self.map.as_ref().filter(|_| self.page == Page::Viewer).map(OpenMap::limits);
         self.camera.update(dt, self.cursor, self.keys);
         self.lens.update(dt, self.cursor);
@@ -1756,7 +1762,7 @@ impl Viewer {
     }
 
     fn draw_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        let raw = self.screen.egui_input(&mut self.script_events);
+        let raw = self.screen.egui_input(&self.ui.ctx, &mut self.script_events);
         let mut actions = UiActions::default();
         let ctx = self.ui.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| self.build_ui(ui, &mut actions));
@@ -2007,7 +2013,7 @@ impl Viewer {
     /// has Go to on the map).
     fn click_at(&mut self) {
         let Some(c) = self.cursor else { return };
-        let ppp = self.screen.scale();
+        let ppp = self.ui.ctx.pixels_per_point();
         let at = egui::pos2(c.x / ppp, c.y / ppp);
         if let Some(t) = self.video_tiles(ppp).into_iter().find(|t| t.rect.contains(at)) {
             match &mut self.player {
@@ -2227,7 +2233,7 @@ impl Viewer {
             let speaker = egui::Rect::from_min_size(egui::pos2(tile.rect.max.x - side * 1.3, pill.min.y), egui::vec2(side, side));
             let bar = egui::Rect::from_min_max(egui::pos2(pill.max.x + side * 0.5, pill.min.y), egui::pos2(speaker.min.x - side * 0.5, pill.max.y));
             let area = pill.union(speaker);
-            let muted = self.muted;
+            let muted = self.settings.muted;
             egui::Area::new(egui::Id::new("video controls")).fixed_pos(area.min).order(egui::Order::Middle).show(ctx, |ui| {
                 let (_, response) = ui.allocate_exact_size(area.size(), egui::Sense::hover());
                 let pill_r = ui.interact(pill, egui::Id::new("video pill"), egui::Sense::click());
@@ -2266,10 +2272,9 @@ impl Viewer {
             p.seek(t);
         }
         if mute {
-            self.muted = !self.muted;
-            p.mute(self.muted);
-            let file = muted_file();
-            let _ = if self.muted { std::fs::create_dir_all(file.parent().unwrap()).and_then(|_| std::fs::write(&file, "")) } else { std::fs::remove_file(&file) };
+            self.settings.muted = !self.settings.muted;
+            p.mute(self.settings.muted);
+            self.settings.save();
         }
         // until ffmpeg's frame from a new time comes, and while the bar is dragged: the map's own frame nearest that time (made
         // small when the map was), at once
@@ -2305,7 +2310,7 @@ impl Viewer {
         let photo = &m.data.photos[t.photo];
         let video = files::original(&m.data, t.photo);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(self.wake());
-        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, photo.video.map_or((photo.width, photo.height), |v| (v.width, v.height)), self.muted, wake));
+        self.player = Some(player::Player::new(&ffmpeg, &video, t.photo, t.copy, photo.video.map_or(t.time, |v| v.duration), t.start, photo.video.map_or((photo.width, photo.height), |v| (v.width, v.height)), self.settings.muted, wake));
     }
 
     /// Photos zoomed in far enough show their own caption (else their title) neatly above them: only the photos in view
@@ -2387,7 +2392,13 @@ impl Viewer {
             let views = self.build_views();
             let notice = self.notice.clone();
             let ready_msg = notice.as_ref().filter(|(_, good)| *good).map(|(m, _)| m.as_str());
-            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg, &self.runtime, &self.store, &self.examples);
+            let before = self.settings;
+            actions.home = self.home.show(&ctx, &self.library, &views, self.library.resume_on_start(), ready_msg, &self.runtime, &self.store, &self.examples, &mut self.settings);
+            if self.settings != before {
+                self.camera.zoom_speed = self.settings.zoom_speed;
+                ctx.set_zoom_factor(self.settings.ui_size); // from the next frame
+                self.settings.save();
+            }
             if let Some((text, false)) = &notice {
                 mapui::notice(&ctx, text);
             }
@@ -2694,10 +2705,6 @@ fn photo_path(text: &str) -> Option<PathBuf> {
 /// the system's place for an app's data: ~/.local/share/photo-map on Linux, ~/Library/Application Support/photo-map on macOS,
 /// %APPDATA%\photo-map\data on Windows. Tests use it too (the models and maps they need are there).
 /// There when videos play without sound.
-fn muted_file() -> PathBuf {
-    data_root().join(".cache/muted")
-}
-
 pub fn data_root() -> PathBuf {
     if let Some(home) = std::env::var_os("PHOTO_MAP_HOME") {
         return PathBuf::from(home);
