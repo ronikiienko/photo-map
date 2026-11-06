@@ -14,23 +14,39 @@ pub struct Island {
     pub size: Point,
 }
 
-/// Ready-made groups for the Layout menu: a name and its words, as typed in the box. Across subjects, not just places.
-pub const PRESETS: [(&str, &str); 14] = [
-    ("Scenes", "beach, mountains, city, forest, desert, snow, lake, countryside"),
-    ("Time of day", "sunrise, daytime, sunset, night"),
-    ("Seasons", "spring, summer, autumn, winter"),
-    ("Weather", "sunny, cloudy, rain, fog, snow, storm"),
-    ("People", "portrait, group of people, crowd, no people"),
-    ("Animals", "dog, cat, bird, horse, insect, fish, wild animal"),
-    ("Food and drink", "fruit, vegetables, meat, fish dish, dessert, bread, drink"),
-    ("Buildings", "church, castle, bridge, skyscraper, house, ruins, monument"),
-    ("Getting around", "car, train, boat, airplane, bicycle, bus, walking"),
-    ("Plants and nature", "flower, tree, leaves, grass, rock, water, sky"),
-    ("Sport", "football, tennis, running, swimming, skiing, cycling, climbing"),
-    ("Colours", "red, orange, yellow, green, blue, purple, black and white"),
-    ("Kind of picture", "photograph, painting, drawing, map, diagram, text, screenshot"),
-    ("Mood", "happy, calm, sad, dramatic, mysterious, romantic"),
-];
+/// Sets of words for the box, to step through with up and down (assets/group_ideas.txt), as the search box's ideas.
+const IDEAS: &str = include_str!("../assets/group_ideas.txt");
+
+/// The sets of words, in a random order, and the one showing (the empty box's placeholder).
+pub struct Ideas {
+    list: Vec<&'static str>,
+    at: usize,
+}
+
+impl Ideas {
+    pub fn new() -> Self {
+        let mut list: Vec<&str> = IDEAS.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+        let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+        for i in (1..list.len()).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            list.swap(i, (seed % (i as u64 + 1)) as usize);
+        }
+        Self { list, at: 0 }
+    }
+
+    /// The set showing.
+    pub fn idea(&self) -> &'static str {
+        self.list[self.at]
+    }
+
+    /// Up / down (1 / -1): the next set.
+    pub fn switch(&mut self, by: i32) -> &'static str {
+        self.at = (self.at as i64 + by as i64).rem_euclid(self.list.len() as i64) as usize;
+        self.idea()
+    }
+}
 
 /// The words in a box: split at commas and new lines, trimmed, each once (ignoring case).
 pub fn words(text: &str) -> Vec<String> {
@@ -166,6 +182,15 @@ fn rings(shapes: &[(f32, f32)]) -> (Vec<(f32, f32, f32)>, (f32, f32)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ideas_go_round() {
+        let mut ideas = Ideas::new();
+        assert!(ideas.list.len() > 150 && ideas.list.iter().all(|l| words(l).len() >= 2), "sets of words, two or more each");
+        let first = ideas.idea();
+        assert_ne!(ideas.switch(1), first);
+        assert_eq!(ideas.switch(-1), first);
+    }
 
     #[test]
     fn words_are_split_at_commas_and_lines_once_each() {

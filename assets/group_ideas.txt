@@ -1,0 +1,236 @@
+# Ideas for the Groups layout (groups.rs): one set of words a line, as typed in its box. Up and down in the box step through them
+# in a random order. Mostly what can be seen, so the photo model can tell them apart. Lines starting with # are skipped.
+
+# places and scenes
+beach, mountains, city, forest, desert, snow, lake, countryside
+mountain, city, forest, river
+sea, lake, river, waterfall
+city street, park, shop, restaurant, home
+indoors, outdoors
+city, village, countryside
+mountain peak, valley, glacier, meadow
+beach, cliffs, harbour, island
+forest, jungle, savanna, desert
+field, orchard, vineyard, farm
+old town, modern city, suburb, industrial area
+road, railway, airport, harbour
+garden, park, playground, cemetery
+cave, canyon, volcano, sand dunes
+street at night, street by day
+skyline, alley, square, bridge
+office, kitchen, bedroom, living room, bathroom
+classroom, library, museum, theatre, stadium
+church interior, shop interior, restaurant interior, home interior
+underwater, on the water, on the shore
+snowy mountains, green hills, rocky coast, flat plains
+lake, pond, stream, swamp
+tropical beach, rocky beach, pebble beach, sandy dunes
+hiking trail, ski slope, campsite, picnic spot
+market, supermarket, mall, street stall
+
+# time and weather
+sunrise, daytime, sunset, night
+spring, summer, autumn, winter
+sunny, cloudy, rain, fog, snow, storm
+blue sky, grey sky, sunset sky, night sky, stars
+rainbow, lightning, clouds, clear sky
+frost, ice, snowfall, slush
+golden hour, blue hour, midday, night
+moon, sun, stars, northern lights
+
+# people
+portrait, group of people, crowd, no people
+child, teenager, adult, elderly person
+man, woman, baby, family
+smiling, laughing, serious, crying
+selfie, posed group photo, candid shot
+wedding, birthday party, graduation, concert
+sleeping, eating, reading, working, playing
+dancing, singing, hugging, waving
+couple, friends, family, colleagues
+hands, feet, face, back of a head
+people on a beach, people in a city, people in nature, people at home
+tourists, locals, performers, workers
+
+# animals
+dog, cat, bird, horse, insect, fish, wild animal
+dog, cat, rabbit, hamster, parrot
+cow, sheep, pig, chicken, goat, horse
+lion, elephant, giraffe, zebra, monkey
+bear, deer, fox, wolf, squirrel
+duck, swan, pigeon, seagull, eagle, owl
+butterfly, bee, spider, ant, beetle
+fish, shark, dolphin, whale, turtle, jellyfish
+snake, lizard, frog, crocodile
+puppy, kitten, foal, chick
+dog running, dog sleeping, dog playing, dog with people
+animal in a zoo, animal in the wild, pet at home, farm animal
+
+# food and drink
+fruit, vegetables, meat, fish dish, dessert, bread, drink
+breakfast, lunch, dinner, snack
+pizza, burger, sushi, pasta, salad, soup
+cake, ice cream, chocolate, cookies, pastry
+coffee, tea, beer, wine, cocktail, juice
+apple, banana, orange, grapes, strawberry, watermelon
+home cooking, restaurant meal, street food, picnic
+raw ingredients, cooking in progress, plated dish, empty plate
+barbecue, campfire cooking, baking, frying
+
+# things
+car, train, boat, airplane, bicycle, bus, walking
+car, motorcycle, truck, van, tractor
+sailboat, motorboat, ship, kayak, ferry
+phone, laptop, camera, television, headphones
+book, newspaper, letter, notebook
+chair, table, bed, sofa, shelf
+shoes, hat, bag, jacket, dress
+toys, games, puzzles, balloons
+guitar, piano, drums, violin, microphone
+clock, lamp, mirror, window, door
+tools, machines, cables, screws
+bottle, cup, glass, plate, bowl
+flag, sign, poster, graffiti
+christmas tree, fireworks, candles, presents
+money, cards, tickets, receipts
+
+# buildings
+church, castle, bridge, skyscraper, house, ruins, monument
+house, apartment block, cottage, villa, cabin
+church, mosque, temple, synagogue, cathedral
+castle, fortress, palace, tower
+ruins, construction site, abandoned building, renovated building
+lighthouse, windmill, barn, factory
+station, airport terminal, bus stop, parking lot
+wooden building, brick building, stone building, glass building
+roof, facade, doorway, staircase, balcony
+fountain, statue, monument, memorial
+
+# nature
+flower, tree, leaves, grass, rock, water, sky
+rose, tulip, sunflower, daisy, orchid
+pine tree, palm tree, oak tree, birch tree, cactus
+mushrooms, moss, ferns, berries
+autumn leaves, spring blossom, summer greenery, bare winter trees
+rocks, sand, soil, ice, water
+waves, ripples, calm water, waterfall
+close-up of a plant, a single tree, a forest, a field of flowers
+
+# sport and activities
+football, tennis, running, swimming, skiing, cycling, climbing
+basketball, volleyball, baseball, hockey, golf
+hiking, camping, fishing, hunting
+surfing, sailing, diving, kayaking, rowing
+skiing, snowboarding, ice skating, sledding
+gym, yoga, boxing, martial arts
+skateboarding, rollerblading, scooter, bmx
+watching sport, playing sport, sport on a screen
+painting, gardening, cooking, knitting, woodwork
+travel, commute, holiday, work trip
+
+# kind of picture
+photograph, painting, drawing, map, diagram, text, screenshot
+screenshot, document, receipt, whiteboard, meme
+photo of a screen, photo of a paper, photo of a person, photo of a place
+selfie, portrait, landscape, close-up, aerial view
+black and white, colour, sepia, washed out
+sharp, blurry, dark, overexposed
+close-up, medium shot, wide shot, aerial view
+vertical composition, horizontal composition, symmetry, pattern
+macro, telephoto, wide angle, fisheye
+taken by day, taken at night, taken with flash, taken indoors
+drone photo, phone photo, film photo, scanned print
+sketch, cartoon, oil painting, watercolour, comic
+
+# colours and looks
+red, orange, yellow, green, blue, purple, black and white
+bright, dark, colourful, muted
+warm colours, cool colours, pastel colours, neon colours
+pink, brown, grey, white, black
+gold, silver, copper, rust
+striped, dotted, checked, plain
+reflection, shadow, silhouette, backlight
+smooth, rough, shiny, soft
+
+# mood of the place
+busy, empty, quiet, crowded
+tidy, messy, old, new
+calm water, rough sea, still air, windy day
+cosy, grand, simple, luxurious
+happy, calm, sad, dramatic, mysterious, romantic
+
+# events and life
+wedding, birthday, christmas, new year, halloween
+concert, festival, parade, protest
+school, university, office, factory
+hospital, pharmacy, doctor, dentist
+moving house, renovation, cleaning, shopping
+road trip, flight, train journey, cruise
+first day, last day, ordinary day, special day
+
+# more places
+airport, train station, bus station, port
+mountain lake, sea coast, river bank, forest pond
+city park, national park, botanical garden, zoo
+narrow street, wide avenue, highway, dirt road
+rooftop, terrace, courtyard, backyard
+bar, cafe, restaurant, nightclub
+hotel room, tent, camper van, cabin
+beach umbrella, sun lounger, swimming pool, hot tub
+european city, asian city, american city, african village
+mediterranean coast, nordic fjord, alpine village, tropical island
+farmland, wetland, grassland, woodland
+quarry, mine, dam, power plant
+
+# more things
+backpack, suitcase, map, passport, camera
+umbrella, sunglasses, scarf, gloves
+candle, vase, painting on a wall, plant pot
+fridge, oven, washing machine, sink
+computer screen, keyboard, phone screen, tablet
+kite, ball, frisbee, swing
+tram, metro, taxi, cable car
+helicopter, hot air balloon, rocket, drone
+fence, wall, gate, path
+bench, lamp post, mailbox, traffic light
+
+# more food
+noodles, rice, dumplings, curry
+cheese, sausage, eggs, bacon
+cake with candles, wedding cake, cupcakes, pie
+fresh fruit, dried fruit, fruit juice, smoothie
+wine glass, beer mug, coffee cup, teapot
+bakery, butcher, fish market, greengrocer
+
+# more people and life
+baby, toddler, child, teenager
+grandparents, parents, children, cousins
+person running, person sitting, person standing, person lying down
+person with a dog, person with a bike, person with a camera, person with a phone
+people at a table, people on a sofa, people outdoors, people in a car
+uniform, suit, sportswear, swimwear, winter clothes
+hat, glasses, beard, long hair, short hair
+
+# more nature
+sunflowers, lavender field, poppies, wildflowers
+mountain stream, river delta, rapids, still lake
+snowflakes, icicles, frozen lake, snowy forest
+desert plants, tropical plants, house plants, garden vegetables
+storm clouds, white clouds, sunset clouds, fog over hills
+rocks by the sea, rocks in a river, rocks in the mountains, rocks in the desert
+
+# more kinds of picture
+landscape, cityscape, seascape, skyscape
+food photo, product photo, pet photo, travel photo
+group selfie, mirror selfie, portrait of a child, portrait of an adult
+night photo with lights, long exposure, bokeh, motion blur
+document, handwriting, printed text, a chart
+old photo, recent photo, edited photo, filtered photo
+straight horizon, tilted horizon, looking up, looking down
+
+# more seasons and events
+easter, carnival, harvest, summer holiday
+spring flowers, summer beach, autumn forest, winter snow
+morning coffee, lunch break, evening walk, night out
+first snow, heat wave, heavy rain, strong wind
+sports match, music festival, art exhibition, street market

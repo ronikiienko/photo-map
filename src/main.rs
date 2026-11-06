@@ -496,6 +496,8 @@ struct Viewer {
     copying: Option<std::sync::mpsc::Receiver<(Option<image::RgbaImage>, &'static str)>>,
     /// The words of the Groups view (as typed), and the view the Layout menu has chosen.
     groups_text: String,
+    /// The sets of words its box offers (up / down).
+    group_ideas: groups::Ideas,
     view_choice: View,
     /// A layout's words on their way from the model: which view they are for, the query number each was asked as (None once
     /// answered), and the answers.
@@ -629,6 +631,7 @@ impl Viewer {
             status: String::new(),
             copying: None,
             groups_text: String::new(),
+            group_ideas: groups::Ideas::new(),
             view_choice: View::Map,
             layout_for: View::Map,
             layout_words: Vec::new(),
@@ -2488,7 +2491,7 @@ impl Viewer {
         let width = (screen_w - 2.0 * 250.0).clamp(300.0, 620.0);
         let y = mapui::corners_y(screen_w, width);
         mapui::back(&ctx, y, self.map.as_ref().map(|m| m.data.manifest.name.as_str()), actions);
-        mapui::look(&ctx, y, mapui::Look { view: &mut self.view_choice, groups_text: &mut self.groups_text, smooth: &mut self.smooth }, actions);
+        mapui::look(&ctx, y, mapui::Look { view: &mut self.view_choice, groups_text: &mut self.groups_text, ideas: &mut self.group_ideas, smooth: &mut self.smooth }, actions);
 
         // middle: the search box, then (only when there is something) the results, and the hidden searches (searchbar.rs)
         let engine = match &self.map {

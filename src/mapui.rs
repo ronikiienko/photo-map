@@ -42,6 +42,7 @@ pub fn back(ctx: &egui::Context, y: f32, name: Option<&str>, actions: &mut UiAct
 pub struct Look<'a> {
     pub view: &'a mut View,
     pub groups_text: &'a mut String,
+    pub ideas: &'a mut groups::Ideas,
     pub smooth: &'a mut bool,
 }
 
@@ -66,19 +67,36 @@ pub fn look(ctx: &egui::Context, y: f32, look: Look, actions: &mut UiActions) {
                             ui.label(theme::muted("Each photo joins the word it is most like. In each group the strongest matches are in the middle, the weakest at the edge."));
                             ui.label(theme::muted("The model can tell which word fits a photo better, but not where a word stops fitting at all. So a photo that fits none of them still lands in some group, at its edge."));
                             ui.add_space(6.0);
-                            presets(ui, |ui| {
-                                for (name, words) in groups::PRESETS {
-                                    if ui.selectable_label(false, name).on_hover_text(words).clicked() {
-                                        *look.groups_text = words.to_string();
-                                        actions.arrange = true;
+                            // as the search box: the empty box shows a set of words, up / down another (or put another in place of the
+                            // words in it), Tab takes it to change, Enter arranges by the words (the one showing, in the empty box)
+                            let id = egui::Id::new("groups-box");
+                            let mut arrange = false;
+                            if ui.memory(|m| m.has_focus(id)) {
+                                let key = |k| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
+                                let (down, up, tab, enter) = (key(egui::Key::ArrowDown), key(egui::Key::ArrowUp), look.groups_text.trim().is_empty() && key(egui::Key::Tab), key(egui::Key::Enter));
+                                if down || up {
+                                    let idea = look.ideas.switch(if down { 1 } else { -1 });
+                                    if !look.groups_text.trim().is_empty() {
+                                        *look.groups_text = idea.to_string();
                                     }
                                 }
-                            });
-                            ui.add_space(4.0);
-                            ui.add(egui::TextEdit::multiline(look.groups_text).hint_text("mountain, city, forest, river").desired_rows(3).desired_width(f32::INFINITY));
-                            ui.label(theme::muted("Separate the words with commas or new lines."));
+                                if tab {
+                                    *look.groups_text = look.ideas.idea().to_string();
+                                }
+                                arrange = enter;
+                            }
+                            ui.add(egui::TextEdit::multiline(look.groups_text).id(id).hint_text(look.ideas.idea()).desired_rows(2).desired_width(f32::INFINITY));
+                            let faint = theme::MUTED.gamma_multiply(0.7);
+                            let mut hint = egui::text::LayoutJob::default();
+                            hint.append("↑↓", 0.0, egui::TextFormat::simple(egui::FontId::monospace(11.5), faint)); // the proportional font has no ↑↓
+                            hint.append(" other words · Enter arrange · commas between them", 0.0, egui::TextFormat::simple(egui::FontId::proportional(11.5), faint));
+                            ui.label(hint);
                             ui.add_space(6.0);
-                            if theme::button(ui, egui::Button::new("Arrange")).on_hover_text("sort the photos into these groups").clicked() {
+                            arrange |= theme::button(ui, egui::Button::new("Arrange")).on_hover_text("sort the photos into these groups").clicked();
+                            if arrange {
+                                if look.groups_text.trim().is_empty() {
+                                    *look.groups_text = look.ideas.idea().to_string();
+                                }
                                 actions.arrange = true;
                             }
                         }
@@ -93,17 +111,6 @@ pub fn look(ctx: &egui::Context, y: f32, look: Look, actions: &mut UiActions) {
                 });
             });
         });
-    });
-}
-
-/// A "Presets" button in the Layout menu, opening a list beside it: a submenu, so choosing one leaves the menu open (a combo box's
-/// list is a popup of its own, and a click on it closed the menu).
-fn presets(ui: &mut egui::Ui, list: impl FnOnce(&mut egui::Ui)) {
-    let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    ui.scope(|ui| {
-        ui.set_style(ui.ctx().global_style()); // a button that looks like one, as theme::button
-        let button = egui::Button::new("Presets").right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW).frame(true);
-        egui::containers::menu::SubMenuButton::from_button(button).config(config).ui(ui, list);
     });
 }
 
@@ -311,6 +318,7 @@ mod shots {
         size: egui::Vec2,
         view: View,
         groups_text: String,
+        ideas: groups::Ideas,
         smooth: bool,
         help_open: bool,
         menu: Option<PhotoMenu>,
@@ -319,7 +327,7 @@ mod shots {
     }
 
     fn page() -> Page {
-        Page { size: vec2(1200.0, 780.0), view: View::Map, groups_text: String::new(), smooth: true, help_open: false, menu: None, details: None, opening: None }
+        Page { size: vec2(1200.0, 780.0), view: View::Map, groups_text: String::new(), ideas: groups::Ideas::new(), smooth: true, help_open: false, menu: None, details: None, opening: None }
     }
 
     fn menu(ends_path: bool, can_add: bool) -> PhotoMenu {
@@ -347,7 +355,7 @@ mod shots {
             let width = (screen_w - 2.0 * 250.0).clamp(300.0, 620.0);
             let y = corners_y(screen_w, width);
             back(ctx, y, Some("Takeout tagged"), &mut actions);
-            look(ctx, y, Look { view: &mut p.view, groups_text: &mut p.groups_text, smooth: &mut p.smooth }, &mut actions);
+            look(ctx, y, Look { view: &mut p.view, groups_text: &mut p.groups_text, ideas: &mut p.ideas, smooth: &mut p.smooth }, &mut actions);
             // where the search box goes
             egui::Area::new("top".into()).anchor(Align2::CENTER_TOP, [0.0, 8.0]).show(ctx, |ui| {
                 theme::card().show(ui, |ui| {
@@ -380,6 +388,7 @@ mod shots {
         shot("2-narrow", Page { size: vec2(760.0, 600.0), ..page() }, |_| {});
         shot("3-layout-menu", page(), |h| h.get_by_label("Layout").click());
         shot("4-layout-groups", Page { view: View::Groups, groups_text: "mountain, city, forest".into(), ..page() }, |h| h.get_by_label("Layout").click());
+        shot("4-layout-groups-empty", Page { view: View::Groups, ..page() }, |h| h.get_by_label("Layout").click());
         shot("5-options-menu", page(), |h| h.get_by_label("Options").click());
         shot("6-help", Page { help_open: true, ..page() }, |_| {});
         shot("7-photo-menu", Page { menu: Some(menu(false, true)), ..page() }, |_| {});
