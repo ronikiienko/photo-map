@@ -240,6 +240,7 @@ pub fn show(ctx: &egui::Context, width: f32, bar: Bar, actions: &mut UiActions) 
                                     *bar.search = idea;
                                 }
                                 actions.ask = true;
+                                edit.response.request_focus(); // the box stays ready for the next search (Esc or a click on the map leaves it)
                             }
                         }
                     }
