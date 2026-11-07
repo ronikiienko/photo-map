@@ -77,7 +77,12 @@ pub fn fit(img: &RgbaImage, long: u32, enlarge: bool) -> RgbaImage {
     }
     let s = long as f32 / cur as f32;
     let (w, h) = (((img.width() as f32 * s).round() as u32).max(1), ((img.height() as f32 * s).round() as u32).max(1));
-    image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle)
+    // the same filter as image's Triangle, with SIMD (fast_image_resize): several times quicker; the pictures are opaque (load)
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer, images::{Image, ImageRef}};
+    let from = ImageRef::new(img.width(), img.height(), img.as_raw(), PixelType::U8x4).expect("the buffer is the photo's");
+    let mut to = Image::new(w, h, PixelType::U8x4);
+    Resizer::new().resize(&from, &mut to, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear)).use_alpha(false)).expect("same pixel type");
+    RgbaImage::from_raw(w, h, to.into_vec()).expect("w x h pixels")
 }
 
 #[cfg(test)]

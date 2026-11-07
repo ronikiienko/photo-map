@@ -60,8 +60,11 @@ pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Res
     let mut files = (0..LEVELS).map(|l| std::fs::File::create(level_file(l)).map(io::BufWriter::new)).collect::<io::Result<Vec<_>>>()?;
     let mut pages: Vec<Vec<u8>> = vec![Vec::new(); LEVELS];
     let done = AtomicUsize::new(0);
+    // where the time goes, for the log: reading the pictures, compressing the pages, halving the tiles
+    let (mut reading, mut compressing, mut halving) = (0f32, 0f32, 0f32);
     for first in (0..n).step_by(batch) {
         let end = (first + batch).min(n);
+        let t = Instant::now();
         // 1. every photo of the batch fitted to 32 px (longer side) in the corner of a 32 x 32 tile
         // `content`: how much of each tile is the photo (width, height); the rest of the tile is padding, which no average may use
         let mut tiles = vec![0u8; (end - first) * TOP * TOP * 4];
@@ -82,6 +85,9 @@ pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Res
                 step(format!("decoded {d} / {n}"));
             }
         });
+        let read_s = t.elapsed().as_secs_f32();
+        reading += read_s;
+        let (mut compress_s, mut halve_s) = (0f32, 0f32);
 
         // 2. from 32 px down: the tiles onto their level's page, a page compressed when it is full (or has the last photo); the
         // tiles halved for the next level
@@ -104,10 +110,13 @@ pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Res
                 }
             }
             if end % per_page == 0 || end == n {
+                let t = Instant::now();
                 files[level].write_all(&compress(px, rows(end - page_first)))?;
+                compress_s += t.elapsed().as_secs_f32();
                 px.clear();
             }
             if level > 0 {
+                let t = Instant::now();
                 // average 2 x 2 pixels: tiles of s px -> s/2 px, using only the photo's own pixels
                 let h = s / 2;
                 let mut next = vec![0u8; (end - first) * h * h * 4];
@@ -115,9 +124,13 @@ pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Res
                     *size = halve(&tiles[k * s * s * 4..(k + 1) * s * s * 4], s, *size, t);
                 });
                 tiles = next;
+                halve_s += t.elapsed().as_secs_f32();
             }
         }
+        step(format!("pictures {first}..{end}: read {read_s:.1}s, compressed {compress_s:.1}s, halved {halve_s:.2}s"));
+        (compressing, halving) = (compressing + compress_s, halving + halve_s);
     }
+    step(format!("in all: reading {reading:.1}s, compressing {compressing:.1}s, halving {halving:.2}s"));
     let tmp = bundle.join("pages.tmp");
     let mut file = io::BufWriter::new(std::fs::File::create(&tmp)?);
     for (level, part) in files.into_iter().enumerate() {
@@ -180,6 +193,80 @@ mod tests {
         }
         assert_eq!(tile, vec![255, 255, 255, 255]);
         assert_eq!(size, (1, 1));
+    }
+
+    /// How long baking a real map's pictures takes, and where the time goes (the log lines); and what making its videos' frames
+    /// small would cost (build::keep_frames: the 1024 px frame read, shrunk to 256 px and written as JPEG), timed on its posters.
+    #[test]
+    #[ignore = "reads a whole real map's photos: minutes"]
+    fn time_real_map() {
+        let bundle = crate::data_root().join("maps/takeout-tagged.photomap");
+        let data = crate::data::MapData::load(&bundle, &Progress::default()).expect("the map");
+        let pictures: Vec<PathBuf> = (0..data.pictures()).map(|i| data.picture_path(i)).collect();
+        let posters: Vec<PathBuf> = (0..data.n()).filter(|&i| data.photos[i].video.is_some()).map(|i| data.path(i)).collect();
+        let t = Instant::now();
+        posters.par_iter().for_each(|file| {
+            crate::build::small_frame(file).unwrap(); // None for a small video's: already a frame's size
+        });
+        let per = t.elapsed().as_secs_f32() / posters.len() as f32;
+        // its parts, each over all the posters: decoding (at 512 px), shrinking to 256, writing the JPEG
+        let side = crate::data::FRAME_SIDE;
+        let t = Instant::now();
+        let decoded: Vec<image::RgbaImage> = posters.par_iter().map(|f| photo::load_for(f, |_, _| side).unwrap()).collect();
+        let decode_ms = t.elapsed().as_secs_f32() * 1e3 / posters.len() as f32;
+        let t = Instant::now();
+        let small: Vec<image::RgbaImage> = decoded.par_iter().map(|img| photo::fit(img, side, false)).collect();
+        let fit_ms = t.elapsed().as_secs_f32() * 1e3 / posters.len() as f32;
+        let t = Instant::now();
+        small.par_iter().for_each(|img| {
+            libjpeg_turbo_rs::compress(img.as_raw(), img.width() as usize, img.height() as usize, libjpeg_turbo_rs::PixelFormat::Rgba, 85, libjpeg_turbo_rs::Subsampling::S420).unwrap();
+        });
+        let write_ms = t.elapsed().as_secs_f32() * 1e3 / posters.len() as f32;
+        eprintln!("frame parts: decode {decode_ms:.3} ms, shrink {fit_ms:.3} ms, write {write_ms:.3} ms (each on 12 threads)");
+        // the photos and posters' parts: reading the files, decoding them by kind (photo::load_for, for 32 px), fitting to 32 px
+        let items = &pictures[..data.n()];
+        let t = Instant::now();
+        let bytes: usize = items.par_iter().map(|f| std::fs::read(f).map_or(0, |b| b.len())).sum();
+        eprintln!("items' files read: {:.1}s for {} ({:.1} GB)", t.elapsed().as_secs_f32(), items.len(), bytes as f32 / 1e9);
+        // decoding and fitting, by kind: nothing kept (a PNG is decoded whole, and thousands of them don't fit in memory); the time
+        // each part took on each thread, added up, over the threads: the share of the wall time it had
+        let threads = rayon::current_num_threads() as f64;
+        for jpeg in [true, false] {
+            let group: Vec<&PathBuf> = items.iter().filter(|f| f.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_lowercase().as_str(), "jpg" | "jpeg")) == jpeg).collect();
+            let (decode_ns, fit_ns, mp) = (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0));
+            let t = Instant::now();
+            group.par_iter().for_each(|f| {
+                let t = Instant::now();
+                let Some(img) = photo::load_for(f, |_, _| TOP as u32) else { return };
+                decode_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                if let Ok((w, h)) = image::image_dimensions(f) {
+                    mp.fetch_add((w as u64 * h as u64) / 1000, Ordering::Relaxed);
+                }
+                let t = Instant::now();
+                photo::fit(&img, TOP as u32, true);
+                fit_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            });
+            let share = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed) as f64 / 1e9 / threads;
+            eprintln!(
+                "{} ({}, {:.1} MP on average): {:.1}s in all; reading and decoding ~{:.1}s, fitting ~{:.1}s",
+                if jpeg { "JPEGs" } else { "PNG and others" },
+                group.len(),
+                mp.load(Ordering::Relaxed) as f64 / 1000.0 / group.len().max(1) as f64,
+                t.elapsed().as_secs_f32(),
+                share(&decode_ns),
+                share(&fit_ns)
+            );
+        }
+        // one to look at
+        let sample = posters.iter().find_map(|f| crate::build::small_frame(f).unwrap()).unwrap();
+        std::fs::write(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".local/shots/frame-small.jpg"), sample).unwrap();
+        eprintln!("frames made small: {:.2} ms each on 12 threads ({} posters), {:.1}s for the map's {} frames", per * 1e3, posters.len(), per * data.frames.len() as f32, data.frames.len());
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".local/bake-timing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = Instant::now();
+        bake(&dir, &pictures, &Progress::default()).unwrap();
+        eprintln!("baked {} pictures in {:.1}s", pictures.len(), t.elapsed().as_secs_f32());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Baking a few photos writes the baked levels, in pages.rs's size.

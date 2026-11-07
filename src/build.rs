@@ -1133,12 +1133,7 @@ fn keep_frames(ctx: &mut Ctx, found: &[Found]) -> Result<Vec<PathBuf>, String> {
         .map(|dir| {
             let files = frame_files(dir);
             for file in &files {
-                let img = crate::photo::load(file).ok_or_else(|| format!("{}: can't read", file.display()))?;
-                if img.width().max(img.height()) > crate::data::FRAME_SIDE {
-                    let small = crate::photo::fit(&img, crate::data::FRAME_SIDE, false);
-                    let rgb = image::DynamicImage::ImageRgba8(small).to_rgb8();
-                    let mut bytes = Vec::new();
-                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85).encode_image(&rgb).map_err(|e| e.to_string())?;
+                if let Some(bytes) = small_frame(file)? {
                     write_atomic(file, &bytes).map_err(|e| e.to_string())?;
                 }
             }
@@ -1147,6 +1142,21 @@ fn keep_frames(ctx: &mut Ctx, found: &[Found]) -> Result<Vec<PathBuf>, String> {
         })
         .collect::<Result<_, String>>()?;
     Ok(frames.into_iter().flatten().collect())
+}
+
+/// A frame made small (FRAME_SIDE) as a JPEG, or None if it is that small already. A big JPEG is decoded at a fraction of its
+/// size (photo::load_for: twice FRAME_SIDE, then shrunk), not whole.
+pub(crate) fn small_frame(file: &Path) -> Result<Option<Vec<u8>>, String> {
+    let side = crate::data::FRAME_SIDE;
+    let img = crate::photo::load_for(file, |_, _| side).ok_or_else(|| format!("{}: can't read", file.display()))?;
+    if img.width().max(img.height()) <= side {
+        return Ok(None);
+    }
+    // written by libjpeg-turbo (several times quicker than image's encoder), 4:2:0 as cameras and ffmpeg write them
+    let small = crate::photo::fit(&img, side, false);
+    use libjpeg_turbo_rs::{PixelFormat, Subsampling};
+    let bytes = libjpeg_turbo_rs::compress(small.as_raw(), small.width() as usize, small.height() as usize, PixelFormat::Rgba, 85, Subsampling::S420).map_err(|e| e.to_string())?;
+    Ok(Some(bytes))
 }
 
 fn finish(ctx: &mut Ctx) -> Result<Flow, String> {
