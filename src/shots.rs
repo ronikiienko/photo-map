@@ -126,7 +126,7 @@ pub fn map_bundle(maps: &Path, name: &str, n: usize) -> PathBuf {
     let coarse: Vec<_> = clusters.iter().zip(centres).map(|((name, _), at)| label(name, at, 900.0, n / 6)).collect();
     let fine: Vec<_> = clusters.iter().zip(centres).flat_map(|((name, _), (x, y))| [label(&format!("{name}, left"), (x - 400.0, y), 350.0, n / 12), label(&format!("{name}, right"), (x + 400.0, y), 350.0, n / 12)]).collect();
     std::fs::write(bundle.join("regions.json"), serde_json::json!({ "levels": [coarse, fine] }).to_string()).unwrap();
-    crate::bake::bake(&bundle, &files, &crate::data::Progress::default()).unwrap();
+    crate::bake::bake(&bundle, &files, &|_| None, &crate::data::Progress::default()).unwrap();
     bundle
 }
 

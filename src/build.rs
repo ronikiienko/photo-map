@@ -7,7 +7,9 @@
 //!     files.json    the photos and videos found (scan), in order: they are the map's items
 //!     videos/<k>/   the kth video's frames (0.jpg, 1.jpg...), times.txt, video.json, facts.json, poster.jpg: a video with
 //!                   them is never redone. They become frames/<i>/.
-//!     pictures/     the vectors of the pictures (photos and videos' frames) in shards of SHARD (embed): a finished shard is never redone
+//!     pictures/     the vectors of the pictures (photos and videos' frames) in shards of SHARD (embed): a finished shard is never redone;
+//!                   beside each, the same pictures at 32 px (<k>.tiles, bake::tile_of), for the bake, which then deletes them
+//!     videos/<k>/small/  its frames at FRAME_SIDE, made by embed from the frames it decodes; put in their place by the bake
 //!     levels.bin    the regions of every level (regions), until they are named
 //! When the last stage is done the folder is renamed to maps/<name>.photomap.
 //! Each stage can be stopped at any time (pause, close) and run again; it picks up what it can.
@@ -812,6 +814,11 @@ fn shard_path(dir: &Path, k: usize) -> PathBuf {
     dir.join("pictures").join(format!("{k:05}.f16"))
 }
 
+/// The 32 px pictures of shard `k` (bake::TILE_BYTES each; all zeros for a picture not decoded: reused, or unreadable).
+fn tiles_path(dir: &Path, k: usize) -> PathBuf {
+    dir.join("pictures").join(format!("{k:05}.tiles"))
+}
+
 fn shard_len(pictures: usize, k: usize) -> usize {
     (pictures - k * SHARD).min(SHARD)
 }
@@ -872,24 +879,32 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     // the reused photos cost nothing: they count as done from the start, so the speed and the time left are about the pictures the model does
     ctx.progress(already + reused_count, total, if reused_count > 0 { format!("{reused_count} photos were embedded in earlier maps; embedding the rest") } else { "reading the photos and embedding them".to_string() });
 
-    // CPU side ahead of the GPU: the next shard's pictures are decoded and cut into patches while these are embedded
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<Option<(Prepared, image::RgbaImage)>>)>(1);
+    // CPU side ahead of the GPU: the next shard's pictures are decoded and cut into patches while these are embedded. Decoded
+    // anyway, each is made 32 px for the bake too (the shard's tiles), and a video's frame FRAME_SIDE (videos/<k>/small/), so that
+    // the bake reads none of them again
+    let is_frame: Arc<Vec<bool>> = Arc::new(owner.iter().map(|&i| frame_dirs[i].is_some()).collect());
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<Option<(Prepared, image::RgbaImage)>>, Vec<u8>)>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let producer = {
-        let (todo, pictures, stop, reused) = (todo.clone(), pictures.clone(), stop.clone(), reused.clone());
+        let (todo, pictures, stop, reused, is_frame) = (todo.clone(), pictures.clone(), stop.clone(), reused.clone(), is_frame.clone());
         std::thread::spawn(move || {
             for k in todo {
-                let read: Vec<Option<(Prepared, image::RgbaImage)>> = (k * SHARD..k * SHARD + shard_len(total, k))
+                let read: Vec<Option<(Prepared, image::RgbaImage, Vec<u8>)>> = (k * SHARD..k * SHARD + shard_len(total, k))
                     .into_par_iter()
                     .map(|p| {
                         if reused[p] || stop.load(Ordering::Relaxed) {
                             return None;
                         }
                         let img = crate::photo::load_for(&pictures[p], |w, h| spec.longest_side_needed(w, h))?;
-                        Some((spec.prepare(&img).ok()?, thumbnail(&img)))
+                        if is_frame[p] {
+                            small_frame_beside(&pictures[p], &img); // if it fails, the bake makes it small instead
+                        }
+                        Some((spec.prepare(&img).ok()?, thumbnail(&img), crate::bake::tile_of(&img)))
                     })
                     .collect();
-                if stop.load(Ordering::Relaxed) || tx.send((k, read)).is_err() {
+                let tiles: Vec<u8> = read.iter().flat_map(|r| r.as_ref().map_or_else(|| vec![0; crate::bake::TILE_BYTES], |r| r.2.clone())).collect();
+                let read = read.into_iter().map(|r| r.map(|(patches, thumb, _)| (patches, thumb))).collect();
+                if stop.load(Ordering::Relaxed) || tx.send((k, read, tiles)).is_err() {
                     return;
                 }
             }
@@ -899,7 +914,7 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
     let mut processed = 0usize; // pictures that were not reused, seen to so far
     let mut embedded = 0usize; // ... and of those, the ones that got a vector
     let mut outcome = Ok(Flow::Done);
-    'shards: for (k, mut read) in rx {
+    'shards: for (k, mut read, tiles) in rx {
         let first = k * SHARD;
         let mut rows = vec![0u8; read.len() * dim * 2]; // the shard's, f16; a picture that couldn't be read keeps a zero vector
         for (j, row) in rows.chunks_exact_mut(dim * 2).enumerate() {
@@ -943,6 +958,8 @@ fn embed_photos(ctx: &mut Ctx) -> Result<Flow, String> {
         }
         processed = seen_before + (first..first + read.len()).filter(|&p| !reused[p]).count();
         ctx.set_done(already + reused_count + processed);
+        // the tiles first: the vectors' shard is what says the shard is done
+        write_atomic(&tiles_path(&ctx.dir, k), &tiles).map_err(|e| e.to_string())?;
         write_atomic(&shard_path(&ctx.dir, k), &rows).map_err(|e| e.to_string())?;
     }
     stop.store(true, Ordering::Relaxed);
@@ -1102,6 +1119,35 @@ fn bake_pages(ctx: &mut Ctx) -> Result<Flow, String> {
     let found = read_found(&ctx.dir)?;
     let frames = keep_frames(ctx, &found)?;
     let pictures: Vec<PathBuf> = found.iter().map(|f| f.frames.as_ref().map_or_else(|| f.src.clone(), |d| ctx.dir.join(d).join("poster.jpg"))).chain(frames).collect();
+    // the 32 px pictures embed made: picture b here is picture `embedded[b]` there (a photo; a frame, there among its video's
+    // photo's place); a poster has none (it was picked after), nor has a photo reused from an earlier map: those are read
+    let mut embedded = vec![usize::MAX; pictures.len()];
+    let (mut at, mut frame) = (0, found.len());
+    for (i, f) in found.iter().enumerate() {
+        let count = f.frames.as_ref().map_or(1, |d| frame_files(&ctx.dir.join(d)).len());
+        match f.frames {
+            None => embedded[i] = at,
+            Some(_) => {
+                for j in 0..count {
+                    embedded[frame + j] = at + j;
+                }
+                frame += count;
+            }
+        }
+        at += count;
+    }
+    let shards = at.div_ceil(SHARD);
+    let tiles: Vec<Option<memmap2::Mmap>> = (0..shards)
+        .map(|k| {
+            let map = unsafe { memmap2::Mmap::map(&fs::File::open(tiles_path(&ctx.dir, k)).ok()?) }.ok()?;
+            (map.len() == shard_len(at, k) * crate::bake::TILE_BYTES).then_some(map)
+        })
+        .collect();
+    let ready = |b: usize| {
+        let p = *embedded.get(b).filter(|&&p| p != usize::MAX)?;
+        let at = p % SHARD * crate::bake::TILE_BYTES;
+        Some(tiles[p / SHARD].as_ref()?[at..at + crate::bake::TILE_BYTES].to_vec())
+    };
     let progress = crate::data::Progress::default();
     let finished = AtomicBool::new(false);
     let result = std::thread::scope(|scope| {
@@ -1112,11 +1158,15 @@ fn bake_pages(ctx: &mut Ctx) -> Result<Flow, String> {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
         });
-        let result = crate::bake::bake(&ctx.dir, &pictures, &progress);
+        let result = crate::bake::bake(&ctx.dir, &pictures, &ready, &progress);
         finished.store(true, Ordering::Relaxed);
         result
     });
     result.map_err(|e| e.to_string())?;
+    drop(tiles);
+    for k in 0..shards {
+        let _ = fs::remove_file(tiles_path(&ctx.dir, k));
+    }
     Ok(Flow::Done)
 }
 
@@ -1126,17 +1176,23 @@ fn keep_frames(ctx: &mut Ctx, found: &[Found]) -> Result<Vec<PathBuf>, String> {
     if videos.is_empty() {
         return Ok(Vec::new());
     }
-    ctx.progress(0, videos.len(), "making the videos' frames small");
+    ctx.progress(0, videos.len(), "putting the videos' small frames in place");
     let done = AtomicUsize::new(0);
     let frames: Vec<Vec<PathBuf>> = videos
         .par_iter()
         .map(|dir| {
             let files = frame_files(dir);
+            // embed made them small beside them (videos/<k>/small/); one it didn't make is made small here
+            let small_dir = dir.join("small");
             for file in &files {
-                if let Some(bytes) = small_frame(file)? {
+                let small = small_dir.join(file.file_name().expect("a frame's file"));
+                if small.is_file() {
+                    fs::rename(&small, file).map_err(|e| e.to_string())?;
+                } else if let Some(bytes) = small_frame(file)? {
                     write_atomic(file, &bytes).map_err(|e| e.to_string())?;
                 }
             }
+            let _ = fs::remove_dir_all(&small_dir);
             ctx.set_done(done.fetch_add(1, Ordering::Relaxed) + 1);
             Ok(files)
         })
@@ -1147,8 +1203,22 @@ fn keep_frames(ctx: &mut Ctx, found: &[Found]) -> Result<Vec<PathBuf>, String> {
 /// A frame made small (FRAME_SIDE) as a JPEG, or None if it is that small already. A big JPEG is decoded at a fraction of its
 /// size (photo::load_for: twice FRAME_SIDE, then shrunk), not whole.
 pub(crate) fn small_frame(file: &Path) -> Result<Option<Vec<u8>>, String> {
+    let img = crate::photo::load_for(file, |_, _| crate::data::FRAME_SIDE).ok_or_else(|| format!("{}: can't read", file.display()))?;
+    frame_jpeg(&img)
+}
+
+/// A frame's small copy (made from the frame embed decodes anyway) to videos/<k>/small/, beside it. Not made if it can't be written.
+fn small_frame_beside(file: &Path, img: &image::RgbaImage) {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else { return };
+    if let Ok(Some(bytes)) = frame_jpeg(img) {
+        let small = dir.join("small");
+        let _ = fs::create_dir_all(&small).and_then(|_| write_atomic(&small.join(name), &bytes));
+    }
+}
+
+/// A decoded frame as the map keeps it: FRAME_SIDE, a JPEG; None if it is that small already.
+fn frame_jpeg(img: &image::RgbaImage) -> Result<Option<Vec<u8>>, String> {
     let side = crate::data::FRAME_SIDE;
-    let img = crate::photo::load_for(file, |_, _| side).ok_or_else(|| format!("{}: can't read", file.display()))?;
     if img.width().max(img.height()) <= side {
         return Ok(None);
     }

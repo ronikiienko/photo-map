@@ -21,8 +21,27 @@ const TOP: usize = 1 << (LEVELS - 1);
 /// Rows compressed per task: a multiple of 4 (a BC7 block row).
 const STRIP: usize = 64;
 
-/// Bakes the pictures in these files, in this order (picture i: `pictures[i]`).
-pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Result<()> {
+/// A picture's 32 px as a build keeps it until the bake (build.rs makes it where the picture is decoded anyway): its width and
+/// height, then its pixels (RGB, in rows of TOP, from the top-left corner). All zeros: none, the picture is read from its file.
+pub const TILE_BYTES: usize = 2 + TOP * TOP * 3;
+
+/// A picture made 32 px (longer side; small ones enlarged), as TILE_BYTES.
+pub fn tile_of(img: &image::RgbaImage) -> Vec<u8> {
+    let img = photo::fit(img, TOP as u32, true);
+    let mut t = vec![0u8; TILE_BYTES];
+    (t[0], t[1]) = (img.width() as u8, img.height() as u8);
+    for (y, row) in img.rows().enumerate() {
+        for (x, p) in row.enumerate() {
+            let at = 2 + (y * TOP + x) * 3;
+            t[at..at + 3].copy_from_slice(&p.0[..3]);
+        }
+    }
+    t
+}
+
+/// Bakes the pictures in these files, in this order (picture i: `pictures[i]`). `ready(i)`: picture i's 32 px if a build made it
+/// already (TILE_BYTES; tile_of), else it is read from its file.
+pub fn bake(bundle: &Path, pictures: &[PathBuf], ready: &(dyn Fn(usize) -> Option<Vec<u8>> + Sync), progress: &Progress) -> io::Result<()> {
     let n = pictures.len();
     let started = Instant::now();
     let step = |msg: String| eprintln!("[{:5.0}s] {msg}", started.elapsed().as_secs_f32());
@@ -70,11 +89,15 @@ pub fn bake(bundle: &Path, pictures: &[PathBuf], progress: &Progress) -> io::Res
         let mut tiles = vec![0u8; (end - first) * TOP * TOP * 4];
         let mut content = vec![(0usize, 0usize); end - first];
         tiles.par_chunks_mut(TOP * TOP * 4).zip(content.par_iter_mut()).enumerate().for_each(|(k, (tile, size))| {
-            if let Some(img) = photo::load_for(&pictures[first + k], |_, _| TOP as u32) {
-                let img = photo::fit(&img, TOP as u32, true);
-                *size = (img.width() as usize, img.height() as usize);
-                for (y, row) in img.as_raw().chunks(img.width() as usize * 4).enumerate() {
-                    tile[y * TOP * 4..y * TOP * 4 + row.len()].copy_from_slice(row);
+            let made = ready(first + k).filter(|t| t[0] > 0);
+            if let Some(t) = made.or_else(|| photo::load_for(&pictures[first + k], |_, _| TOP as u32).map(|img| tile_of(&img))) {
+                *size = (t[0] as usize, t[1] as usize);
+                for y in 0..size.1 {
+                    for x in 0..size.0 {
+                        let (from, to) = (2 + (y * TOP + x) * 3, (y * TOP + x) * 4);
+                        tile[to..to + 3].copy_from_slice(&t[from..from + 3]);
+                        tile[to + 3] = 255;
+                    }
                 }
             }
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -264,7 +287,7 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".local/bake-timing");
         std::fs::create_dir_all(&dir).unwrap();
         let t = Instant::now();
-        bake(&dir, &pictures, &Progress::default()).unwrap();
+        bake(&dir, &pictures, &|_| None, &Progress::default()).unwrap(); // none made: every picture read, as for photos reused from earlier maps
         eprintln!("baked {} pictures in {:.1}s", pictures.len(), t.elapsed().as_secs_f32());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -281,7 +304,7 @@ mod tests {
                 file
             })
             .collect();
-        bake(&dir, &photos, &Progress::default()).unwrap();
+        bake(&dir, &photos, &|_| None, &Progress::default()).unwrap();
         let len = std::fs::metadata(dir.join("pages.bin")).unwrap().len() as usize;
         assert_eq!(len, crate::pages::baked_bytes(photos.len()));
         std::fs::remove_dir_all(&dir).unwrap();
