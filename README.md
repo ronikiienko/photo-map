@@ -1,14 +1,14 @@
 # photo-map
 
+> **A personal exploration project.** Made to explore what image embedding models can do for a photo
+> collection. It works, but it is rough and half-finished in places, and tested on Linux and macOS only.
+
 A desktop app that lays out a photo and video collection as a zoomable map: pictures that look alike sit together, regions
 of the map get names, and search works by words ("dog on a beach") or by example photos. The search is like Google Photos'
 search, but local, and on top of it the whole collection is one big map to wander around.
 
-A personal project exploring what image embedding models can do for a photo collection. It works, but it is not polished:
-some parts are rough or half-finished.
-
 Tested on Linux with an NVIDIA graphics card (an RTX 3050 Ti laptop, 4 GB). It also runs on the processor alone, slower.
-It was built and run once on an Apple silicon Mac. Windows is not supported.
+Apple silicon Macs work too. Windows is not supported.
 
 ## What it does
 
