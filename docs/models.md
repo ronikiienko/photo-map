@@ -60,7 +60,7 @@ So maps made before keep working. On a computer without these maps, `backends_ag
 
 ## Open
 
-- The Mac: the rest of the speeds (see docs/macos-models-task.md).
+- The Mac: the rest of the speeds.
 - `tools/onnx_fuse_attention.py`, `tools/onnx_trt_ready.py` and `tools/siglip_export.py` are no longer used by anything.
 - Report to ONNX Runtime: the Conv with `auto_pad = VALID` that its CoreML provider refuses, and that a `MatMul`'s weight is written
   into the CoreML program as text (1.1 GB for SigLIP 256, parsed at every load) where a `Gemm`'s goes to the binary weights file.
