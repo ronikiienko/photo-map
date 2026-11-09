@@ -46,8 +46,7 @@ or wherever `PHOTO_MAP_HOME` points.
 - `src/` the app: the viewer and the map builder (scan, embed, layout, regions, names, bake)
 - `vocab/` the words used to name regions (built into the program)
 - `assets/` the icon, ideas for searches, and `places.zip`, the towns that say where a photo was taken (built into the program)
-- `tests/` fixtures for the tests
-- `tools/` Python for preparing models (ONNX export and conversion), benchmarks and dataset fetchers
+- `tools/make_icon.py` draws the icon
 - `docs/` notes, including an experiment that was dropped: searching videos by their sound (`docs/audio.md`)
 
 ## License
