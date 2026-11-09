@@ -191,12 +191,19 @@ pub fn modal<T>(ctx: &egui::Context, id: &str, width: f32, title: Option<&str>, 
         .corner_radius(CornerRadius::from(RADIUS))
         .inner_margin(Margin::same(16))
         .shadow(egui::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(110) });
+    // taller than the window, the content scrolls under the title (the frame's margins and some room around it kept)
+    let room = ctx.content_rect().height() - 2.0 * 16.0 - 48.0;
     egui::Modal::new(egui::Id::new(id)).frame(frame).backdrop_color(Color32::from_black_alpha(130)).show(ctx, |ui| {
         ui.set_width(width);
+        let mut room = room;
         if let Some(title) = title {
+            let top = ui.cursor().top();
             ui.label(RichText::new(title).size(17.0));
             ui.add_space(6.0);
+            room -= ui.cursor().top() - top;
         }
-        content(ui)
+        // (a centred area offers only the room below its middle: min_scrolled_height keeps the whole height once it scrolls)
+        let room = room.max(80.0);
+        egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room).auto_shrink([false, true]).show(ui, content).inner
     })
 }

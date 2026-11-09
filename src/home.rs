@@ -1444,6 +1444,7 @@ mod shots {
         videos.rt.ffmpeg = None; // as on a computer without it
         shot("4b-new-map-videos", size, videos);
         shot("5-runtime", size, page(|h, _| h.runtime_open = true));
+        shot("5b-runtime-short", egui::vec2(1100.0, 420.0), page(|h, _| h.runtime_open = true));
         shot("6-models", size, page(|h, _| h.models_open = true));
         shot("7-examples", size, page(|h, _| h.examples_open = true));
         shot("7b-settings", size, page(|h, _| h.settings_open = true));
