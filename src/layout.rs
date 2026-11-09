@@ -1,5 +1,5 @@
 //! Laying out a map: where each photo goes so that similar photos are close. PCA to 50 dimensions, each photo's 10 nearest
-//! neighbours (by cosine, among the photos of its nearest cells: crate::cells), then UMAP down to 2 (umap-rs), scaled to 0 ... WORLD on both axes - what src/photomap.py did.
+//! neighbours (by cosine, among the photos of its nearest cells: crate::cells), then UMAP down to 2 (umap-rs), scaled to 0 ... WORLD on both axes.
 
 use crate::cells::{gather, Cells, Rows};
 use crate::data::WORLD;

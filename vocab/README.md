@@ -1,6 +1,6 @@
 # Label vocabulary
 
-Plain English labels for naming groups of photos (`src/name_regions.py`). Files written in rounds by a language model,
+Plain English labels for naming the regions of a map (`src/naming.rs`, which builds these files into the program). Files written in rounds by a language model,
 each round less common than the one before: `curated2_round1.txt` (the 1000 most basic things in photos), `round2` (the next
 1000), `round3` (the next 1000). Added later: `round1b` (more basic phrases, counted as common as round 1), `round4` and `round5`
 (rarer than round 3); most of what was written for them was already in the earlier rounds, so only about 380 phrases are new. Format: a `# general` block (broad labels: animal, vehicle, food) then a `# specific` block
@@ -8,8 +8,9 @@ each round less common than the one before: `curated2_round1.txt` (the 1000 most
 
 Style: lowercase, singular, 1-3 words, no proper names, no adjectives on their own, plain words, no filler.
 
-The round counts as how common a phrase is: `src/name_regions.py` adds `COMMON * log10(1000 | 100 | 10)` to a phrase's score.
-Edit the files freely; `vocab_embed.py` re-embeds them when they change (vectors are cached in data/vocab/, not in git).
+The round counts as how common a phrase is: `src/naming.rs` adds `COMMON * log10(common)` to a phrase's score, common being
+1000 / 100 / 10 / 1 / 0.1 for rounds 1 (and 1b) / 2 / 3 / 4 / 5. Edit the files freely: the app embeds them again when they
+change (the vectors are cached per model in the app's `.cache/vocab/`, not in git).
 
 ## How the lists were made
 

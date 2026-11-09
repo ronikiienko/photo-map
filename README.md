@@ -18,7 +18,7 @@ Apple silicon Macs work too. Windows is not supported.
 - Videos are searched by what is in them: frames are taken through each video (one every couple of seconds) and embedded
   like photos; a video matches by its best frame, which it then shows, and playing starts there.
 - Labels: the map is split into regions at several zoom levels, coarse ones holding finer ones, and each region is named
-  automatically from about 4,500 phrases: the phrase whose vector is nearest the region's average (less the whole map's
+  automatically from about 3,400 phrases: the phrase whose vector is nearest the region's average (less the whole map's
   average, so a region is named by what sets it apart). Zoomed out, a few broad names; zooming in, finer ones fade in.
 - Search by words or by one or more photos; the matches light up on the map. Filters by name, camera, date and place.
 - Zoom from the whole collection down to a single photo; videos play in place, with sound.

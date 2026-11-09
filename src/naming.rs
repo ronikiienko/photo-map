@@ -1,5 +1,5 @@
-//! Naming regions: a plain-English label for each region of a map (what src/name_regions.py did). The label vocabulary (vocab/*.txt,
-//! about 4,500 phrases) is embedded with the same model as the photos (and kept per model: another model's vectors are no use here); a region's average vector, less the whole map's average, is
+//! Naming regions: a plain-English label for each region of a map. The label vocabulary (vocab/*.txt,
+//! about 3,400 phrases) is embedded with the same model as the photos (and kept per model: another model's vectors are no use here); a region's average vector, less the whole map's average, is
 //! compared with every phrase's vector, and the best match - with a small bonus for common phrases - is the region's name.
 
 use rayon::prelude::*;
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(
             list.len(),
             3385,
-            "same as the Python list (data/vocab/curated2.json)"
+            "every phrase once"
         );
         assert_eq!(
             list.iter()

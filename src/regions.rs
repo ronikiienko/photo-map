@@ -1,4 +1,4 @@
-//! Regions: connected areas of the map at several zoom levels, finer ones inside coarser ones (what src/photomap.py's cluster() did).
+//! Regions: connected areas of the map at several zoom levels, finer ones inside coarser ones.
 //! The photos are first grouped into small cells (k-means on their positions, about 8 photos each); neighbouring cells (Delaunay) are
 //! merged, always the pair that keeps the groups most compact first (Ward), into one tree; cutting the tree at several heights gives
 //! the levels. Every region is one connected piece of the map.

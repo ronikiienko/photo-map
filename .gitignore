@@ -1,20 +1,2 @@
-# built, downloaded or made here - never committed
 target/
-maps/
-runtime/
-.cache/
-.cargo-home/
-.venv/
-__pycache__/
-
-# data and scratch
-data/
-idk/
-index/
-logs/
-.local/
-reports/
 .DS_Store
-
-# notes for coding agents, kept local
-CLAUDE.md
