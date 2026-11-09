@@ -3,14 +3,29 @@
 > **A personal exploration project.** Made to explore what image embedding models can do for a photo
 > collection. It works, but it is rough and half-finished in places, and tested on Linux and macOS only.
 
-<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/e63ab61b-5d9b-4e96-bd40-f109de73eaa2" />
-<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/ebd6ae7f-cb23-40b0-baaf-2c6193fed750" />
-<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/81cd41a7-dc71-404d-9829-8eae65c96193" />
-<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/b22e4b4f-f476-4b95-a7b0-be8eeab889bd" />
-<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/6fa56986-3765-4eb6-8aa4-8e9fd83d05e6" />
-<img width="2737" height="1709" alt="image" src="https://github.com/user-attachments/assets/365bf287-0514-435b-bd10-ac2775807e37" />
+<img width="3840" height="2160" alt="The whole map: Places365, about 1.8 million photos, with its regions named." src="https://github.com/user-attachments/assets/e63ab61b-5d9b-4e96-bd40-f109de73eaa2" />
 
+*The whole map: Places365, about 1.8 million photos, with its regions named.*
 
+<img width="3840" height="2160" alt="Zoomed in on one corner of it: temples and pagodas." src="https://github.com/user-attachments/assets/ebd6ae7f-cb23-40b0-baaf-2c6193fed750" />
+
+*Zoomed in on one corner of it: temples and pagodas.*
+
+<img width="3840" height="2160" alt="A word search, 'dog in the snow': the 220 matches light up on the map and are listed best first." src="https://github.com/user-attachments/assets/81cd41a7-dc71-404d-9829-8eae65c96193" />
+
+*A word search, "dog in the snow": the 220 matches light up on the map and are listed best first.*
+
+<img width="3840" height="2160" alt="The Groups layout: each photo goes to the phrase it fits best (film photo, scanned print, drone photo, phone photo), the strongest matches in the middle." src="https://github.com/user-attachments/assets/b22e4b4f-f476-4b95-a7b0-be8eeab889bd" />
+
+*The Groups layout: each photo goes to the phrase it fits best (film photo, scanned print, drone photo, phone photo), the strongest matches in the middle.*
+
+<img width="3840" height="2160" alt="A path between two photos: 233 photos, each like the one before, its route drawn across the map." src="https://github.com/user-attachments/assets/6fa56986-3765-4eb6-8aa4-8e9fd83d05e6" />
+
+*A path between two photos: 233 photos, each like the one before, its route drawn across the map.*
+
+<img width="2737" height="1709" alt="Close up, with a photo's menu: a path from here, photos like this one, its file." src="https://github.com/user-attachments/assets/365bf287-0514-435b-bd10-ac2775807e37" />
+
+*Close up, with a photo's menu: a path from here, photos like this one, its file.*
 
 A desktop app that lays out a photo and video collection as a zoomable map: pictures that look alike sit together, regions
 of the map get names, and search works by words ("dog on a beach") or by example photos. The search is like Google Photos'
